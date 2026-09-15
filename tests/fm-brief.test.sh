@@ -821,6 +821,27 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+test_ship_and_scout_teach_reading_stored_text_as_data() {
+  local home kind id brief
+  home="$TMP_ROOT/stored-text-as-data-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-stored-text-as-data-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "gh api repos/<owner>/<repo>/pulls/<n> --jq .body" "$brief" \
+      "$kind brief did not tell workers how to read a PR body back as data"
+    assert_grep "never reconstruct it by unescaping rendered output" "$brief" \
+      "$kind brief did not forbid recovering text from rendered output"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds teach reading stored text as data"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -946,6 +967,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_teach_reading_stored_text_as_data
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

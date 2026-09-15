@@ -381,6 +381,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   A tool's rendered view is for reading, not for recovering text: it escapes and reflows what it shows. To get a PR body
+   (or any stored text) back as data, read it straight to a file with \`gh api repos/<owner>/<repo>/pulls/<n> --jq .body\`;
+   never reconstruct it by unescaping rendered output.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -468,6 +471,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   A tool's rendered view is for reading, not for recovering text: it escapes and reflows what it shows. To get a PR body
+   (or any stored text) back as data, read it straight to a file with \`gh api repos/<owner>/<repo>/pulls/<n> --jq .body\`;
+   never reconstruct it by unescaping rendered output.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
