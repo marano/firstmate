@@ -1,0 +1,22 @@
+## gh-axi pr list --state all --limit 3 --fields body  (rendered surface #2, corrected flags)
+exit=0 lines=6
+literal backslash-n sequences: 33
+first 300 chars:
+count: 1
+pull_requests[1]{number,title,state,author,draft,review,body}:
+  1,"Brief scaffold: read a PR body as data, never by unescaping a rendered view",closed,marano,no,none,"## What changed\n\nGenerated briefs now teach a worker how to read stored text back **as data**, so a rendered view is neve
+
+## gh-axi pr view 1 --full  (rendered surface #1) escape analysis
+literal backslash-n sequences: 33
+em-dash shown raw (U+2014) count: 7   shown as — count: 0
+body line excerpt around the first em-dash:
+n the corrupted body were the ones typed fresh in a heredoc — clean where hand-written, mangled where
+
+## Reproduce the PR 331 worker step on each surface: body.encode().decode('unicode_escape')
+gh api --jq .body, used as data (no unescape)              em-dash intact=5  mojibake 'â' bytes=0
+                                                           sample: 'ones typed fresh in a heredoc — clean where hand-wr'
+gh-axi pr view --full body, regex-extracted + unicode_escape em-dash intact=0  mojibake 'â' bytes=5
+                                                           sample: 'ones typed fresh in a heredoc â\x80\x94 clean where hand-wr'
+gh-axi pr list --fields body line + unicode_escape         em-dash intact=0  mojibake 'â' bytes=5
+                                                           sample: 'ones typed fresh in a heredoc â\x80\x94 clean where hand-wr'
+python exit=0

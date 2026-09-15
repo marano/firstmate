@@ -1,0 +1,74 @@
+## Live brief generation (bash), FM_HOME=$H
+
+$ FM_HOME=$H bin/fm-brief.sh ship-no-mistakes firstmate --mode no-mistakes
+scaffolded: $H/data/ship-no-mistakes/brief.md (ship, mode=no-mistakes; replace {TASK} and {FIRSTMATE_SPEC})
+exit=0  (112 lines)
+
+$ FM_HOME=$H bin/fm-brief.sh ship-direct-pr firstmate --mode direct-PR
+scaffolded: $H/data/ship-direct-pr/brief.md (ship, mode=direct-PR; replace {TASK} and {FIRSTMATE_SPEC})
+exit=0  (83 lines)
+
+$ FM_HOME=$H bin/fm-brief.sh ship-local-only firstmate --mode local-only
+scaffolded: $H/data/ship-local-only/brief.md (ship, mode=local-only; replace {TASK} and {FIRSTMATE_SPEC})
+exit=0  (84 lines)
+
+$ FM_HOME=$H bin/fm-brief.sh scout firstmate --scout
+scaffolded: $H/data/scout/brief.md (scout; replace {TASK} and {FIRSTMATE_SPEC})
+exit=0  (72 lines)
+
+$ FM_HOME=$H bin/fm-brief.sh secondmate firstmate --secondmate
+scaffolded: $H/data/secondmate/brief.md (secondmate charter; replace {TASK})
+exit=0  (69 lines)
+
+## Rule 3 as rendered in each brief (rule 3 through the first line of rule 4)
+--- ship-no-mistakes ---
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
+   straight to a file with `gh api repos/<owner>/<repo>/pulls/<n> --jq .body`. Its `pr view --full` and `pr list --fields body`
+   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+4. Report status by appending one line:
+--- ship-direct-pr ---
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
+   straight to a file with `gh api repos/<owner>/<repo>/pulls/<n> --jq .body`. Its `pr view --full` and `pr list --fields body`
+   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+4. Report status by appending one line:
+--- ship-local-only ---
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
+   straight to a file with `gh api repos/<owner>/<repo>/pulls/<n> --jq .body`. Its `pr view --full` and `pr list --fields body`
+   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+4. Report status by appending one line:
+--- scout ---
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
+   straight to a file with `gh api repos/<owner>/<repo>/pulls/<n> --jq .body`. Its `pr view --full` and `pr list --fields body`
+   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+4. Report status by appending one line:
+--- secondmate ---
+(this scaffold carries no gh-axi rule; gh-axi/gh api mentions: 0)
+
+## Ship (all three modes) and scout exception lines in step?
+identical: ship-no-mistakes == ship-direct-pr
+identical: ship-no-mistakes == ship-local-only
+identical: ship-no-mistakes == scout
+
+## Rendering checks on the exception lines (what the worker actually reads)
+--- ship-no-mistakes ---
+exception lines present: 3
+escaped backticks leaked into the brief: 0
+backtick-quoted commands: `gh api repos/<owner>/<repo>/pulls/<n> --jq .body` `pr view --full` `pr list --fields body` 
+placeholders kept literal: 1
+line lengths: 115 127 119 
+--- scout ---
+exception lines present: 3
+escaped backticks leaked into the brief: 0
+backtick-quoted commands: `gh api repos/<owner>/<repo>/pulls/<n> --jq .body` `pr view --full` `pr list --fields body` 
+placeholders kept literal: 1
+line lengths: 115 127 119 
+
+## Rule 4 status line still interpolates the real status path after the insert
+ship-no-mistakes:    `echo "{state}: {one short line}" >> '$H/state/ship-no-mistakes.status'`
+ship-direct-pr:    `echo "{state}: {one short line}" >> '$H/state/ship-direct-pr.status'`
+ship-local-only:    `echo "{state}: {one short line}" >> '$H/state/ship-local-only.status'`
+scout:    `echo "{state}: {one short line}" >> '$H/state/scout.status'`

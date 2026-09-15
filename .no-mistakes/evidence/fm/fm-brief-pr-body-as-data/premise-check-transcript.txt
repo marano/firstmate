@@ -1,0 +1,33 @@
+NOTE: the two 'literal backslash-n' counts below (0) came from a mis-quoted grep and the 'pr list' call used a field gh-axi rejects; premise-check-unescape.txt is the corrected analysis (33 escapes on each rendered surface, --fields body alone).
+
+## remotes
+origin	git@github.com:marano/firstmate.git (fetch)
+origin	git@github.com:marano/firstmate.git (push)
+
+## gh repo resolved from this worktree
+marano/firstmate https://github.com/marano/firstmate
+
+## gh api repos/marano/firstmate/pulls/1 --jq .body  (data read rule 3 prescribes)
+exit=0 bytes=    2831
+non-ASCII code points in body (char => count):
+  U+2014 — => 5
+first 3 lines containing a non-ASCII char, raw:
+The cause was established by evidence, not inference: the pipeline wrote the body clean (the worker's own pre-edit capture has all 39 markers intact), a different PR through the same pipeline kept all 44 of its markers, and the only clean sections in the corrupted body were the ones typed fresh in a heredoc — clean where hand-written, mangled where round-tripped.
+Review additionally caught that naming `gh api` without naming the exception left rule 3 self-contradictory: a worker resolving the conflict in gh-axi's favour has a discoverable native path, `pr list --fields body`, which returns the body as a single escaped line that *reads* like data — and unescaping it is precisely the step that corrupted PR 331. Both lossy surfaces are now named.
+A sibling instance of the same round-trip pattern exists for backlog task bodies (`docs/architecture.md`, the stow skill) and is **not** covered here — it was ruled out of scope for this PR and filed separately, since a mangled task body is home-local and cannot reach a PR description through that path.
+
+## gh-axi pr view 1 --full  (rendered surface #1)
+exit=0 bytes=    3203
+lines with literal backslash-n or backslash-u escapes: 0
+same 3 marker lines as they appear there:
+9:  body: "## What changed\n\nGenerated briefs now teach a worker how to read stored text back **as data**, so a rendered view is never used to recover a PR bod
+10:  comment_count: 1 — use --comments to see full comments
+11:  review_count: 0 — use --reviews to see full reviews
+
+## gh-axi pr list --state all --limit 3 --fields number,body  (rendered surface #2)
+exit=2 bytes=     119 lines=       2
+literal backslash-n sequences: 0
+first 400 chars:
+error: "Unknown field(s): number. Available: body, createdAt, labels, mergedAt, milestone, url"
+code: VALIDATION_ERROR
+

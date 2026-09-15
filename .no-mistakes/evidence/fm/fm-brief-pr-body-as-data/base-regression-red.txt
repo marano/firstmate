@@ -1,0 +1,16 @@
+## Base tree = git archive 1bdfd8c (pre-fix bin/fm-brief.sh) + the NEW tests/fm-brief.test.sh from e7d28b9
+bin/fm-brief.sh mentions of gh api at base: 0
+
+## Pre-fix rule 3 as a worker would have read it (ship, --mode no-mistakes)
+scaffold exit=0
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+4. Report status by appending one line:
+
+## $ /bin/bash tests/fm-brief.test.sh   (new test file against pre-fix script; expect a red on the new test)
+ok - fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse
+ok - fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting
+ok - fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly
+ok - fm-brief.sh: custom pause verb renders in every scaffold
+ok - fm-brief.sh: ship and scout scaffolds teach validation-round pauses
+not ok - ship brief did not tell workers how to read a PR body back as data
+exit=1

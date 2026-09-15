@@ -1,0 +1,5 @@
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
+   straight to a file with `gh api repos/<owner>/<repo>/pulls/<n> --jq .body`. Its `pr view --full` and `pr list --fields body`
+   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+4. Report status by appending one line:
