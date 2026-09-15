@@ -836,8 +836,14 @@ test_ship_and_scout_teach_reading_stored_text_as_data() {
     brief="$home/data/$id/brief.md"
     assert_grep "gh api repos/<owner>/<repo>/pulls/<n> --jq .body" "$brief" \
       "$kind brief did not tell workers how to read a PR body back as data"
-    assert_grep "never reconstruct it by unescaping rendered output" "$brief" \
-      "$kind brief did not forbid recovering text from rendered output"
+    assert_grep "One exception: gh-axi has no data-mode body read" "$brief" \
+      "$kind brief did not name the data read as the explicit exception to the gh-axi rule"
+    assert_grep "pr view --full" "$brief" \
+      "$kind brief did not name pr view --full as rendered text"
+    assert_grep "pr list --fields body" "$brief" \
+      "$kind brief did not name pr list --fields body as rendered text"
+    assert_grep "never a source to recover a body from by unescaping it" "$brief" \
+      "$kind brief did not forbid recovering a body by unescaping rendered output"
   done
   pass "fm-brief.sh: ship and scout scaffolds teach reading stored text as data"
 }
