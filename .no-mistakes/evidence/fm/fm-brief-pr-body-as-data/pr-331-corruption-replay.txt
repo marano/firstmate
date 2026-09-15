@@ -1,0 +1,15 @@
+PR 4578 (kunchenguid/firstmate) Risk Assessment marker, per read surface:
+  gh api repos/<o>/<r>/pulls/4578 --jq .body  (data read to file) : '✅ Low: The change'
+  gh-axi pr view 4578 --full                  (rendered, raw)     : '\\n✅ Low: The change'
+  gh-axi pr list --head <ref> --fields body   (rendered, raw)     : '\\n✅ Low: The change'
+
+Replay of the worker's PR 331 recovery step on each rendered surface:
+  body.encode().decode('unicode_escape')
+  pr view --full after unescape        : 'â\x9c\x85 Low: The change'
+  pr list --fields body after unescape : 'â\x9c\x85 Low: The change'
+
+Result:
+  checkmark intact in gh api data read             : True
+  checkmark intact after unescaping pr view --full : False | mojibake 'â' present: True
+  checkmark intact after unescaping pr list body   : False | mojibake 'â' present: True
+  literal backslash-n sequences in pr list output  : 27 (looks like data; unescaping it is the corrupting step)
