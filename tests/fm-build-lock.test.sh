@@ -213,10 +213,21 @@ for marker in CI GITHUB_ACTIONS BUILDKITE; do
   assert_equals "ran-under-$marker" "$CI_OUT" "the command must still run under $marker"
 done
 
-env -u FM_BUILD_LOCK_CI FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" true >/dev/null 2>&1
+# This suite itself runs on CI, where CI and GITHUB_ACTIONS are real ambient
+# markers - not just FM_BUILD_LOCK_CI - so "without a CI marker" and "CI=false"
+# below must clear every marker fm_build_lock_is_ci checks, or they pass
+# vacuously here and fail for real once actually run under CI.
+CI_MARKER_UNSET_ARGS=(-u FM_BUILD_LOCK_CI)
+for marker in CI CONTINUOUS_INTEGRATION BUILD_NUMBER GITHUB_ACTIONS GITLAB_CI \
+  BUILDKITE CIRCLECI TRAVIS APPVEYOR TF_BUILD TEAMCITY_VERSION JENKINS_URL \
+  BITBUCKET_BUILD_NUMBER DRONE CODEBUILD_BUILD_ID; do
+  CI_MARKER_UNSET_ARGS+=(-u "$marker")
+done
+
+env "${CI_MARKER_UNSET_ARGS[@]}" FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" true >/dev/null 2>&1
 expect_code 2 $? "without a CI marker the same run must reach the lock and refuse the unusable root"
 
-env -u FM_BUILD_LOCK_CI CI=false FM_BUILD_LOCK_DIR="$CI_ROOT_OK" "$SCRIPT" sh -c 'exit 4'
+env "${CI_MARKER_UNSET_ARGS[@]}" CI=false FM_BUILD_LOCK_DIR="$CI_ROOT_OK" "$SCRIPT" sh -c 'exit 4'
 expect_code 4 $? "CI=false must not be read as CI"
 assert_equals 0 "$(lock_artifacts "$CI_ROOT_OK")" "CI=false must take and fully release the lock"
 
