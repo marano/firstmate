@@ -61,7 +61,7 @@ else
   echo "wrapper requires trailing --session $SESSION" >&2
   exit 98
 fi
-exec env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" "\${args[@]}"
+exec env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" \${args[@]+"\${args[@]}"}
 EOF
 chmod +x "$FAKEBIN/herdr"
 
