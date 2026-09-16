@@ -66,13 +66,13 @@ if [ "\$n" -ge 2 ] && [ "\${args[\$((n-2))]}" = --session ]; then
   args=("\${args[@]:0:\$((n-2))}")
 else
   [ "\${HERDR_SESSION:-}" = "\$session" ] || { echo "wrapper requires the isolated lab session" >&2; exit 98; }
-  for arg in "\${args[@]}"; do
+  for arg in \${args[@]+"\${args[@]}"}; do
     case "\$arg" in
       --session|--session=*) echo "wrapper refused non-trailing session flag" >&2; exit 99 ;;
     esac
   done
 fi
-PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
+PATH="\$real_path" exec "\$helper" run "\$session" \${args[@]+"\${args[@]}"}
 EOF
 chmod +x "$FAKEBIN/herdr"
 

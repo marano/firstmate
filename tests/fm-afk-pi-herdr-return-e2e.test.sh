@@ -102,7 +102,7 @@ if [ "\$n" -ge 2 ] && [ "\${args[\$((n-2))]}" = --session ]; then
 else
   [ "\${HERDR_SESSION:-}" = "\$session" ] || { echo 'wrapper requires isolated session' >&2; exit 98; }
 fi
-PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
+PATH="\$real_path" exec "\$helper" run "\$session" \${args[@]+"\${args[@]}"}
 EOF
 chmod +x "$FAKEBIN/herdr"
 

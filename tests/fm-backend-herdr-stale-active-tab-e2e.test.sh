@@ -41,7 +41,7 @@ if [ "${#args[@]}" -ge 2 ] \
   && [ "${args[$last]}" = "$HERDR_LAB_SESSION" ]; then
   unset "args[$last]" "args[$flag]"
 fi
-set -- "${args[@]}"
+set -- ${args[@]+"${args[@]}"}
 for arg in "$@"; do
   case "$arg" in --session|--session=*) exit 9 ;; esac
 done

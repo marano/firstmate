@@ -64,7 +64,7 @@ if [ "${#args[@]}" -ge 2 ] \
    && [ "${args[$last_index]}" = "${HERDR_LAB_SESSION:?}" ]; then
   unset "args[$last_index]" "args[$flag_index]"
 fi
-set -- "${args[@]}"
+set -- ${args[@]+"${args[@]}"}
 for arg in "$@"; do
   case "$arg" in
     --session|--session=*)
