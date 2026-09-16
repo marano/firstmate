@@ -277,8 +277,12 @@ This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisio
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-So background the drive call and poll \`no-mistakes axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
-Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape.
+So drive with \`no-mistakes axi run --wait\` and answer gates with \`no-mistakes axi respond --wait\`; \`--wait\` bounds the hold so the call returns a structured result within your harness's command cap instead of running out the clock.
+An elapsed wait is a normal structured return, not a failure: reattach by issuing the same drive call again.
+Never run a \`no-mistakes axi status\` loop to watch a run progress; a single \`axi status\` call as a diagnostic, such as rule 7's daemon-error check, stays allowed.
+If your harness offers a native wait-without-model-calls facility, such as Claude Code's \`Monitor\` tool, use it in place of a reattach loop.
+Any residual sleep-and-recheck fallback must sleep at least 120 seconds inside a single call, never spin.
+Never poll the PR's own check status yourself with \`gh-axi\`, \`gh\`, or an equivalent - the pipeline's own CI step already reports the CI-ready point that ends your job.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 

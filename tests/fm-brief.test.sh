@@ -376,6 +376,48 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# The no-mistakes DOD must tell the worker to drive with --wait and reattach on
+# an elapsed wait, never to background the drive call and poll `axi status`
+# from a separate call - that shape was measured causing 862 `axi status` calls
+# and 177 `gh-axi pr view` calls in one 119-minute run (roughly a third of the
+# fleet's two-day token spend). A test that only grepped for a phrase one of
+# the fixed sentences happens to contain would pass on either wording, so this
+# asserts the new reattach instruction is present AND the old background-and-poll
+# instruction is gone.
+test_no_mistakes_dod_waits_instead_of_polling() {
+  local home id brief
+  home="$TMP_ROOT/wait-not-poll-home"
+  mkdir -p "$home/data"
+  id="brief-wait-not-poll-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'drive with `no-mistakes axi run --wait` and answer gates with `no-mistakes axi respond --wait`' "$brief" \
+    "no-mistakes DOD must instruct driving and responding with --wait"
+  assert_grep "An elapsed wait is a normal structured return, not a failure: reattach by issuing the same drive call again." "$brief" \
+    "no-mistakes DOD must say an elapsed wait is a normal reattach point, not a failure"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'Never run a `no-mistakes axi status` loop to watch a run progress' "$brief" \
+    "no-mistakes DOD must forbid a status-polling loop"
+  assert_grep "a single \`axi status\` call as a diagnostic" "$brief" \
+    "no-mistakes DOD must still allow rule 7's single diagnostic axi status call"
+  assert_grep "such as Claude Code's \`Monitor\` tool" "$brief" \
+    "no-mistakes DOD must mention a native wait-without-model-calls facility as an alternative"
+  assert_grep "Any residual sleep-and-recheck fallback must sleep at least 120 seconds inside a single call, never spin." "$brief" \
+    "no-mistakes DOD must bound a residual sleep-and-recheck fallback to 120s and forbid spinning"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'Never poll the PR'"'"'s own check status yourself with `gh-axi`, `gh`, or an equivalent' "$brief" \
+    "no-mistakes DOD must forbid polling the PR's own check status"
+
+  assert_no_grep "So background the drive call and poll" "$brief" \
+    "no-mistakes DOD must not reintroduce the background-and-poll instruction"
+  assert_no_grep "Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape." "$brief" \
+    "no-mistakes DOD must not reintroduce the background-and-poll fallback"
+  pass "fm-brief.sh: no-mistakes DOD teaches --wait reattach instead of background-and-poll"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -961,6 +1003,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_waits_instead_of_polling
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
