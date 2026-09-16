@@ -1796,6 +1796,12 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
+# This function does not itself know whether the crew's LAST status line is still
+# a `paused:` declaration - fm-watch.sh's pause_state_class is the reconciler that
+# combines that fact with this verdict, and for a still-current declaration a
+# `working` verdict backed by an active no-mistakes run (source: run-step)
+# CONFIRMS the declared wait rather than superseding it, so it takes the long
+# pause cadence instead of the short wedge one.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.

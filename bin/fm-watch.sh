@@ -1126,8 +1126,32 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
+#
+# A THIRD case is recovered the opposite way: crew_absorb_class's `working` verdict
+# for a running/fixing/ci no-mistakes run (source: run-step) is not automatically
+# new undeclared work. A crew's own no-mistakes round is one of the bounded waits
+# `paused:` exists to name (bin/fm-brief.sh's own worker-facing examples list it),
+# so while the declared pause is still the crew's LAST status line (the gate above
+# already confirmed no newer event replaced it) and its agent is confirmed alive,
+# a `working` verdict CONFIRMS the declared wait rather than contradicting it -
+# printed as `paused` so the caller takes the long PAUSE_RESURFACE_SECS cadence
+# instead of arming the short wedge timer on a pane that is idle by design (the
+# 2026-09-15 fix-round incident: three benign flavors of this, all wedge-escalated
+# every ~4 minutes). This is NOT a free pass: a dead agent still falls through to
+# the ordinary `working` return below so the existing short wedge cadence keeps
+# catching a worker that died mid-round, and the confirmation itself is re-verified
+# against fresh crew state every STALE_ESCALATE_SECS (recheck_file's `working`
+# content below, distinct from the dead-agent recheck's timestamp-only content, so
+# the fast path can tell which reconciliation is cached without re-reading crew
+# state or agent liveness on every poll). The bounding ceiling past that is
+# handle_paused_stale's own re-surface: once the round's own step transitions off
+# working (done/failed/parked), the next classification no longer reaches this
+# branch, and independently the declared pause still re-surfaces once every
+# PAUSE_RESURFACE_SECS for a recheck even if the run never stops reporting
+# working - the same ceiling every other declared pause already gets, not a new
+# unbounded one.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file class agent_alive kind mode
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -1141,6 +1165,14 @@ pause_state_class() {  # <window> <task>
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    mode=$(cat "$recheck_file" 2>/dev/null || true)
+    if [ "$mode" = working ]; then
+      # Cached run-step confirmation still fresh: no agent-liveness read needed,
+      # a dead agent would have been caught the last time this was verified and
+      # will be caught again once the cache goes stale.
+      printf 'paused'
+      return
+    fi
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
@@ -1154,6 +1186,14 @@ pause_state_class() {  # <window> <task>
   fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
+    if [ "$kind" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        printf 'working' > "$recheck_file"
+        printf 'paused'
+        return
+      fi
+    fi
     rm -f "$recheck_file"
     printf 'working'
     return
