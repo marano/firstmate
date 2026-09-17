@@ -586,6 +586,20 @@ assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }
 
+# assert_exact_line <file> <line> <msg>: <file> must contain <line> as a whole
+# line, compared byte for byte - the same claim as `grep -Fx`, made without
+# grep. macOS ships BSD grep 2.6.0, which aborts with "grep: out of memory"
+# (exit 2) for any -F pattern longer than 5116 bytes, so an assertion about a
+# long line reports the line missing when it is in fact present and exact.
+# Use this whenever the expected line can be arbitrarily long.
+assert_exact_line() {
+  FM_ASSERT_EXACT_LINE=$2 awk '
+    BEGIN { want = ENVIRON["FM_ASSERT_EXACT_LINE"] }
+    $0 == want { found = 1 }
+    END { if (found) exit 0; exit 1 }
+  ' "$1" || fail "$3"
+}
+
 # assert_absent <path> <msg>: path must not exist.
 assert_absent() {
   [ ! -e "$1" ] || fail "$2"

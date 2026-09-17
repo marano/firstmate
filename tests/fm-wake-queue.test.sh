@@ -797,14 +797,17 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
+  # These expected lines are as long as the status lines they annotate - the
+  # oversized one is over 20 KB - so they are compared with assert_exact_line
+  # rather than `grep -Fx`, which cannot compile a pattern that long on macOS.
   expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
-    || fail "the oversized unread status line was truncated or omitted"
+  assert_exact_line "$out" "$expected" \
+    "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
     expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
-    grep -Fx "$expected" "$out" >/dev/null \
-      || fail "readable status many-$i was truncated or omitted"
+    assert_exact_line "$out" "$expected" \
+      "readable status many-$i was truncated or omitted"
     i=$((i + 1))
   done
   if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then
