@@ -10,6 +10,7 @@
 #   fm-test-run.sh --changed [--base <git-ref>]
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
+#   fm-test-run.sh --lane stock-bash                (the stock-Bash 3.2 lane)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -23,6 +24,7 @@
 #   fm-test-run.sh --list-concurrent-safe-families
 #   fm-test-run.sh --concurrent-safe-family-jobs-max <name>
 #   fm-test-run.sh --list-lanes
+#   fm-test-run.sh --list-stock-bash-exclusions
 #   fm-test-run.sh --check-coverage
 #
 # Aggregation (no suite execution):
@@ -46,6 +48,14 @@
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
 #                   dedicated required Herdr lane owns that coverage)
+#   --require-ok-count <script>=<count>
+#                   fail the run unless <script> printed exactly <count> lines
+#                   starting "ok - " (repeatable). Exit status alone cannot see a
+#                   script that stops printing cases while still exiting 0, so a
+#                   lane that cares about a script's case count pins it here
+#                   instead of re-running that script under a separate shell
+#                   loop. A pinned script that gate-skips fails too: a skip is
+#                   not the count that was pinned.
 #   --fail-on-gate-skip <token>
 #                   after each script, fail the run if any output line contains
 #                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
@@ -130,6 +140,10 @@
 # parallel_unhinted (the number of members missing a parallel hint).
 # These sums exclude unhinted members and are estimates, not measured job wall
 # times. Missing parallel hints are reported without failing this guard.
+# It also reports stock_bash (how many tests the stock-bash lane selects) and
+# stock_bash_excluded (how many the exclusion table names), and refuses an
+# exclusion that names a missing test, carries no admissible reason, or claims a
+# cost at or under STOCK_BASH_MAX_SCRIPT_MS.
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -176,6 +190,7 @@ JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
+REQUIRE_OK_COUNTS=()
 JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
@@ -454,6 +469,7 @@ list_known_lanes() {
     i=$((i + 1))
   done
   printf '%s\n' real-herdr-gated
+  printf '%s\n' stock-bash
 }
 
 # Exact proven-isolated candidate set (same paths as
@@ -646,6 +662,131 @@ list_portable_serial() {
     if is_proven_isolated_script "$s"; then
       continue
     fi
+    printf '%s\n' "$s"
+  done < <(all_repo_tests)
+}
+
+# Test scripts kept OUT of the stock-bash lane, each with the reason it cannot
+# be run there. The lane is everything else, so a newly added test is covered by
+# default: the guard this lane replaced was an allowlist of three files, and an
+# allowlist is exactly how a job keeps its name while losing its coverage.
+#
+# A reason is a property of the script, not a convenience. Only two kinds are
+# admissible, and --check-coverage refuses an entry naming a file that no longer
+# exists so the table cannot rot into a silent exclusion:
+#   cost:<ms>  measured stock-bash runtime, which must be ABOVE
+#              STOCK_BASH_MAX_SCRIPT_MS. The macOS runner bills at ten times the
+#              Linux rate, so the lane buys breadth with a per-script bound
+#              rather than paying the whole suite's long tail.
+#   incompat:  the script cannot run under stock Bash on this runner at all.
+#
+# The bound is a FLOOR on what "cost" may claim, not an automatic evictor: a
+# script above it stays in the lane unless it is listed here, which is how the
+# files this job already covered keep their coverage. Removing one of those is a
+# coverage regression, not a cost saving.
+#
+# Gate-skipping scripts are deliberately NOT excluded. They cost milliseconds,
+# the runner names each one and its reason in the log, and that record is how
+# this lane reports the coverage it cannot deliver instead of hiding it.
+list_stock_bash_exclusions() {
+  cat <<'EOF'
+tests/fm-afk-inject-e2e.test.sh	cost:35609
+tests/fm-afk-launch.test.sh	cost:41076
+tests/fm-agy-harness.test.sh	cost:64547
+tests/fm-arm-pretool-check.test.sh	cost:38690
+tests/fm-backend-herdr.test.sh	cost:75135
+tests/fm-backend-orca.test.sh	cost:43220
+tests/fm-backend.test.sh	cost:36016
+tests/fm-backlog-atomicity.test.sh	cost:115986
+tests/fm-backlog-handoff.test.sh	cost:65693
+tests/fm-bearings-board.test.sh	cost:45692
+tests/fm-bootstrap.test.sh	cost:176920
+tests/fm-busy-adapter-wiring.test.sh	cost:38919
+tests/fm-captain-hold-lifecycle.test.sh	cost:240045
+tests/fm-cd-pretool-check.test.sh	cost:38736
+tests/fm-claude-stop-autoarm.test.sh	cost:44392
+tests/fm-control-relaunch.test.sh	cost:106513
+tests/fm-control.test.sh	cost:37225
+tests/fm-crew-state.test.sh	cost:43247
+tests/fm-cursor-harness.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
+tests/fm-cursor-primary.test.sh	cost:65399
+tests/fm-daemon.test.sh	cost:46372
+tests/fm-fleet-sync.test.sh	cost:64518
+tests/fm-harness-liveness-drift-live-e2e.test.sh	cost:66361
+tests/fm-harness-precedence.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
+tests/fm-home-summary-refresh.test.sh	cost:42611
+tests/fm-inactive-reconcile.test.sh	cost:41680
+tests/fm-lint.test.sh	cost:156636
+tests/fm-muse-harness.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
+tests/fm-omp-harness.test.sh	cost:53578
+tests/fm-pending-reply.test.sh	cost:42048
+tests/fm-pi-branch-extension.test.sh	cost:91395
+tests/fm-pi-watch-extension.test.sh	cost:56962
+tests/fm-pr-check-security.test.sh	cost:240057
+tests/fm-pr-merge.test.sh	cost:240050
+tests/fm-procevent-when.test.sh	cost:31506
+tests/fm-procevent.test.sh	cost:240038
+tests/fm-public-followup.test.sh	cost:92615
+tests/fm-remote-backlog-handoff.test.sh	cost:102452
+tests/fm-remote-doctor.test.sh	cost:31343
+tests/fm-remote-job.test.sh	cost:64343
+tests/fm-remote-reply.test.sh	cost:80863
+tests/fm-remote-secondmate-lifecycle-e2e.test.sh	cost:240035
+tests/fm-remote-secondmate-parent-binding.test.sh	cost:58404
+tests/fm-remote-secondmate-trace-context.test.sh	cost:107754
+tests/fm-remote-transport-lanes.test.sh	cost:48142
+tests/fm-secondmate-harness.test.sh	cost:240043
+tests/fm-secondmate-liveness.test.sh	cost:42071
+tests/fm-secondmate-reconcile.test.sh	cost:115755
+tests/fm-secondmate-restart.test.sh	cost:72408
+tests/fm-secondmate-safety.test.sh	cost:100827
+tests/fm-secondmate-sync.test.sh	cost:86754
+tests/fm-send-remote-delivery.test.sh	cost:38022
+tests/fm-send-resolve-key.test.sh	cost:38677
+tests/fm-session-start.test.sh	cost:240042
+tests/fm-sessionstart-nudge.test.sh	cost:72524
+tests/fm-spawn-dispatch-profile.test.sh	cost:219810
+tests/fm-spawn-pool-base-freshen.test.sh	cost:98209
+tests/fm-startup-network.test.sh	cost:74689
+tests/fm-task-delivery.test.sh	cost:31860
+tests/fm-task-inbox.test.sh	cost:34876
+tests/fm-teardown-endpoint-safety.test.sh	cost:54421
+tests/fm-teardown.test.sh	cost:57524
+tests/fm-test-run.test.sh	cost:179218
+tests/fm-trace-context-spawn.test.sh	cost:67096
+tests/fm-turnend-guard.test.sh	cost:65992
+tests/fm-vendor-auth-probe.test.sh	cost:48388
+tests/fm-voice-relay.test.sh	cost:31718
+tests/fm-wake-drain-outcome-backstop.test.sh	cost:33734
+tests/fm-wake-queue.test.sh	cost:79740
+tests/fm-watch-arm.test.sh	cost:72925
+tests/fm-watch-recovery-loop.test.sh	cost:60342
+tests/fm-watch-triage.test.sh	cost:240043
+tests/fm-watcher-lock.test.sh	cost:53686
+tests/fm-x-mode.test.sh	cost:56141
+EOF
+}
+
+# Per-script stock-bash runtime floor for a cost exclusion, in milliseconds.
+# No script leaves the lane without an entry above; this only refuses a cost
+# reason that is not actually about cost.
+STOCK_BASH_MAX_SCRIPT_MS=30000
+
+# The stock-bash lane: every tests/*.test.sh except the exclusions above.
+# Derived rather than enumerated so a newly added test is guarded by default.
+list_stock_bash() {
+  local s excluded
+  # Read the table once rather than per candidate: this runs on every --list,
+  # every lane selection, and twice inside --check-coverage.
+  excluded=$(list_stock_bash_exclusions | cut -f1)
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    case "$excluded" in
+      "$s") continue ;;
+      "$s"$'\n'*) continue ;;
+      *$'\n'"$s") continue ;;
+      *$'\n'"$s"$'\n'*) continue ;;
+    esac
     printf '%s\n' "$s"
   done < <(all_repo_tests)
 }
@@ -951,6 +1092,13 @@ select_lane() {
       select_family real-herdr-gated
       found=1
       ;;
+    stock-bash)
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        add_script "$s"
+        found=1
+      done < <(list_stock_bash)
+      ;;
     *)
       die "unknown lane '$want' (see --list-lanes)"
       ;;
@@ -959,7 +1107,7 @@ select_lane() {
 }
 
 run_coverage_guard() {
-  local tmp missing extra a b shard unhinted serial_total
+  local tmp missing extra a b shard unhinted serial_total line stock_path stock_reason stock_ms
   local p1_ms p1_unhinted p2_ms p2_unhinted parallel_max_ms parallel_imbalance_ms
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
@@ -1090,6 +1238,65 @@ run_coverage_guard() {
     fi
   fi
 
+  # The stock-bash lane is everything minus a named-reason exclusion table. A
+  # stale entry would silently shrink the lane while the table still reads as a
+  # deliberate, reviewed choice, so an entry naming a file that no longer exists
+  # fails here rather than quietly widening the gap this lane exists to close.
+  : >"$tmp/stock_bash_bad_reason"
+  : >"$tmp/stock_bash_cheap"
+  : >"$tmp/stock_bash_missing"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$(printf '\t')"*) ;;
+      *) printf '%s\n' "$line" >>"$tmp/stock_bash_bad_reason"; continue ;;
+    esac
+    stock_path=${line%%"$(printf '\t')"*}
+    stock_reason=${line#*"$(printf '\t')"}
+    case "$stock_reason" in
+      cost:*)
+        # A cost exclusion has to be justified by the bound it claims, or
+        # "cost" becomes the reason anything inconvenient leaves the lane.
+        stock_ms=${stock_reason#cost:}
+        case "$stock_ms" in
+          ''|*[!0-9]*) printf '%s\n' "$line" >>"$tmp/stock_bash_bad_reason" ;;
+          *)
+            if [ "$stock_ms" -le "$STOCK_BASH_MAX_SCRIPT_MS" ]; then
+              printf '%s\n' "$line" >>"$tmp/stock_bash_cheap"
+            fi
+            ;;
+        esac
+        ;;
+      incompat:?*) ;;
+      *) printf '%s\n' "$line" >>"$tmp/stock_bash_bad_reason" ;;
+    esac
+    [ -f "$ROOT/$stock_path" ] || printf '%s\n' "$stock_path" >>"$tmp/stock_bash_missing"
+  done < <(list_stock_bash_exclusions)
+  if [ -s "$tmp/stock_bash_missing" ]; then
+    log "coverage guard: stock-bash exclusions name tests that no longer exist:"
+    cat "$tmp/stock_bash_missing" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if [ -s "$tmp/stock_bash_cheap" ]; then
+    log "coverage guard: stock-bash cost exclusions at or under ${STOCK_BASH_MAX_SCRIPT_MS}ms are not cost exclusions:"
+    cat "$tmp/stock_bash_cheap" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if [ -s "$tmp/stock_bash_bad_reason" ]; then
+    log "coverage guard: stock-bash exclusions need a <path><TAB>cost:<ms>|incompat:<why> reason:"
+    cat "$tmp/stock_bash_bad_reason" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  list_stock_bash | LC_ALL=C sort -u >"$tmp/stock_bash"
+  if [ ! -s "$tmp/stock_bash" ]; then
+    log "coverage guard: the stock-bash lane selected no tests"
+    rm -rf "$tmp"
+    return 1
+  fi
+
   # Keep these estimates derived from the membership and hint owners; see the
   # header for the distinction between packed weights and measured job time.
   read -r p1_ms p1_unhinted <<<"$(list_portable_parallel_1 | portable_parallel_lane_weight)"
@@ -1099,7 +1306,7 @@ run_coverage_guard() {
   parallel_imbalance_ms=$((p1_ms - p2_ms))
   [ "$parallel_imbalance_ms" -ge 0 ] || parallel_imbalance_ms=$((-parallel_imbalance_ms))
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_unhinted=%s herdr=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$parallel_max_ms" \
@@ -1108,7 +1315,9 @@ run_coverage_guard() {
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
     "$PORTABLE_SERIAL_SHARDS" \
     "$unhinted" \
-    "$(wc -l <"$tmp/herdr" | tr -d ' ')"
+    "$(wc -l <"$tmp/herdr" | tr -d ' ')" \
+    "$(wc -l <"$tmp/stock_bash" | tr -d ' ')" \
+    "$(list_stock_bash_exclusions | grep -c . || true)"
   rm -rf "$tmp"
   return 0
 }
@@ -1892,6 +2101,19 @@ while [ "$#" -gt 0 ]; do
       LIST_CONCURRENT_SAFE_FAMILIES=1
       shift
       ;;
+    --require-ok-count)
+      [ "$#" -gt 1 ] || die "--require-ok-count requires <script>=<count>"
+      REQUIRE_OK_COUNTS+=("$2")
+      shift 2
+      ;;
+    --require-ok-count=*)
+      REQUIRE_OK_COUNTS+=("${1#--require-ok-count=}")
+      shift
+      ;;
+    --list-stock-bash-exclusions)
+      list_stock_bash_exclusions
+      exit 0
+      ;;
     --concurrent-safe-family-jobs-max)
       [ "$#" -gt 1 ] || die "--concurrent-safe-family-jobs-max requires a family name"
       concurrent_safe_family_jobs_max "$2"
@@ -2270,9 +2492,30 @@ family_bump() {
   mv "$tmp" "$FAMILIES_TSV"
 }
 
+# Required "ok - " count for <script>, or empty when the caller pinned none.
+required_ok_count_for() {
+  local want=$1 entry path count
+  for entry in ${REQUIRE_OK_COUNTS[@]+"${REQUIRE_OK_COUNTS[@]}"}; do
+    path=${entry%%=*}
+    count=${entry#*=}
+    case "$entry" in
+      *=*) ;;
+      *) die "--require-ok-count needs <script>=<count>, got '$entry'" ;;
+    esac
+    case "$count" in
+      ''|*[!0-9]*) die "--require-ok-count needs a whole count, got '$entry'" ;;
+    esac
+    if [ "$(normalize_script_path "$path")" = "$want" ]; then
+      printf '%s\n' "$count"
+      return 0
+    fi
+  done
+  return 1
+}
+
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
-  local base family expected gate_skip gate_reason fail_delta
+  local base family expected gate_skip gate_reason fail_delta want_ok got_ok
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
@@ -2291,6 +2534,14 @@ record_script_result() {
     # A capability skip is the runner's only record of what this host could not
     # exercise, so name it rather than leaving a silent green.
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
+  fi
+
+  if want_ok=$(required_ok_count_for "$script"); then
+    got_ok=$(grep -c '^ok - ' "$out" || true)
+    if [ "$got_ok" -ne "$want_ok" ]; then
+      log "required ok-count mismatch in $script: expected $want_ok, got $got_ok"
+      rc=1
+    fi
   fi
 
   printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \

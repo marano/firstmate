@@ -146,7 +146,7 @@ tests-portable-parallel-1 10
 tests-portable-parallel-2 10
 tests-portable-serial 30
 tests-herdr 75
-macos-stock-bash 10
+macos-stock-bash 30
 CAPS
   pass "the already-measured lane bounds are unchanged"
 }

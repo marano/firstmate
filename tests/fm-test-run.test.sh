@@ -1736,7 +1736,82 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_stock_bash_lane_is_every_test_minus_named_exclusions() {
+  local listed excluded all rejoined
+  listed=$("$RUNNER" --list --lane stock-bash | LC_ALL=C sort)
+  [ -n "$listed" ] || fail "--lane stock-bash selected nothing"
+  excluded=$("$RUNNER" --list-stock-bash-exclusions | awk -F'\t' 'NF { print $1 }' | LC_ALL=C sort)
+  all=$("$RUNNER" --list --all | LC_ALL=C sort)
+  # The lane is derived, not enumerated: a newly added test is guarded by
+  # default, and the only way out is a named entry in the exclusion table.
+  rejoined=$(printf '%s\n%s\n' "$listed" "$excluded" | grep -v '^$' | LC_ALL=C sort -u)
+  [ "$rejoined" = "$all" ] \
+    || fail "stock-bash lane plus its exclusions must equal tests/*.test.sh"
+  [ -z "$(printf '%s\n%s\n' "$listed" "$excluded" | grep -v '^$' | LC_ALL=C sort | uniq -d)" ] \
+    || fail "a test cannot be both in the stock-bash lane and excluded from it"
+  pass "stock-bash lane: every tests/*.test.sh except the named exclusions"
+}
+
+test_stock_bash_exclusions_carry_a_checkable_reason() {
+  local line path reason
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$(printf '\t')"*) ;;
+      *) fail "stock-bash exclusion needs a tab-separated reason: $line" ;;
+    esac
+    path=${line%%"$(printf '\t')"*}
+    reason=${line#*"$(printf '\t')"}
+    assert_present "$ROOT/$path" "stock-bash excludes a test that does not exist: $path"
+    case "$reason" in
+      cost:[0-9]*|incompat:?*) ;;
+      *) fail "stock-bash exclusion reason must be cost:<ms> or incompat:<why>: $line" ;;
+    esac
+  done < <("$RUNNER" --list-stock-bash-exclusions)
+  "$RUNNER" --check-coverage >/dev/null \
+    || fail "--check-coverage must accept the shipped stock-bash exclusion table"
+  pass "stock-bash exclusions: each names a real test and an admissible reason"
+}
+
+test_require_ok_count_catches_a_shrinking_case_list() {
+  local tmp f out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-okcount.XXXXXX")
+  f="$tmp/cases.test.sh"
+  out="$tmp/out.txt"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - one"
+echo "ok - two"
+exit 0
+SH
+  chmod +x "$f"
+  "$RUNNER" --require-ok-count "$f=2" "$f" >"$out" 2>&1 \
+    || { rm -rf "$tmp"; fail "a matching ok-count must pass"; }
+  # Exit status alone cannot see a script that stops printing cases while still
+  # exiting 0; that is the failure the pin exists to catch.
+  if "$RUNNER" --require-ok-count "$f=3" "$f" >"$out" 2>&1; then
+    rm -rf "$tmp"
+    fail "a short ok-count must fail the run even though the script exited 0"
+  fi
+  grep -q 'required ok-count mismatch' "$out" \
+    || { rm -rf "$tmp"; fail "the mismatch must name itself: $(cat "$out")"; }
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr not found"
+exit 0
+SH
+  if "$RUNNER" --require-ok-count "$f=2" "$f" >"$out" 2>&1; then
+    rm -rf "$tmp"
+    fail "a pinned script that gate-skips must fail: a skip is not the pinned count"
+  fi
+  rm -rf "$tmp"
+  pass "--require-ok-count: pins a script's case count against a silent green"
+}
+
 test_list_all_exact_suite_coverage
+test_stock_bash_lane_is_every_test_minus_named_exclusions
+test_stock_bash_exclusions_carry_a_checkable_reason
+test_require_ok_count_catches_a_shrinking_case_list
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
