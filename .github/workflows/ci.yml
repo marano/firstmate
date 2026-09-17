@@ -390,16 +390,53 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
           if-no-files-found: warn
 
+  # Stock-Bash lane. GitHub's Linux runners are Bash 5, so every construct that
+  # only breaks on Bash 3.2 - the version macOS still ships as /bin/bash - is
+  # invisible to every other job here. This lane exists to make that class fail
+  # loudly, and it is only worth its name while it actually RUNS test code: a
+  # `bash -n` parse sweep cannot see an unbound-variable expansion, so the parse
+  # sweep below is a floor, not the coverage.
+  # bin/fm-test-run.sh owns which tests this lane selects and names every test it
+  # leaves out with the reason; docs/verification/stock-bash-lane.md records the
+  # measurement behind those reasons and what this lane still cannot cover.
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash 3.2 behavior lane
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Budget, not a hang tripwire: the lane's per-script cost rule in
+    # bin/fm-test-run.sh is what keeps it inside this wall clock, and macOS
+    # runner minutes bill at ten times the Linux rate.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - name: Run snapshot consumers with stock Bash
+      # Pin ONLY Bash. The previous job restricted PATH to /bin:/usr/bin:... to
+      # reach stock Bash, which also pinned every other tool to a macOS platform
+      # binary - /usr/bin/python3 is 3.9 with no tomllib, and /usr/bin/jq is a
+      # platform binary some guards specifically refuse. Tests then failed for
+      # reasons that have nothing to do with the shell under test. A shim
+      # directory in front of the runner's normal PATH varies the one thing this
+      # lane is about and leaves every other tool modern.
+      - name: Put stock /bin/bash in front of PATH
+        run: |
+          set -eu
+          shim="$RUNNER_TEMP/stock-bash-bin"
+          mkdir -p "$shim"
+          ln -sf /bin/bash "$shim/bash"
+          printf '%s\n' "$shim" >> "$GITHUB_PATH"
+      # The lint suites need the repository's pinned linters, exactly as the
+      # portable lanes install them; without these two the suites fail for a
+      # missing tool rather than for anything about the shell under test.
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned actionlint
+        run: |
+          set -eu
+          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run the stock-bash lane under stock Bash
         shell: /bin/bash {0}
-        env:
-          PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
         run: |
           set -eu
           case "$BASH_VERSION" in
@@ -408,6 +445,17 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+
+          # bin/fm-test-run.sh runs every selected script with a bare `bash`, so
+          # this is a stock-Bash lane only while `bash` resolves to stock Bash. A
+          # runner image change or a later tool install could put Bash 5 in
+          # front, and the job would keep its name while testing the wrong
+          # shell - the exact failure this lane was widened to stop. Refuse.
+          child_version=$(bash -c 'printf %s "$BASH_VERSION"')
+          case "$child_version" in
+            3.2.57*) ;;
+            *) echo "::error::selected tests would run under Bash $child_version, not stock 3.2.57"; exit 1 ;;
+          esac
 
           shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
           bin/fm-lint.sh --list-files > "$shell_inventory"
@@ -422,33 +470,49 @@ jobs:
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
+          # Prepending the npm prefix could itself shadow the shim, so re-check.
+          child_version=$(bash -c 'printf %s "$BASH_VERSION"')
+          case "$child_version" in
+            3.2.57*) ;;
+            *) echo "::error::npm prefix displaced stock Bash: selected tests would run under $child_version"; exit 1 ;;
+          esac
 
-          snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
-          printf '%s\n' "$snapshot_output"
-          snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 18 ] || {
-            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
-            exit 1
-          }
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          # --require-ok-count keeps the exact case counts this job pinned while
+          # it ran only three files by hand. Exit status alone cannot see a
+          # script that stops printing cases while still exiting 0, and widening
+          # the lane must not drop an assertion it already made.
+          # A per-script bound well clear of the slowest member turns a HUNG
+          # script into a named failure instead of an unattributed job
+          # cancellation at the cap.
+          bin/fm-test-run.sh --lane stock-bash \
+            --per-script-timeout-secs 600 \
+            --require-ok-count tests/fm-fleet-snapshot-view.test.sh=18 \
+            --require-ok-count tests/fm-bearings-snapshot.test.sh=59 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-stock-bash.json"
 
-          bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
-          printf '%s\n' "$bearings_output"
-          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 59 ] || {
-            echo "::error::expected 59 Bearings tests, got $bearings_count"
-            exit 1
-          }
-
-          # The full public-followup suite is not a stock-bash snapshot; run only
-          # the empty-lock register regression under real /bin/bash 3.2.
+          # tests/fm-public-followup.test.sh is cost-excluded from the lane: the
+          # whole suite measures 92.6s here. This job already covered ONE test
+          # inside it, so that single regression is retained by name rather than
+          # dropped with the file. Losing it would be a coverage regression, not
+          # a cost saving.
           pf_output=$(FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32 \
-            /bin/bash tests/fm-public-followup.test.sh)
+            bash tests/fm-public-followup.test.sh)
           printf '%s\n' "$pf_output"
           pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
           [ "$pf_count" -eq 1 ] || {
             echo "::error::expected 1 public-followup bash 3.2 register regression, got $pf_count"
             exit 1
           }
+      - name: Upload stock-bash timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # The measured per-script durations the lane's cost exclusions are
+          # justified against. Refresh that table from this artifact.
+          name: fm-test-timing-stock-bash
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-stock-bash.json
+          if-no-files-found: warn
 
   invariants:
     name: Repo invariants

@@ -477,6 +477,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/stock-bash-lane.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },
