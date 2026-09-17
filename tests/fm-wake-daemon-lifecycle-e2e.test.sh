@@ -24,6 +24,12 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
+# The daemon no longer substitutes a guessed supervisor pane when none is
+# resolved, so the units below that exercise INJECTION pin one explicitly. The
+# units that own pane DISCOVERY clear it again with a prefix assignment.
+FM_SUPERVISOR_TARGET="%fm-test-supervisor-pane"
+export FM_SUPERVISOR_TARGET
+
 # Source the daemon's pure functions (its main loop is guarded out under sourcing).
 if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   export FM_TEST_DAEMON_SOURCED=1

@@ -26,6 +26,12 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# The daemon no longer substitutes a guessed supervisor pane when none is
+# resolved, so the units below that exercise INJECTION pin one explicitly. The
+# units that own pane DISCOVERY clear it again with a prefix assignment.
+FM_SUPERVISOR_TARGET="%fm-test-supervisor-pane"
+export FM_SUPERVISOR_TARGET
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -2585,6 +2591,28 @@ test_fm_send_exits_nonzero_on_unproven_submit() {
 # from make_supercase answers display-message for any target, so it reproduces
 # exactly that condition: the guess would validate. The daemon must refuse
 # before it ever gets there.
+# The same no-guess rule one layer down: injection itself. fm_super_main now
+# refuses to start without a resolved pane, so this only fires in a sourced or
+# test context - but typing an escalation into a guessed pane is the exact
+# silent loss above, so it must refuse rather than default.
+test_inject_refuses_without_a_resolved_supervisor_pane() {
+  local dir state sent capture
+  dir=$(make_supercase inject-no-supervisor-pane)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty composer: nothing else would block the type
+  afk_enter "$state"
+
+  if PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=tmux \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    inject_msg "escalation that must not be typed anywhere" "$state"; then
+    fail "inject_msg accepted an unresolved supervisor pane"
+  fi
+  [ ! -s "$sent" ] || fail "inject_msg typed into a guessed pane: $(cat "$sent")"
+  pass "inject_msg refuses rather than typing an escalation into a guessed pane"
+}
+
 test_daemon_refuses_a_guessed_supervisor_pane() {
   local dir state out status=0
   dir=$(make_supercase daemon-no-supervisor-pane)
@@ -2965,6 +2993,7 @@ test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_daemon_refuses_a_guessed_supervisor_pane
+test_inject_refuses_without_a_resolved_supervisor_pane
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

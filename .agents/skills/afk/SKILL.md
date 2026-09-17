@@ -48,6 +48,8 @@ Hold-for-return is the default and the only reach profile this release records: 
    - **Every other harness** (codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
    Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
+   Both also refuse, arming nothing, when no addressable supervisor pane resolves; the confirmed record survives, so relay the refusal as the concrete blocker - firstmate is not running in a pane the escalations can reach - and hold the posture without a daemon exactly as on Pi.
+   That shape is safe because the refusal leaves no `state/.afk`, so ordinary Stop-hook supervision keeps running instead of standing down for a daemon that was never delivering.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
    On Pi nothing changes about arming: the supervision session's own cycle continues.
