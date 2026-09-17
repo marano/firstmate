@@ -65,6 +65,22 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#   capacity: what is actually occupying a concurrency slot, and what is free.
+#     The cap on work in progress is a captain preference applied by firstmate's
+#     judgement, not something any script enforces; this object exists so that
+#     judgement has a correct input rather than a count of open task records.
+#     occupies_capacity, projected onto every tasks[] row, is the single rule:
+#     a secondmate is a persistent agent and never occupies a work slot, a task
+#     whose current state is terminal (done or failed) has finished its work and
+#     does not either, and everything else - including an unreadable state - does.
+#     An unknown state counts as occupied deliberately: a slot wrongly believed
+#     free over-dispatches, while one wrongly believed busy only delays.
+#     in_progress/in_progress_ids are that count and its ids. finished[] names
+#     each task whose work is over while its record stays open awaiting landing
+#     or cleanup, with the PR to land where one is recorded; those hold a record,
+#     not a slot. queued_ready/queued_ready_ids are the queued backlog items with
+#     no unresolved blocker and no hold of any kind, so a slot coming free and
+#     work waiting for it are legible in one read.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -1999,13 +2015,35 @@ jq -n \
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
-   {
+   def terminal_state($t): ((($t.current_state.state) // "unknown") | . == "done" or . == "failed");
+   def occupies_capacity($t):
+     if $t.kind == "secondmate" then false
+     else (terminal_state($t) | not) end;
+   def queued_ready($r):
+     ($r.structured == true)
+     and ($r.state == "queued")
+     and ((($r.unresolved_blocker_ids) // []) | length) == 0
+     and (($r.hold_kind) // null) == null
+     and (($r.hold_reason) // null) == null
+     and (($r.hold_bucket) // null) == null;
+   ($tasks | map(. + {backlog:backlog_by_id(.id),occupies_capacity:occupies_capacity(.)})) as $tasks_out
+   | ([ $backlog.records[]? | select(queued_ready(.)) ]) as $ready
+   | {
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
-     tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
+     tasks:$tasks_out,
+     capacity:{
+       in_progress:([$tasks_out[] | select(.occupies_capacity)] | length),
+       in_progress_ids:[$tasks_out[] | select(.occupies_capacity) | .id],
+       finished:[$tasks_out[]
+                 | select(.kind != "secondmate" and (.occupies_capacity | not))
+                 | {id,state:(.current_state.state // "unknown"),pr_url:(.pr.url // null)}],
+       queued_ready:($ready | length),
+       queued_ready_ids:[$ready[] | .id]
+     },
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,

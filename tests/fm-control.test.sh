@@ -701,6 +701,68 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+# --- freeing a slot at DONE must never cost work ----------------------------
+#
+# 2026-09-17: five finished tasks with unmerged PRs held all five concurrency
+# slots for eight hours. The captain's rule caps work in progress, not agents,
+# so `exit` is how a slot is freed the moment work is done - which only works
+# if stopping the agent is genuinely all it does. These two cases pin both
+# halves: nothing of the task is lost, and the stop is recorded as deliberate
+# so the freed slot does not read as a wedge.
+test_exit_preserves_branch_worktree_and_uncommitted_work() {
+  local dir out rc wt branch_before branch_after head_before head_after
+  dir=$(new_case exit-preserves)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  wt="$dir/wt-t1"
+  branch_before=$(git -C "$wt" symbolic-ref --short HEAD)
+  head_before=$(git -C "$wt" rev-parse HEAD)
+  # Both kinds of unlanded work: an edit to a tracked file and a new untracked
+  # one. A teardown would refuse over these; `exit` must simply keep them.
+  printf 'edited while working\n' >> "$wt/README.md"
+  printf 'scratch notes\n' > "$wt/scratch.txt"
+
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting to free a slot should succeed"$'\n'"$out"
+
+  assert_present "$wt" "the local copy must survive freeing the slot"
+  assert_present "$wt/scratch.txt" "untracked work must survive freeing the slot"
+  assert_grep "edited while working" "$wt/README.md" \
+    "an uncommitted edit must survive freeing the slot"
+  branch_after=$(git -C "$wt" symbolic-ref --short HEAD)
+  head_after=$(git -C "$wt" rev-parse HEAD)
+  assert_equals "$branch_before" "$branch_after" "the task branch must survive freeing the slot"
+  assert_equals "$head_before" "$head_after" "freeing a slot must not move the branch"
+  assert_present "$dir/home/state/t1.meta" "the task record must survive so the work can still be landed"
+  assert_present "$dir/home/data/t1/brief.md" "the instructions must survive so the task can be relaunched"
+  pass "fm-control exit: freeing a slot preserves the branch, local copy, and uncommitted work"
+}
+
+# Without this record a stopped agent is indistinguishable from a wedge, and
+# bin/fm-crew-state.sh reads the freed task as unreadable - which counts as
+# occupied, the opposite of freeing the slot.
+test_exit_records_the_stop_as_deliberate() {
+  local dir out rc marker
+  dir=$(new_case exit-records)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  marker="$dir/home/state/t1.agent-stopped"
+  assert_absent "$marker" "no stop record should exist before the agent is stopped"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should succeed"$'\n'"$out"
+  assert_present "$marker" "a deliberate stop must be recorded so the freed slot does not read as a wedge"
+  assert_grep "verb=exit" "$marker" "the record must name the verb that produced it"
+  assert_grep "result=stopped" "$marker" "the record must name the proven outcome"
+
+  # Idempotent: asking again for an already-stopped agent is the same durable
+  # fact, so the record is still there and still says how it was reached.
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a second exit should stay idempotent"$'\n'"$out"
+  assert_present "$marker" "the stop record must survive an idempotent repeat"
+  assert_grep "result=already-stopped" "$marker" "the repeat must record what it actually found"
+  pass "fm-control exit: the deliberate stop is recorded durably and idempotently"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -908,6 +970,8 @@ test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
+test_exit_preserves_branch_worktree_and_uncommitted_work
+test_exit_records_the_stop_as_deliberate
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed

@@ -31,7 +31,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change, and record the intentional stop. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -48,6 +48,24 @@ The clear is refused before anything is sent when the recorded backend cannot de
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
+
+## Freeing a concurrency slot at done
+
+The cap is on work in progress, not on agents: there is no limit on stopped or idle ones.
+A task whose work is finished but whose PR has not landed therefore holds a record, not a slot, and `exit` is how that slot is returned.
+Its branch, local copy, and every uncommitted change stay exactly where they are until the PR lands and teardown runs, so freeing capacity never competes with the landed-work test above.
+
+Stopping the agent is the easy half; staying legible afterwards is the half that needed a record.
+A stopped agent leaves a pane holding nothing but a shell and takes its busy wiring with it, so every current-state source reads it as death or as an unavailable harness - indistinguishable from a wedge, and counted as occupied rather than free.
+Freeing the slot would therefore have made the task look more occupied, not less.
+`exit` writes `state/<id>.agent-stopped`, and [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) is its only consumer.
+
+That record licenses exactly one thing: reading a terminal status event (`done:` or `failed:`) as that terminal state.
+An agent stopped with work still open keeps reading unknown, because a half-finished task genuinely needs firstmate and must never be laundered into a free slot.
+The record is removed whenever an agent is launched for the id ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh)) and by [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), so it can never outlive the incarnation it describes.
+
+[`bin/fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh)'s `capacity` object turns that reading into the count firstmate actually judges against: `occupies_capacity` per task, the ids in progress, the finished work still awaiting landing with the PR to land, and the queued items with no blocker or hold that a freed slot can take.
+A task whose state cannot be read counts as occupied, because a slot wrongly believed free over-dispatches while one wrongly believed busy only delays.
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, and gemini resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified pane-resume contract.
@@ -122,6 +140,8 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 ## Verification
 
-- `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
+- `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, marker non-regression, and that freeing a slot preserves the branch, local copy, and uncommitted work while recording the stop, all against a stubbed session provider.
+- `tests/fm-crew-state.test.sh` - that the intentional-stop record converts a terminal status event and nothing else.
+- `tests/fm-fleet-snapshot-view.test.sh` - the `capacity` projection: finished work frees its slot, an unreadable task does not, and queued-ready excludes blocked and held items.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

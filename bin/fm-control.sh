@@ -31,6 +31,10 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
+#              Records the intentional stop at state/<id>.agent-stopped,
+#              so a slot freed at DONE reads as finished work awaiting
+#              landing rather than as a wedged agent
+#              (record_agent_stopped below owns the record).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -444,6 +448,45 @@ retire_busy_incarnation() {
   if [ -f "$STATE/$ID.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
   fi
+}
+
+# record_agent_stopped: note that this task's agent is stopped ON PURPOSE.
+#
+# Why this exists. `exit` is how firstmate frees a concurrency slot the moment
+# a task's work is DONE, without waiting for its PR to land - the captain's
+# rule is a cap on work in progress, not on idle records. But a stopped agent
+# leaves a pane holding nothing but a shell and takes its busy wiring with it,
+# so every current-state source reads it as death or as an unavailable
+# harness. Without a durable note, the deliberate stop is indistinguishable
+# from a wedge, and the freed slot reads as MORE occupied than before, not
+# less. bin/fm-crew-state.sh consumes this record and owns exactly how narrow
+# its licence is (a terminal status event only).
+#
+# `already-stopped` writes it too: the verb, not the manner of death, is the
+# authority here. Firstmate asking for this agent to be stopped and finding it
+# stopped is the same durable fact either way, and the consuming rule needs a
+# terminal status event from the crew before the record changes any reading.
+#
+# Ownership: written only here; removed by bin/fm-spawn.sh whenever an agent is
+# launched for this id (so it can never outlive its incarnation, whoever drives
+# the relaunch) and by bin/fm-teardown.sh with the rest of the task's state. A
+# failure to write is reported but never fails the verb - the agent really did
+# stop, and claiming otherwise would be the worse lie.
+record_agent_stopped() {  # <result>
+  local marker="$STATE/$ID.agent-stopped" tmp="$STATE/.$ID.agent-stopped.$$"
+  if {
+    printf 'stopped_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'verb=exit\n'
+    printf 'result=%s\n' "$1"
+    printf 'harness=%s\n' "$HARNESS"
+    printf 'backend=%s\n' "$BACKEND"
+    printf 'endpoint=%s\n' "$T"
+  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$marker" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "warning: $ID's agent is stopped, but the intentional-stop record at $marker could not be written; its current state will read as an unreachable agent rather than as finished work awaiting landing" >&2
+  return 0
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
@@ -888,6 +931,7 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    record_agent_stopped "$result"
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)

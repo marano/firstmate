@@ -4121,12 +4121,23 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
+# bin/fm-control.sh <id> exit records an intentional stop at
+# state/<id>.agent-stopped so a slot freed at DONE reads as finished work
+# awaiting landing rather than as a wedged agent. Publishing a task record here
+# means an agent is being launched for this id, which ends that incarnation
+# whoever drove the relaunch, so the record must not survive it. Clearing it at
+# the single publication point keeps the invariant independent of the caller.
+spawn_clear_agent_stopped() {
+  rm -f "$STATE/$ID.agent-stopped" 2>/dev/null || true
+}
+
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
   SPAWN_META_TMP=
+  spawn_clear_agent_stopped
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -4186,6 +4197,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  spawn_clear_agent_stopped
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
