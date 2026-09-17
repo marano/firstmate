@@ -45,6 +45,33 @@
 # ceiling warns too, and every waiting line names the holder so an inspected
 # quiet pane reads as waiting rather than wedged.
 #
+# ARRIVAL ORDER, SO BARGING IS IMPOSSIBLE BY CONSTRUCTION. Acquisition is
+# ticketed: every invocation claims a monotonically increasing ticket on arrival
+# and may try the lock only while its ticket is the oldest outstanding one, so a
+# waiter's wait is bounded by the number of waiters ahead of it rather than by
+# its luck in a race. An unordered retry loop is not merely theoretically
+# unfair: a worker that wrapped each individual test in its own invocation
+# released and re-acquired hundreds of times in a row and starved a fairly
+# waiting worker past its 600s ceiling. WRAP A WHOLE BUILD OR TEST RUN IN ONE
+# INVOCATION, never each unit inside it; ordering keeps that mistake from
+# starving anyone, but it cannot make hundreds of handovers cheap.
+#
+# Ordering never outranks getting builds run. A waiting line that cannot be
+# reached at all - a process STOPPED rather than killed still owns any lock it
+# held, and no liveness test may reclaim from it - is announced on stderr and
+# stepped around, because wedging every build on the machine would be a worse
+# failure than losing the order they run in.
+#
+# ORPHANED TICKETS ARE REAPED LIKE A DEAD HOLDER. One ticket left at the head of
+# the line by a waiter that died would wedge every later waiter, which is
+# strictly worse than the starvation being fixed. A ticket therefore records its
+# waiter's pid and is removed once that pid is gone, the same liveness test that
+# already reclaims a lock from a dead holder. A live waiter also renews its
+# ticket on every poll, and a ticket nobody is renewing is removed too, so a
+# waiter that stops polling - or a pid number an unrelated process has since
+# been given - cannot hold the head of the line. A renewal always restores the
+# waiter's own place, so no live waiter is ever sent to the back.
+#
 # Environment:
 #   FM_BUILD_LOCK_DIR              directory holding the lock (see LOCK PATH)
 #   FM_BUILD_LOCK_CI               1/true force stand-down, 0/false force lock
@@ -52,11 +79,14 @@
 #   FM_BUILD_LOCK_WAIT_WARN        waiter ceiling in seconds, 0 off (default 600)
 #   FM_BUILD_LOCK_HOLD_WARN        holder ceiling in seconds, 0 off (default 1200)
 #   FM_BUILD_LOCK_POLL             acquire poll interval in seconds (default 0.5)
+#   FM_BUILD_LOCK_TICKET_STALE     seconds an unrenewed waiting-line ticket
+#                                  survives, 0 off (default 30)
 #
 # The lock itself is bin/fm-wake-lib.sh's lockdir mutex, the same primitive the
-# wake queue, merges, captain holds and remote handoffs run on; this script adds
-# no second locking scheme. macOS ships no flock(1), which is why that lockdir
-# implementation exists in the first place.
+# wake queue, merges, captain holds and remote handoffs run on; the waiting line
+# is serialized by a second instance of that same primitive, so this script
+# still adds no second locking scheme. macOS ships no flock(1), which is why
+# that lockdir implementation exists in the first place.
 set -u
 
 # Resolve through symlinks: the `mutex` entry point is a symlink to this script,
@@ -278,11 +308,205 @@ fm_build_lock_report_ceiling() {  # <held-secs> <display>
     "$(fm_build_lock_elapsed "$1")" "$2" >&2
 }
 
+# --- the waiting line -------------------------------------------------------
+#
+# A ticket is one file per waiting invocation, named for its sequence number and
+# holding the waiter's pid. Minting a number is the only step that has to be
+# serialized, and it is, by a second instance of the same lockdir mutex - not a
+# second locking scheme. Everything else reads and reaps without that lock,
+# deliberately: the line's lock sits on the critical path of every build on the
+# machine, so the less time anything holds it, the smaller the one failure it
+# cannot recover from.
+#
+# THAT FAILURE, AND WHY THIS STEPS AROUND IT. A process STOPPED rather than
+# killed - Ctrl-Z on a waiting build, a debugger - is still alive, so the lock's
+# dead-owner recovery correctly refuses to reclaim from it. Waiting forever on a
+# line nobody can reach would wedge every build on the machine, which is exactly
+# the outcome this file exists to prevent, so the wait is bounded and a line
+# that cannot be reached is announced and stepped around. Ordering is a fairness
+# property layered over the build lock; the build lock alone is what makes
+# exclusion correct, and it is untouched by the step-around.
+#
+# A ticket is dropped the moment its waiter takes the lock, so the line holds
+# waiters only and the holder is never in it. The last waiter out takes the line
+# itself with it, which is what keeps an idle machine free of build-lock
+# residue.
+
+# Seconds to keep trying for the line's lock before giving up on ordering.
+# Generous, because every legitimate hold on it is a handful of file operations:
+# reaching this bound means something is stopped, not that something is busy.
+FM_BUILD_LOCK_QUEUE_LOCK_WAIT=60
+
+FM_BUILD_LOCK_TICKET=
+FM_BUILD_LOCK_UNORDERED=0
+FM_BUILD_LOCK_QUEUE_MIN=
+FM_BUILD_LOCK_QUEUE_MAX=
+FM_BUILD_LOCK_QUEUE_COUNT=0
+FM_BUILD_LOCK_QUEUE_AHEAD=0
+
+# Bounded acquire of the line's lock. See THAT FAILURE above for why this cannot
+# be an ordinary blocking acquire.
+fm_build_lock_queue_lock() {
+  local deadline=$((SECONDS + FM_BUILD_LOCK_QUEUE_LOCK_WAIT))
+  while ! fm_lock_try_acquire "$QLOCK"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep "$POLL"
+  done
+}
+
+# Give up on arrival ordering, loudly and once. Acquisition stays correct; only
+# the guarantee about who goes first is lost, so this says so in the same voice
+# the ceilings use rather than degrading in silence.
+fm_build_lock_abandon_order() {  # <why>
+  [ "$FM_BUILD_LOCK_UNORDERED" = 0 ] || return 0
+  FM_BUILD_LOCK_UNORDERED=1
+  FM_BUILD_LOCK_TICKET=
+  note "WARNING: $1, so this build is acquiring the machine-wide build lock WITHOUT arrival ordering; it still excludes other builds, but waiters may now be overtaken"
+}
+
+# Reap every ticket nobody is waiting on, then report the line: its oldest and
+# newest sequence numbers, how many waiters it holds, and how many of them are
+# ahead of <mine> when a sequence number is given.
+fm_build_lock_queue_scan() {  # [mine]
+  local mine=${1:-} entry seq pid age
+  FM_BUILD_LOCK_QUEUE_MIN=
+  FM_BUILD_LOCK_QUEUE_MAX=
+  FM_BUILD_LOCK_QUEUE_COUNT=0
+  FM_BUILD_LOCK_QUEUE_AHEAD=0
+  for entry in "$QUEUE"/t.*; do
+    [ -f "$entry" ] && [ ! -L "$entry" ] || continue
+    seq=${entry##*/t.}
+    pid=$(cat "$entry" 2>/dev/null || true)
+    case "$seq" in ''|*[!0-9]*) rm -f -- "$entry" 2>/dev/null || true; continue ;; esac
+    case "$pid" in ''|*[!0-9]*) rm -f -- "$entry" 2>/dev/null || true; continue ;; esac
+    if ! fm_pid_alive "$pid"; then
+      rm -f -- "$entry" 2>/dev/null || true
+      continue
+    fi
+    age=$(fm_path_age "$entry")
+    case "$age" in ''|*[!0-9]*) age=0 ;; esac
+    if [ "$TICKET_STALE" -gt 0 ] && [ "$age" -gt "$TICKET_STALE" ]; then
+      rm -f -- "$entry" 2>/dev/null || true
+      continue
+    fi
+    FM_BUILD_LOCK_QUEUE_COUNT=$((FM_BUILD_LOCK_QUEUE_COUNT + 1))
+    if [ -z "$FM_BUILD_LOCK_QUEUE_MIN" ] || [ "$seq" -lt "$FM_BUILD_LOCK_QUEUE_MIN" ]; then
+      FM_BUILD_LOCK_QUEUE_MIN=$seq
+    fi
+    if [ -z "$FM_BUILD_LOCK_QUEUE_MAX" ] || [ "$seq" -gt "$FM_BUILD_LOCK_QUEUE_MAX" ]; then
+      FM_BUILD_LOCK_QUEUE_MAX=$seq
+    fi
+    if [ -n "$mine" ] && [ "$seq" -lt "$mine" ]; then
+      FM_BUILD_LOCK_QUEUE_AHEAD=$((FM_BUILD_LOCK_QUEUE_AHEAD + 1))
+    fi
+  done
+}
+
+# Publish a ticket through a rename, so a scan that is deliberately unlocked
+# never reads one half-written and reaps a waiter that had just arrived. The
+# scratch name carries the writer's pid, and the only code that removes scratch
+# files holds the line's lock, so this can never race with a cleanup.
+fm_build_lock_ticket_publish() {  # <seq> <pid>
+  local seq=$1 pid=$2
+  local tmp="$QUEUE/tmp.$pid"
+  if printf '%s\n' "$pid" > "$tmp" 2>/dev/null \
+    && mv -f -- "$tmp" "$QUEUE/t.$seq" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# Take a ticket. The counter is advanced past any live ticket that outran it, so
+# a counter lost to a partial write cannot hand a newcomer a number that would
+# put it in front of waiters already in line.
+fm_build_lock_queue_enter() {
+  local mypid next rc=1
+  if ! fm_current_pid mypid; then
+    fm_build_lock_abandon_order "this process cannot name its own pid to the build lock's waiting line"
+    return 0
+  fi
+  if ! fm_build_lock_queue_lock; then
+    fm_build_lock_abandon_order "the build lock's waiting line is unreachable"
+    return 0
+  fi
+  if mkdir -p "$QUEUE" 2>/dev/null; then
+    fm_build_lock_queue_scan
+    next=$(cat "$QUEUE/next" 2>/dev/null || true)
+    case "$next" in ''|*[!0-9]*) next=1 ;; esac
+    if [ -n "$FM_BUILD_LOCK_QUEUE_MAX" ] && [ "$next" -le "$FM_BUILD_LOCK_QUEUE_MAX" ]; then
+      next=$((FM_BUILD_LOCK_QUEUE_MAX + 1))
+    fi
+    if printf '%s\n' "$((next + 1))" > "$QUEUE/next" 2>/dev/null \
+      && fm_build_lock_ticket_publish "$next" "$mypid"; then
+      FM_BUILD_LOCK_TICKET=$next
+      rc=0
+    fi
+  fi
+  fm_lock_release "$QLOCK" || true
+  [ "$rc" -eq 0 ] || fm_build_lock_abandon_order "the build lock's waiting line cannot be written under $LOCK_ROOT"
+  return 0
+}
+
+# True only while this invocation holds the oldest outstanding ticket, which is
+# the whole of the ordering guarantee: everyone else declines to even try.
+# It renews the ticket first - that renewal is what tells every other waiter
+# this one is still here - and restores a ticket a reaper took while this
+# process was merely slow, so waiting longer can never cost a live waiter the
+# place it already earned. It takes no lock, deliberately: this runs on every
+# poll of every waiter, and see THAT FAILURE above for what holding one here
+# would cost.
+fm_build_lock_my_turn() {
+  local mine=$FM_BUILD_LOCK_TICKET mypid
+  [ "$FM_BUILD_LOCK_UNORDERED" = 0 ] || return 0
+  [ -n "$mine" ] || return 1
+  if ! fm_current_pid mypid; then
+    fm_build_lock_abandon_order "this process cannot name its own pid to the build lock's waiting line"
+    return 0
+  fi
+  if [ -f "$QUEUE/t.$mine" ]; then
+    touch "$QUEUE/t.$mine" 2>/dev/null || true
+  else
+    mkdir -p "$QUEUE" 2>/dev/null || true
+    fm_build_lock_ticket_publish "$mine" "$mypid" || true
+  fi
+  fm_build_lock_queue_scan "$mine"
+  [ "$FM_BUILD_LOCK_QUEUE_MIN" = "$mine" ]
+}
+
+# Give the ticket back. Removing it needs no lock; taking the whole line away
+# does, because an arrival is creating the same directory under that lock. That
+# second step is one non-blocking attempt and nothing more: this also runs from
+# the exit trap of an interrupted build, where waiting on anything would hold a
+# terminal, and an empty line left behind is tidied by the next invocation.
+fm_build_lock_queue_leave() {
+  local mine=$FM_BUILD_LOCK_TICKET
+  [ -n "$mine" ] || return 0
+  FM_BUILD_LOCK_TICKET=
+  rm -f -- "$QUEUE/t.$mine" 2>/dev/null || true
+  fm_lock_try_acquire "$QLOCK" || return 0
+  fm_build_lock_queue_scan
+  if [ "$FM_BUILD_LOCK_QUEUE_COUNT" -eq 0 ]; then
+    rm -f -- "$QUEUE/next" "$QUEUE"/tmp.* 2>/dev/null || true
+    rmdir "$QUEUE" 2>/dev/null || true
+  fi
+  fm_lock_release "$QLOCK" || true
+}
+
+# Empty unless this waiter has company, because "position 1 of 1" is noise.
+fm_build_lock_queue_position() {
+  [ "$FM_BUILD_LOCK_QUEUE_COUNT" -gt 1 ] || return 0
+  printf 'position %d of %d in line' \
+    "$((FM_BUILD_LOCK_QUEUE_AHEAD + 1))" "$FM_BUILD_LOCK_QUEUE_COUNT"
+}
+
 # --- observable acquire -----------------------------------------------------
 
 fm_build_lock_acquire() {  # <lockdir> <info-path>
-  local lockdir=$1 info=$2 start waited=0 next_notice holder now
-  if fm_lock_try_acquire "$lockdir"; then
+  local lockdir=$1 info=$2 start waited=0 next_notice holder now place
+  fm_build_lock_queue_enter
+  if fm_build_lock_my_turn && fm_lock_try_acquire "$lockdir"; then
+    fm_build_lock_queue_leave
     return 0
   fi
   start=$(date +%s)
@@ -290,24 +514,31 @@ fm_build_lock_acquire() {  # <lockdir> <info-path>
   fm_build_lock_read_holder_settled "$lockdir" "$info"
   holder=$FM_BUILD_LOCK_HOLDER_TEXT
   note "waiting for the machine-wide build lock - this process is WAITING, not wedged${holder:+ (}${holder}${holder:+)}"
-  while ! fm_lock_try_acquire "$lockdir"; do
+  while : ; do
     sleep "$POLL"
+    if fm_build_lock_my_turn && fm_lock_try_acquire "$lockdir"; then
+      break
+    fi
     now=$(date +%s)
     waited=$((now - start))
     [ "$waited" -ge "$next_notice" ] || continue
     next_notice=$((waited + NOTICE_INTERVAL))
+    place=$(fm_build_lock_queue_position)
     fm_build_lock_read_holder_settled "$lockdir" "$info"
     holder=$FM_BUILD_LOCK_HOLDER_TEXT
     if [ "$WAIT_WARN" -gt 0 ] && [ "$waited" -ge "$WAIT_WARN" ]; then
-      note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for the machine-wide build lock, past the ${WAIT_WARN}s ceiling${holder:+ - }${holder}"
+      note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for the machine-wide build lock, past the ${WAIT_WARN}s ceiling${place:+ - }${place}${holder:+ - }${holder}"
     else
-      note "still waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock${holder:+ - }${holder}"
+      note "still waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock${place:+ - }${place}${holder:+ - }${holder}"
     fi
     if [ -n "$FM_BUILD_LOCK_HOLDER_SECS" ] && [ "$HOLD_WARN" -gt 0 ] \
       && [ "$FM_BUILD_LOCK_HOLDER_SECS" -ge "$HOLD_WARN" ]; then
       note "WARNING: the holder has held the build lock $(fm_build_lock_elapsed "$FM_BUILD_LOCK_HOLDER_SECS"), past the ${HOLD_WARN}s ceiling; it is not being killed"
     fi
   done
+  now=$(date +%s)
+  waited=$((now - start))
+  fm_build_lock_queue_leave
   note "acquired the machine-wide build lock after $(fm_build_lock_elapsed "$waited")"
 }
 
@@ -318,6 +549,9 @@ FM_BUILD_LOCK_CHILD=
 
 # shellcheck disable=SC2329 # Reached only through the EXIT trap below.
 fm_build_lock_release_now() {
+  # An invocation interrupted while still waiting holds a ticket and no lock;
+  # giving it back here retires it at once rather than leaving it for the reaper.
+  fm_build_lock_queue_leave
   [ "$FM_BUILD_LOCK_HELD" = 1 ] || return 0
   FM_BUILD_LOCK_HELD=0
   rm -f -- "$INFO" 2>/dev/null || true
@@ -393,9 +627,11 @@ NOTICE_INTERVAL=${FM_BUILD_LOCK_NOTICE_INTERVAL:-60}
 WAIT_WARN=${FM_BUILD_LOCK_WAIT_WARN:-600}
 HOLD_WARN=${FM_BUILD_LOCK_HOLD_WARN:-1200}
 POLL=${FM_BUILD_LOCK_POLL:-0.5}
+TICKET_STALE=${FM_BUILD_LOCK_TICKET_STALE:-30}
 fm_build_lock_positive_int FM_BUILD_LOCK_NOTICE_INTERVAL "$NOTICE_INTERVAL"
 fm_build_lock_nonneg_int FM_BUILD_LOCK_WAIT_WARN "$WAIT_WARN"
 fm_build_lock_nonneg_int FM_BUILD_LOCK_HOLD_WARN "$HOLD_WARN"
+fm_build_lock_nonneg_int FM_BUILD_LOCK_TICKET_STALE "$TICKET_STALE"
 case "$POLL" in
   ''|*[!0-9.]*|.|*.*.*) die "FM_BUILD_LOCK_POLL must be a number of seconds, got '$POLL'" ;;
 esac
@@ -411,6 +647,8 @@ LOCK_ROOT=$(fm_build_lock_root)
 [ -d "$LOCK_ROOT" ] && [ -w "$LOCK_ROOT" ] || die "lock directory is not writable: $LOCK_ROOT"
 LOCK="$LOCK_ROOT/fm-build-lock"
 INFO="$LOCK_ROOT/fm-build-lock.info"
+QUEUE="$LOCK_ROOT/fm-build-lock.queue"
+QLOCK="$LOCK_ROOT/fm-build-lock.queue.lock"
 
 case "$MODE" in
   lock-path)

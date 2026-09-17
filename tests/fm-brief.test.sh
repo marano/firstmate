@@ -1016,6 +1016,8 @@ test_ship_and_scout_teach_the_build_mutex() {
       "$kind brief did not name the commands the rule covers"
     assert_grep 'mutex pnpm run ci' "$brief" \
       "$kind brief did not show a concrete wrapped invocation"
+    assert_grep 'Wrap the WHOLE run in ONE invocation' "$brief" \
+      "$kind brief did not say the mutex wraps a whole run rather than each unit inside it"
     assert_grep 'stands down by itself on CI' "$brief" \
       "$kind brief did not say the mutex stands down on CI without the worker reasoning about it"
     assert_grep 'bin/fm-build-lock.sh' "$brief" \

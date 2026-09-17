@@ -367,6 +367,9 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    suite, a full CI script - prefixed with \`mutex\`, as in \`mutex pnpm run ci\`. Other workers
    share these cores and this memory, and an unwrapped build racing another worker's suite has
    produced false test failures on unmodified code. Leave obviously cheap commands unwrapped.
+   Wrap the WHOLE run in ONE invocation, never one per test, file or module: the lock is
+   machine-wide, so per-unit wrapping turns one hold into hundreds of handovers that other
+   workers have to queue behind.
    \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
    If \`mutex\` is not on PATH, run \`$FM_ROOT/bin/fm-build-lock.sh\` directly; its \`--help\` owns
    the contract.
