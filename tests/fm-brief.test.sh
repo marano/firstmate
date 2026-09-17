@@ -418,6 +418,35 @@ test_no_mistakes_dod_waits_instead_of_polling() {
   pass "fm-brief.sh: no-mistakes DOD teaches --wait reattach instead of background-and-poll"
 }
 
+# The 2026-09-16 "we can add the guards" decision: a worker must paste the
+# concrete no-mistakes run id it drove, not just claim a green PR. On
+# 2026-09-17 two workers reported `done:` with an implementation commit and no
+# run, and both needed a manual correction to go and validate - so the DOD
+# text must both require the run id in the done line and say plainly that a
+# done line with no run id is not a complete report.
+test_no_mistakes_dod_requires_run_id() {
+  local home id brief
+  home="$TMP_ROOT/requires-run-id-home"
+  mkdir -p "$home/data"
+  id="brief-requires-run-id-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'append `done: PR {url} checks green run={run-id}` and stop' "$brief" \
+    "no-mistakes DOD must require a run id in the done line"
+  assert_grep "not evidence about the commit" "$brief" \
+    "no-mistakes DOD must state the applied-via-axi-respond learning as the standard"
+  assert_grep "a \`done:\` line with no run id is not a complete report, so do not send one" "$brief" \
+    "no-mistakes DOD must refuse a done report that carries no run id"
+
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_no_grep 'append `done: PR {url} checks green` and stop' "$brief" \
+    "no-mistakes DOD must not still render the old run-id-less done line"
+  pass "fm-brief.sh: no-mistakes DOD refuses a done report with no validation run id"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -1095,6 +1124,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_waits_instead_of_polling
+test_no_mistakes_dod_requires_run_id
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
