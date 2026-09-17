@@ -1,0 +1,56 @@
+Scenario 1: fm_idle_fleet_capacity refuses (exit 4) when config/fleet-capacity is absent
+------------------------------------------------------------------------------------------
+$ fm_idle_fleet_capacity <throwaway-config-dir-with-no-fleet-capacity-file>
+STDOUT=[] STATUS=4
+
+Scenario 2 & 3 (part A - pure vocabulary + condition layer): tests/fm-idle-fleet.test.sh
+------------------------------------------------------------------------------------------
+Ran the repo's real test file (real bin/fm-watch.sh subprocess + real
+bin/fm-task-kind-lib.sh + bin/fm-idle-fleet-lib.sh; no fixtures replacing the
+scripts under test) via `mutex bin/fm-test-run.sh tests/fm-idle-fleet.test.sh`:
+
+ok - an unstated capacity is refused and reported, never guessed at
+ok - a configured capacity is read and every malformed form is refused
+ok - in-progress counts open work only, never concluded agents or secondmates
+ok - the kinds a spawn records are pinned, and each one is deliberately classified
+ok - every kind a spawn records is counted, or deliberately not, with none silently skipped
+ok - two workers under way are counted as two, against the capacity the home actually stated
+ok - the condition needs free capacity AND ready work, and reports its numbers
+ok - an unstated capacity, a malformed one, and an unreadable queue are three separate refusals
+ok - a sustained idle fleet with ready work raises one durable alarm
+ok - a fleet at its cap, or with nothing to start, raises nothing
+ok - the sustain window is served exactly, and clearing the condition retires the episode
+ok - a condition that keeps holding re-surfaces on its own cadence, not on every scan
+ok - an alarm still queued is not duplicated by a later scan
+ok - the scan cadence bounds how often the backlog is read at all
+ok - a capacity the detector cannot read is reported once and retires its episode
+ok - a capacity that was never stated disables the detector loudly, and repairing it restores the alarm
+ok - an unreadable ready queue is logged, and neither re-reported nor allowed to reset the window
+ok - away mode escalates the idle-fleet alarm instead of self-handling it
+ok - away mode escalates a detector it can no longer run
+FM_TEST_END ... exit=0 duration_ms=21917 gate_skip=false
+
+"a capacity that was never stated disables the detector loudly, and repairing it
+restores the alarm" is idle_fleet_tick driven as a real bin/fm-watch.sh
+subprocess against a throwaway home with state/, config/ (no fleet-capacity),
+a task record, and a ready backlog count; it asserts the emitted
+"check: fleet idle detector disabled: <config>/fleet-capacity is absent, so
+this home has not said how many tasks it runs at once" wake line.
+
+Scenario 3 (part B - fm-spawn.sh --relaunch refusal, live subprocess): ad hoc driver
+------------------------------------------------------------------------------------------
+Built a throwaway case dir (tests/lib.sh's fm_git_worktree + a stub tmux
+identical in shape to tests/fm-control-relaunch.test.sh's make_tmux_stub) with
+a real task record whose kind=bogus-kind (a value outside
+fm_task_kinds' vocabulary), then invoked the real bin/fm-spawn.sh binary
+(not a fixture) with --relaunch --harness claude. The command passed through
+every earlier live gate (worktree check, endpoint validation, dead-agent
+state check via the tmux stub) before reaching the kind check:
+
+EXIT=1
+OUTPUT:
+error: task rlx1's record has kind 'bogus-kind', which is not one this firstmate
+records (ship scout secondmate); refusing to relaunch a record no reader can
+classify
+---
+keys-sent-bytes=0   (confirms nothing was sent to the pane / no agent launched)
