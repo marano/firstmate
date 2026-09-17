@@ -772,20 +772,6 @@ EOF
 # reason that is not actually about cost.
 STOCK_BASH_MAX_SCRIPT_MS=30000
 
-stock_bash_exclusion_reason() {
-  local want=$1 line path reason
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    path=${line%%	*}
-    reason=${line#*	}
-    if [ "$path" = "$want" ]; then
-      printf '%s\n' "$reason"
-      return 0
-    fi
-  done < <(list_stock_bash_exclusions)
-  return 1
-}
-
 # The stock-bash lane: every tests/*.test.sh except the exclusions above.
 # Derived rather than enumerated so a newly added test is guarded by default.
 list_stock_bash() {
