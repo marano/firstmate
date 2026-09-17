@@ -993,8 +993,50 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_ship_and_scout_teach_the_build_mutex() {
+  local home kind mode id brief
+  home="$TMP_ROOT/build-mutex-home"
+  mkdir -p "$home/data"
+
+  # Every ship mode and the scout scaffold, because a project worker reads no
+  # other firstmate instruction surface: AGENTS.md is the supervisor contract and
+  # firstmate-coding-guidelines only reaches a firstmate-repo task.
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-build-mutex-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" bluejam-platform --scout >/dev/null 2>&1
+    else
+      mode=$kind
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" bluejam-platform --mode "$mode" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep 'a full CI script - prefixed with' "$brief" \
+      "$kind brief did not tell workers to prefix heavy commands with mutex"
+    assert_grep 'lint, test, build, codegen, an e2e' "$brief" \
+      "$kind brief did not name the commands the rule covers"
+    assert_grep 'mutex pnpm run ci' "$brief" \
+      "$kind brief did not show a concrete wrapped invocation"
+    assert_grep 'stands down by itself on CI' "$brief" \
+      "$kind brief did not say the mutex stands down on CI without the worker reasoning about it"
+    assert_grep 'bin/fm-build-lock.sh' "$brief" \
+      "$kind brief did not point at the contract owner for the mutex"
+  done
+
+  # A secondmate supervises; it does not run a project's builds, so the rule
+  # must not leak into the charter.
+  id='brief-build-mutex-secondmate'
+  FM_SECONDMATE_CHARTER='Own one domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  ! grep -q 'a full CI script - prefixed with' "$brief" \
+    || fail "secondmate charter carried the worker build-mutex rule"
+
+  pass "fm-brief.sh: every ship mode and the scout scaffold teach the machine-wide build mutex"
+}
+
 test_worker_role_scope
 test_script_parses
+test_ship_and_scout_teach_the_build_mutex
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

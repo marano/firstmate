@@ -358,6 +358,21 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# The machine-wide build/test mutex rule, rendered into every ship and scout
+# scaffold because a project worker reads no other firstmate instruction
+# surface. bin/fm-build-lock.sh's header owns the contract; this is the trigger
+# only, stated once here and interpolated into both scaffolds.
+IFS= read -r -d '' MUTEX_RULE <<EOF || true
+8. Run every command that meaningfully loads this machine - lint, test, build, codegen, an e2e
+   suite, a full CI script - prefixed with \`mutex\`, as in \`mutex pnpm run ci\`. Other workers
+   share these cores and this memory, and an unwrapped build racing another worker's suite has
+   produced false test failures on unmodified code. Leave obviously cheap commands unwrapped.
+   \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
+   If \`mutex\` is not on PATH, run \`$FM_ROOT/bin/fm-build-lock.sh\` directly; its \`--help\` owns
+   the contract.
+EOF
+MUTEX_RULE=${MUTEX_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -416,6 +431,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+$MUTEX_RULE
 
 $INBOX_SECTION
 
@@ -508,6 +524,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+$MUTEX_RULE
 
 $INBOX_SECTION
 
