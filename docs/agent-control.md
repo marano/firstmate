@@ -58,7 +58,8 @@ Its branch, local copy, and every uncommitted change stay exactly where they are
 Stopping the agent is the easy half; staying legible afterwards is the half that needed a record.
 A stopped agent leaves a pane holding nothing but a shell and takes its busy wiring with it, so every current-state source reads it as death or as an unavailable harness - indistinguishable from a wedge, and counted as occupied rather than free.
 Freeing the slot would therefore have made the task look more occupied, not less.
-`exit` writes `state/<id>.agent-stopped`, and [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) is its only consumer.
+`exit` writes `state/<id>.agent-stopped`.
+[`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) reads it to decide a stopped crew's current state, and [`bin/fm-awaiting-landing-lib.sh`](../bin/fm-awaiting-landing-lib.sh) reads it as one of the three records it derives "awaiting landing" from.
 
 That record licenses exactly one thing: reading a terminal status event (`done:` or `failed:`) as that terminal state.
 An agent stopped with work still open keeps reading unknown, because a half-finished task genuinely needs firstmate and must never be laundered into a free slot.
@@ -142,6 +143,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, marker non-regression, and that freeing a slot preserves the branch, local copy, and uncommitted work while recording the stop, all against a stubbed session provider.
 - `tests/fm-crew-state.test.sh` - that the intentional-stop record converts a terminal status event and nothing else.
+- `tests/fm-awaiting-landing.test.sh` - that `bin/fm-awaiting-landing-lib.sh` reads the intentional-stop record as one proof (alongside a recorded `pr=` and a `done` outcome) that finished work is awaiting landing rather than a wedge, and that a diverged recorded landing target is surfaced as blocked rather than read as healthy or gone quiet.
 - `tests/fm-fleet-snapshot-view.test.sh` - the `capacity` projection: finished work frees its slot, an unreadable task does not, and queued-ready excludes blocked and held items.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

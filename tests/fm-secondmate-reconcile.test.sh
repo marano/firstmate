@@ -374,6 +374,26 @@ test_the_ask_never_arms_a_reply_expectation_or_a_re_ring() {
   pass "the reconcile ask expects no reply and stays out of a ladder that still rings ordinary steers"
 }
 
+# A landing target that is no longer the branch's work is a records-vs-reality
+# mismatch of the same family: bin/fm-awaiting-landing-lib.sh reports it, the
+# home summary publishes it as landing_blocked, and only the home that recorded
+# that forge head can push the missing commits or re-arm the poll. It must
+# therefore reach the same one-per-window ask as the other inventory mismatches.
+test_a_blocked_landing_target_asks_the_mate_to_reconcile() {
+  local home mate fakebin snap out
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home blockedlanding mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"landing_blocked","ids":["diverged-ship"]}'
+  out=$(run_notify "$home" "$fakebin" blockedlanding "$snap") || fail "the reconcile ask failed: $out"
+  assert_contains "$out" "sent: mate landing_blocked" \
+    "a blocked landing target did not reach the reconcile ask: $out"
+  [ "$(inbox_records "$home/state" mate)" -eq 1 ] \
+    || fail "the ask did not land as exactly one durable steering record"
+  out=$(run_notify "$home" "$fakebin" blockedlanding "$snap") || fail "the repeat run failed: $out"
+  assert_contains "$out" "cooldown: mate" "a repeated snapshot nagged the mate: $out"
+  pass "a blocked landing target earns the same one-per-window reconcile ask"
+}
+
 test_a_readable_home_without_a_mismatch_is_never_asked() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home quiet mate)
@@ -994,6 +1014,7 @@ test_the_cooldown_starts_when_delivery_finishes
 test_the_window_is_four_hours
 test_each_home_carries_its_own_cooldown
 test_the_ask_never_arms_a_reply_expectation_or_a_re_ring
+test_a_blocked_landing_target_asks_the_mate_to_reconcile
 test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run

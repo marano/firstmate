@@ -1163,11 +1163,112 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight, and treats a done-but-unlanded child as healthy"
 }
 
+# The home summary must not decide for itself what a done child means. Every
+# task record carries landing.class from bin/fm-awaiting-landing-lib.sh, the one
+# owner of "awaiting landing", and the classifier reads that class. The case the
+# owner adds over a bare done check is a recorded forge head that is no longer
+# the branch's work: an open, mergeable PR holding the WRONG commits, which read
+# as a perfectly healthy home before this.
+test_home_summary_reads_the_awaiting_landing_owner() {
+  local home fakebin out json head advanced
+  home=$(make_home summary-landing)
+  fakebin=$(make_fakebin "$home")
+  fm_git_worktree "$home/repo" "$home/wt" fm/landing-ship
+  head=$(git -C "$home/wt" rev-parse HEAD)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] landing-ship - Done child behind an open PR (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/landing-ship.meta" \
+    "window=firstmate:fm-landing-ship" \
+    "worktree=$home/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/7" \
+    "pr_head=$head"
+  record_claude_idle "$home/state" landing-ship
+  printf 'done: complete\n' > "$home/state/landing-ship.status"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done child whose PR holds this branch's head must read as a healthy home: $out"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "landing-ship") | .landing)
+    | .class == "awaiting-landing" and .target == "verified" and (.detail | length) > 0
+  ' >/dev/null || fail "the snapshot must publish the owner's class on the task record: $json"
+
+  # The branch moves on while the PR keeps the head this home recorded. Nothing
+  # about the child's current state changes - only the landing target does.
+  printf 'more work\n' >> "$home/wt/work.txt"
+  git -C "$home/wt" add work.txt
+  git -C "$home/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "work the PR never received"
+  advanced=$(git -C "$home/wt" rev-parse HEAD)
+  [ "$advanced" != "$head" ] || fail "fixture did not advance the branch head"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"landing_blocked",ids:["landing-ship"]}
+      and (.reason | contains("landing-ship"))
+      and .state != "unknown"
+  ' >/dev/null || fail "a recorded forge head that is no longer the branch's work must be surfaced, and must not make the home unreadable: $out"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "landing-ship") | .landing)
+    | .class == "landing-blocked" and .target == "diverged" and (.detail | contains("landing blocked"))
+  ' >/dev/null || fail "the published class must name the blocked landing: $json"
+
+  # PR 19's fix must survive the conversion: a done child this home has not
+  # acknowledged yet is a brief transient, never an inventory error. Dropping
+  # the recorded PR leaves exactly that shape on the SAME diverged branch, so
+  # the quiet comes from the owner's derivation rather than from the git state.
+  fm_write_meta "$home/state/landing-ship.meta" \
+    "window=firstmate:fm-landing-ship" \
+    "worktree=$home/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done child with no recorded PR must stay healthy, as it was before this change: $out"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "landing-ship") | .landing.class) == "none"
+  ' >/dev/null || fail "an unacknowledged done child must not be reported as awaiting landing: $json"
+
+  # The deliberate-stop record is the OTHER acknowledgement, and the snapshot
+  # only sees it because it is captured beside the status log. Without that
+  # capture this reads "none" and the whole stop-marker leg is dead in here.
+  : > "$home/state/landing-ship.agent-stopped"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "landing-ship") | .landing)
+    | .class == "awaiting-landing" and .target == "none"
+  ' >/dev/null || fail "a deliberately stopped done child must read as awaiting landing: $json"
+  pass "home-summary reads the awaiting-landing owner: landing-ready is healthy, a diverged landing target is surfaced without making the home unreadable"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_capacity_frees_the_slot_at_done_not_at_landing
 test_capacity_counts_an_unreadable_task_as_occupied
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_reads_the_awaiting_landing_owner
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure

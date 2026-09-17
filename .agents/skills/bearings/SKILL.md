@@ -58,8 +58,9 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Render it under Charted Next like any other warning row: reporting is not ordinary work, while acting on the fleet still waits for `bin/fm-afk-return.sh check` (`/afk`).
 
 2. **Record a later reconcile notification for any home whose own books disagree.**
-   When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
+   When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, `terminal_in_flight`, or `landing_blocked`, that home's backlog and its own task metadata disagree and only that home may fix it.
    A task whose child work is done but whose PR has not landed is the ordinary steady state (capacity frees at done, not at landing) and never produces `terminal_in_flight`; that kind now names only a failed child state sitting under an in-flight backlog row.
+   `landing_blocked` is the one done-child case that is not that steady state: `bin/fm-awaiting-landing-lib.sh` reports the forge head that home recorded as no longer its branch's work, so the PR would land the wrong commits and nobody should merge it.
    Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh request --snapshot -` immediately after gathering the snapshot.
    This atomically records one local one-shot request per mismatched target and returns without sending, taking a mate lifecycle lock, or waiting behind a local or remote delivery queue.
    The supervision loop later claims the requests and runs the cooldown-limited fire-and-forget deliveries; the script header owns per-target coalescing, request durability, retries, cooldown, identity checks, and retirement.

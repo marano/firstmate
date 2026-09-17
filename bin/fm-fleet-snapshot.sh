@@ -233,6 +233,9 @@ esac
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-awaiting-landing-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"  # fm_awaiting_landing_read: THE owner of "awaiting landing"
 
 usage() {
   cat <<'EOF'
@@ -252,6 +255,11 @@ terminal_in_flight; they never have backlog rows.
 An in-flight backlog row whose child work is done but not yet landed is the
 ordinary steady state (capacity frees at done, not at landing) and is never
 terminal_in_flight; that kind flags only a failed child state.
+Whether a done child is in that steady state is not decided here: every task
+record carries landing.class from bin/fm-awaiting-landing-lib.sh, the one owner
+of "awaiting landing", and landing_blocked flags only the class that owner
+reports as unable to land - a recorded forge head that is no longer this
+branch's work, which nobody should merge.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
@@ -627,7 +635,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local status_log status_capture report_path report_capture stopped_path stopped_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -636,11 +644,17 @@ prefetch_task_observations() {  # <meta> <id>
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
+  # The deliberate-stop record is one of the two acknowledgements
+  # fm-awaiting-landing-lib.sh reads. Capture its PRESENCE beside the status log
+  # so the whole derivation runs against one generation-guarded sample.
+  stopped_path="$STATE/$id.agent-stopped"
+  stopped_capture="$SNAPSHOT_TASK_DIR/$id.agent-stopped"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
+    snapshot_mark_optional_present "$stopped_path" "$stopped_capture" || current_rc=1
   fi
 
   if [ -n "$remote_host" ]; then
@@ -673,7 +687,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture" "$stopped_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -849,6 +863,11 @@ task_json_lines() {
       home_json=$(jq -n '{path:null,present:false}')
     fi
 
+    # ASK the one owner of "awaiting landing" rather than inferring it here from
+    # .current_state.state. Every input it reads is in this generation-guarded
+    # sample, so the published class is part of the same coherent observation.
+    fm_awaiting_landing_read "$id" "$SNAPSHOT_TASK_DIR"
+
     jq -n \
       --arg id "$id" \
       --arg kind "$kind" \
@@ -866,6 +885,9 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg landing_class "$FM_AWAITING_LANDING_CLASS" \
+      --arg landing_target "$FM_AWAITING_LANDING_TARGET" \
+      --arg landing_detail "$FM_AWAITING_LANDING_DETAIL" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -905,6 +927,9 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        landing:{class:$landing_class,
+                 target:($landing_target | if . == "" then null else . end),
+                 detail:($landing_detail | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -1023,6 +1048,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.kind != "secondmate")
          | select(.id == $work.id and .current_state.state == "failed")
          | {id,state:.current_state.state} ]) as $terminal_in_flight
+    | ([ $owned_in_flight[] as $work
+         | $tasks[]
+         | select(.kind != "secondmate")
+         | select(.id == $work.id and .landing.class == "landing-blocked")
+         | {id,detail:(.landing.detail // "")} ]) as $landing_blocked
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
         else empty end,
@@ -1042,6 +1072,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id)),
            reason:("in-flight backlog item has a failed child state: " +
                    ($terminal_in_flight | map(.id + "=" + .state) | join(", ")))}
+        else empty end,
+        if ($landing_blocked | length) > 0 then
+          {kind:"landing_blocked",ids:($landing_blocked | map(.id)),
+           reason:("in-flight backlog item cannot land as recorded: " +
+                   ($landing_blocked | map(.id) | join(", ")))}
         else empty end]) as $strict_invalidities
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
@@ -1074,7 +1109,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        and ($unknown_children | length) == 0
        and ($orphan_in_flight | length) == 0
        and ($unowned_children | length) == 0
-       and ($terminal_in_flight | length) == 0) as $valid
+       and ($terminal_in_flight | length) == 0
+       and ($landing_blocked | length) == 0) as $valid
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
        elif ($unknown_children | length) > 0 then
          "child current state unavailable: " + ($unknown_children | map(.id) | join(", "))
@@ -1084,7 +1120,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        else {kind:null,ids:[]} end) as $invalidity
     | (if ($valid | not)
           and (($unknown_children | length) > 0
-               or (["orphan_in_flight","unowned_current","terminal_in_flight"]
+               or (["orphan_in_flight","unowned_current","terminal_in_flight","landing_blocked"]
                    | index($invalidity.kind) | not))
        then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
@@ -1841,7 +1877,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       if [ "$summary_valid" != true ]; then
         summary_invalidity=$(jq -r '.invalidity.kind // "unknown"' "$summary_file")
         case "$summary_invalidity" in
-          child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight) : ;;
+          child_current_unavailable|orphan_in_flight|unowned_current|terminal_in_flight|landing_blocked) : ;;
           *) reason="structured home state invalid" ;;
         esac
       fi
