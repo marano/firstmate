@@ -119,6 +119,8 @@ run_tick() {  # <home> <now|-> [extra env assignments...]
   else
     printf '%s\n' "$now" > "$home/now"
   fi
+  # $1 below is the bash -c child shell's positional param, not this parent shell's
+  # shellcheck disable=SC2016
   env PATH="$home/fakebin:$PATH" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
