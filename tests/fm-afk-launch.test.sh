@@ -27,6 +27,11 @@ CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 export CLAUDECODE=1
+# Both daemon entries now require a resolvable supervisor pane, so every unit
+# that exercises LIFECYCLE rather than pane discovery pins one explicitly (the
+# `start` units already did). Discovery itself is owned by
+# unit_entry_refuses_without_a_supervisor_pane, which clears every marker.
+PINNED_PANE='%afk-launch-test-pane'
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -130,7 +135,8 @@ unit_daemon_entry_requires_confirmation() {
     fail "daemon entry: pending proposal was promoted or refusal was unclear (rc=$rc): $out"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$PINNED_PANE" \
+    "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ -e "$st/state/.afk" ]; then
     pass "daemon entry: an explicitly confirmed record permits lifecycle preparation"
   else
@@ -160,7 +166,8 @@ unit_stop_archives_the_record_last() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
   mkdir -p "$st/state"
   confirm_posture "$st" || fail "stop archive: could not confirm fixture posture"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$PINNED_PANE" \
+    "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
   epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
     && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
@@ -734,13 +741,95 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
+# ---------------------------------------------------------------------------
+# UNIT: a home whose firstmate runs in no addressable pane REFUSES away-mode
+# entry instead of arming a posture nothing can supervise. Reproduced live on
+# 2026-09-17: with no marker in the environment the daemon guessed a hardcoded
+# `firstmate:0`, which resolved to a real but unrelated bare shell, so every
+# startup validation passed and every escalation was deferred forever.
+# ---------------------------------------------------------------------------
+unit_entry_refuses_without_a_supervisor_pane() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-no-pane.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'pending\n' > "$st/state/.subsuper-escalations"
+  confirm_posture "$st" || fail "no-pane refusal: could not confirm fixture posture"
+
+  # Prefix assignments neutralize whatever markers the shell running this suite
+  # happens to carry, for the duration of this one call.
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fail "no-pane refusal: start-native armed away mode with no resolvable pane"
+  elif printf '%s' "$out" | grep -F 'cannot resolve the pane running firstmate' >/dev/null \
+    && printf '%s' "$out" | grep -F 'FM_SUPERVISOR_TARGET' >/dev/null \
+    && printf '%s' "$out" | grep -F 'TMUX_PANE' >/dev/null \
+    && printf '%s' "$out" | grep -F 'HERDR_PANE_ID' >/dev/null; then
+    pass "no-pane refusal: start-native names every marker it looked for"
+  else
+    fail "no-pane refusal: diagnostic did not name what it looked for (rc=$rc): $out"
+  fi
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && [ -f "$st/state/.afk-contract" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations")" = pending ]; then
+    pass "no-pane refusal: start-native leaves no armed away state behind"
+  else
+    fail "no-pane refusal: start-native left half-armed state (state: $(ls -a "$st/state"))"
+  fi
+
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F 'cannot resolve the pane running firstmate' >/dev/null; then
+    pass "no-pane refusal: start refuses on the same diagnostic and arms nothing"
+  else
+    fail "no-pane refusal: start did not refuse cleanly (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT: the converse of the refusal above - a resolvable pane still enters away
+# mode exactly as before. This is what stops the refusal from being tightened
+# into a check that rejects valid targets.
+# ---------------------------------------------------------------------------
+unit_entry_succeeds_with_a_resolvable_pane() {
+  local st marker
+  for marker in FM_SUPERVISOR_TARGET TMUX_PANE HERDR; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pane-ok.XXXXXX")
+    mkdir -p "$st/state"
+    confirm_posture "$st" || fail "$marker entry: could not confirm fixture posture"
+    case "$marker" in
+      FM_SUPERVISOR_TARGET)
+        FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$PINNED_PANE" \
+          TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' "$LAUNCH" start-native >/dev/null 2>&1 ;;
+      TMUX_PANE)
+        FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' \
+          TMUX_PANE='%7' HERDR_ENV='' HERDR_PANE_ID='' "$LAUNCH" start-native >/dev/null 2>&1 ;;
+      HERDR)
+        FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET='' \
+          TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID='w1:p1' "$LAUNCH" start-native >/dev/null 2>&1 ;;
+    esac
+    if [ -e "$st/state/.afk" ] && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ]; then
+      pass "$marker entry: a resolvable supervisor pane still arms away mode"
+    else
+      fail "$marker entry: a resolvable supervisor pane was rejected (state: $(ls -a "$st/state"))"
+    fi
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+    rm -rf "$st"
+  done
+}
+
 unit_native_lifecycle() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   confirm_posture "$st" || fail "native lifecycle: could not confirm fixture posture"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$PINNED_PANE" \
+    "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -1210,6 +1299,8 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
+unit_entry_refuses_without_a_supervisor_pane
+unit_entry_succeeds_with_a_resolvable_pane
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record

@@ -224,9 +224,12 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
   `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, and no fallback:
+  entry and daemon startup both REFUSE when none of those resolve, naming every
+  marker they looked for. A guessed pane that happens to exist passes startup
+  validation, so the daemon would look healthy while deferring every escalation
+  into a pane that never ran firstmate. Both resolution sources are logged at
+  startup. Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
