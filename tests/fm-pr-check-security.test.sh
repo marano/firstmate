@@ -2509,8 +2509,12 @@ test_record_authentication_is_position_free() {
   ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
     || fail "a line carrying no = at all was accepted"
   fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "" "harness=claude"
-  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
-    || fail "a blank line in the record was accepted"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a blank line in the record was refused"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "" "pr=$url"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a blank line before pr= still authenticated"
+  [ "$FM_PR_META_NUMBER" = 31 ] || fail "the PR number was not read past a leading blank line"
   fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "pr=$url"
   ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
     || fail "a second pr= was accepted"

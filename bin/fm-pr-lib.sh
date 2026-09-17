@@ -297,13 +297,16 @@ fm_pr_regular_destination_on_device_or_absent() {
 # come last once disarmed a live merge watch the moment a relaunch appended its
 # own transaction id behind it.
 #
-# A record authenticates when every line is <key>=<value> with the key drawn
-# from the task-record vocabulary, no key appears twice unless its producer
-# appends by design, exactly one pr= line reconstructs its canonical URL, and
-# any pr_head= carries a valid head. A key firstmate does not write is refused
-# wherever it appears, and so is a second copy of a key - fm_meta_get reads the
-# LAST occurrence, so a repeated key is how an appended line redefines what
-# other consumers read.
+# A record authenticates when every non-blank line is <key>=<value> with the
+# key drawn from the task-record vocabulary, no key appears twice unless its
+# producer appends by design, exactly one pr= line reconstructs its canonical
+# URL, and any pr_head= carries a valid head. A key firstmate does not write is
+# refused wherever it appears, and so is a second copy of a key - fm_meta_get
+# reads the LAST occurrence, so a repeated key is how an appended line
+# redefines what other consumers read. A blank line is ignored rather than
+# refused: it carries no key, so it can neither introduce an unknown key nor
+# redefine an existing one, and a relaunch that writes one ahead of pr= must
+# not disarm the merge watch.
 fm_pr_metadata_identity_parse() {
   local file=$1 line key value pr_count=0 invalid=0 seen=' '
   FM_PR_META_PROVIDER=
@@ -315,6 +318,7 @@ fm_pr_metadata_identity_parse() {
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
+      "") continue ;;
       *=*) key=${line%%=*} value=${line#*=} ;;
       *) invalid=1; continue ;;
     esac
