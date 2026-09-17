@@ -36,6 +36,10 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (m) an agent firstmate deliberately stopped to free a concurrency slot
+#       (state/<id>.agent-stopped) reads its TERMINAL status event as that
+#       terminal state instead of unknown, and nothing else: open work, and a
+#       cleared record, both keep the ordinary unreadable-agent reading.
 #   (l) coarse runs-ledger fallback: a terminal failed record with the daemon
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
@@ -1525,6 +1529,103 @@ test_no_run_herdr_alive_with_failed_read_stays_live() {
 # not an agent. The recovery-grade read proves the process level, so the
 # shell-only pane reads as positive agent-gone evidence, never as a live agent
 # or as unreachable.
+# --- deliberately stopped agent (free the slot at DONE) ----------------------
+#
+# The captain's rule caps WORK IN PROGRESS, not agents: when a task's work is
+# done but its PR cannot land yet, firstmate stops the agent with
+# `bin/fm-control.sh <id> exit` and frees the slot, keeping the record. That
+# leaves a pane holding a shell and takes the crew's busy wiring with it, so
+# before the intentional-stop record existed this read `unknown`, which is the
+# OPPOSITE of freeing a slot - an unreadable task must be counted as occupied.
+# These cases pin the record's narrow licence in both directions.
+test_stopped_agent_with_done_event_reads_done() {
+  reset_fakes
+  local d; d=$(new_case stopped-done)
+  make_repo_on_branch "$d/wt" fm/feat-stopped-done
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stopped-done.meta" "window=fm:fm-feat-stopped-done" \
+    "worktree=$d/wt" "kind=ship" "backend=tmux" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/feat-stopped-done.status"
+
+  # Control: the same crew with no intentional-stop record. A stopped agent is
+  # indistinguishable from a wedge, so it must stay unknown.
+  local out; out=$(run_crew_state "$d" feat-stopped-done)
+  assert_contains "$out" "state: unknown" "without the stop record a stopped agent must not read as finished work"
+
+  printf 'stopped_at=2026-09-17T02:00:00Z\nverb=exit\nresult=stopped\n' \
+    > "$d/state/feat-stopped-done.agent-stopped"
+  out=$(run_crew_state "$d" feat-stopped-done)
+  assert_contains "$out" "state: done" "a deliberately stopped agent over a done event must read done, so its slot is free"
+  assert_contains "$out" "agent stopped" "the reading must say the agent was stopped on purpose"
+  assert_contains "$out" "checks green" "the crew's own last word must be preserved as the detail"
+  assert_not_contains "$out" "state: unknown" "the stop record must not leave the crew unreadable"
+  pass "a deliberately stopped agent over a done event reads done, not unknown"
+}
+
+# The narrowness is the safety property: the record licenses ONLY a terminal
+# status event. An agent stopped with work still open genuinely needs
+# firstmate, and must never be laundered into a free slot.
+test_stopped_agent_with_open_work_stays_unknown() {
+  reset_fakes
+  local d out verb; d=$(new_case stopped-open)
+  make_repo_on_branch "$d/wt" fm/feat-stopped-open
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stopped-open.meta" "window=fm:fm-feat-stopped-open" \
+    "worktree=$d/wt" "kind=ship" "backend=tmux" "harness=claude"
+  printf 'stopped_at=2026-09-17T02:00:00Z\nverb=exit\nresult=stopped\n' \
+    > "$d/state/feat-stopped-open.agent-stopped"
+  for verb in 'working: implementing' 'blocked: needs a credential' 'needs-decision: pick an API shape'; do
+    printf '%s\n' "$verb" > "$d/state/feat-stopped-open.status"
+    out=$(run_crew_state "$d" feat-stopped-open)
+    assert_contains "$out" "state: unknown" "a stopped agent whose last event is '$verb' must stay unknown, not read as a free slot"
+    assert_not_contains "$out" "agent stopped" "a non-terminal event must not take the stopped-agent reading"
+  done
+  # The divergence itself: the same record with a terminal event DOES convert,
+  # so the case above cannot go vacuous by the record simply being ignored.
+  printf 'failed: pipeline gave up\n' > "$d/state/feat-stopped-open.status"
+  out=$(run_crew_state "$d" feat-stopped-open)
+  assert_contains "$out" "state: failed" "the same stop record over a terminal event must convert, proving the case above is not vacuous"
+  pass "a deliberately stopped agent with work still open stays unknown"
+}
+
+# The record must never outlive its incarnation. bin/fm-spawn.sh clears it at
+# record publication and bin/fm-teardown.sh with the rest of the task's state,
+# so a relaunched crew reads from its live sources again.
+test_stopped_record_removed_restores_ordinary_reading() {
+  reset_fakes
+  local d; d=$(new_case stopped-cleared)
+  make_repo_on_branch "$d/wt" fm/feat-stopped-cleared
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stopped-cleared.meta" "window=fm:fm-feat-stopped-cleared" \
+    "worktree=$d/wt" "kind=ship" "backend=tmux" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/feat-stopped-cleared.status"
+  printf 'stopped_at=2026-09-17T02:00:00Z\nverb=exit\n' > "$d/state/feat-stopped-cleared.agent-stopped"
+  local out; out=$(run_crew_state "$d" feat-stopped-cleared)
+  assert_contains "$out" "state: done" "the stop record must be in force before it is cleared"
+  rm -f "$d/state/feat-stopped-cleared.agent-stopped"
+  out=$(run_crew_state "$d" feat-stopped-cleared)
+  assert_contains "$out" "state: unknown" "clearing the stop record must restore the ordinary unreadable-agent reading"
+  pass "clearing the intentional-stop record restores the ordinary reading"
+}
+
+# A live, idle agent is a different thing from a stopped one: its busy wiring
+# still answers, so the ordinary idle -> status-log path already reports done.
+# The stop record must not be required for that, nor change it.
+test_stopped_record_not_needed_while_the_agent_is_alive() {
+  reset_fakes
+  local d; d=$(new_case stopped-alive)
+  make_repo_on_branch "$d/wt" fm/feat-stopped-alive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stopped-alive.meta" "window=fm:fm-feat-stopped-alive" \
+    "worktree=$d/wt" "kind=ship" "backend=tmux" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/feat-stopped-alive.status"
+  arm_idle_record "$d/state" feat-stopped-alive
+  local out; out=$(run_crew_state "$d" feat-stopped-alive)
+  assert_contains "$out" "state: done" "a live idle agent over a done event already reads done"
+  assert_not_contains "$out" "agent stopped" "a live agent must not be described as stopped"
+  pass "a live idle agent's done reading is unchanged by the stop record"
+}
+
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone() {
   command -v jq >/dev/null 2>&1 || { pass "herdr stale-registration test skipped without jq"; return; }
   reset_fakes
@@ -2569,5 +2670,9 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_stopped_agent_with_done_event_reads_done
+test_stopped_agent_with_open_work_stays_unknown
+test_stopped_record_removed_restores_ordinary_reading
+test_stopped_record_not_needed_while_the_agent_is_alive
 
 echo "all fm-crew-state tests passed"

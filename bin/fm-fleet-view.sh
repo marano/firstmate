@@ -64,6 +64,17 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Schema: \(.schema)",
   "Home: \(.fm_home)",
   "",
+  "## Capacity",
+  "In progress: \(.capacity.in_progress)\(if (.capacity.in_progress_ids | length) > 0 then " (" + (.capacity.in_progress_ids | join(", ")) + ")" else "" end)",
+  (if (.capacity.finished | length) == 0 then
+    "Finished, awaiting landing or cleanup: none"
+   else
+    "Finished, awaiting landing or cleanup (holds a record, not a slot):",
+    (.capacity.finished[]
+     | "  - \(.id) (\(.state)) \(dash(.pr_url))")
+   end),
+  "Queued and ready to dispatch: \(.capacity.queued_ready)\(if (.capacity.queued_ready_ids | length) > 0 then " (" + (.capacity.queued_ready_ids | join(", ")) + ")" else "" end)",
+  "",
   "## Under Way",
   (if (.tasks | length) == 0 then
     "No live task metadata found."

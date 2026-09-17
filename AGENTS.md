@@ -105,6 +105,7 @@ state/               runtime records and signals; gitignored
   <id>.muse-session  muse busy-source binding (sessions root plus task worktree) written by fm-spawn; removed by teardown
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
+  <id>.agent-stopped  record that firstmate deliberately stopped this task's agent to free a concurrency slot while its work waits to land; written only by bin/fm-control.sh `exit`, cleared whenever an agent is launched for the id and by teardown, and read only by bin/fm-crew-state.sh
   <id>.backlog-close  the exact backlog transition a teardown recorded before removing the task's record, so an interrupted cleanup can still be finished at the next session start; bin/fm-backlog-transition-lib.sh owns its format and replay, and a landed transition removes it
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
@@ -391,6 +392,10 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
+Capacity is occupied by work in progress, not by open records: a task whose work is finished frees its slot at done rather than at landing, and the queue is re-evaluated there.
+Stop its agent with `bin/fm-control.sh <id> exit`, which preserves the endpoint, local copy, and every uncommitted change, so the task can still be relaunched or torn down when its PR lands; stopped and idle agents are unlimited.
+`bin/fm-fleet-snapshot.sh`'s `capacity` object owns that count, so never infer occupancy from the number of task records.
+
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
@@ -522,7 +527,7 @@ A decision is simply a task held for the captain: create the task with `bin/fm-t
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
-Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
+Re-evaluate queued work after every reported completion, teardown, and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise; keep only the configured recent Done entries.

@@ -132,6 +132,107 @@ EOF
     "mode=ship"
 }
 
+# --- capacity: the cap is on work in progress, not on open records ----------
+#
+# 2026-09-17 incident: five tasks reached green PRs overnight, none of them
+# merged, and every surface that told firstmate how much work was under way
+# counted an open task record. All five slots therefore read occupied for eight
+# hours while fifteen ready items sat queued. The captain's rule is a cap on
+# WORK IN PROGRESS with no limit on idle or stopped agents, so this projection
+# is what that judgement reads instead of a record count.
+test_capacity_frees_the_slot_at_done_not_at_landing() {
+  local home fakebin out gen view
+  home=$(make_home capacity)
+  mkdir -p "$home/projects/done-wt" "$home/projects/busy-wt" "$home/secondmate-home"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] done-ship - Done Ship https://github.com/o/r/pull/101 (repo: alpha) (kind: ship) (since 2026-09-16)
+- [ ] busy-ship - Busy Ship (repo: alpha) (kind: ship) (since 2026-09-16)
+
+## Queued
+- [ ] ready-one - Ready One (repo: alpha) (kind: ship) (since 2026-09-16)
+- [ ] ready-two - Ready Two (repo: alpha) (kind: ship) (since 2026-09-16)
+- [ ] blocked-one - Blocked One blocked-by: busy-ship (repo: alpha) (kind: ship) (since 2026-09-16)
+
+## Done
+EOF
+  # The incident's shape: work finished, PR open, agent stopped to free the slot.
+  fm_write_meta "$home/state/done-ship.meta" \
+    "window=firstmate:fm-done-ship" "worktree=$home/projects/done-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/o/r/pull/101"
+  printf 'done: PR https://github.com/o/r/pull/101 checks green\n' > "$home/state/done-ship.status"
+  printf 'stopped_at=2026-09-17T02:00:00Z\nverb=exit\nresult=stopped\n' \
+    > "$home/state/done-ship.agent-stopped"
+  # A genuinely working task, which does occupy a slot.
+  fm_write_meta "$home/state/busy-ship.meta" \
+    "window=firstmate:fm-busy-ship" "worktree=$home/projects/busy-wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship"
+  printf 'working: implementing\n' > "$home/state/busy-ship.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-ship)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-ship busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  # A persistent secondmate is never a work item and never holds a slot.
+  fm_write_meta "$home/state/mate.meta" \
+    "window=firstmate:fm-mate" "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" "harness=codex" "kind=secondmate" \
+    "mode=secondmate" "home=$home/secondmate-home" "projects=alpha, "
+  printf 'working: watching delegated scope\n' > "$home/state/mate.status"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+
+  # Obligation 1: finished work with an unlanded PR does not count.
+  printf '%s' "$out" | jq -e '
+    .capacity.in_progress == 1
+      and .capacity.in_progress_ids == ["busy-ship"]
+  ' >/dev/null || fail "a done task with an unlanded PR must not occupy a slot: $out"
+  printf '%s' "$out" | jq -e '
+    .capacity.finished == [{id:"done-ship",state:"done",pr_url:"https://github.com/o/r/pull/101"}]
+  ' >/dev/null || fail "finished work must be named with the PR still to land: $out"
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "done-ship") | .occupies_capacity) == false
+      and (.tasks[] | select(.id == "busy-ship") | .occupies_capacity) == true
+      and (.tasks[] | select(.id == "mate") | .occupies_capacity) == false
+  ' >/dev/null || fail "per-task occupies_capacity wrong (secondmates never hold a slot): $out"
+
+  # Obligation 3: the freed slot and the work waiting for it are one read, so
+  # reaching done has something to re-evaluate the queue against.
+  printf '%s' "$out" | jq -e '
+    .capacity.queued_ready == 2
+      and .capacity.queued_ready_ids == ["ready-one","ready-two"]
+  ' >/dev/null || fail "queued-ready must exclude blocked work and name what a freed slot can take: $out"
+
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "In progress: 1 (busy-ship)" "the view must report occupancy, not the record count"
+  assert_contains "$view" "done-ship (done) https://github.com/o/r/pull/101" "the view must name finished work and its PR"
+  assert_contains "$view" "Queued and ready to dispatch: 2" "the view must name the work a freed slot can take"
+  pass "capacity frees the slot at done rather than at landing"
+}
+
+# The conservative direction, which is the safety half: a task whose state
+# cannot be read counts as occupied. Over-dispatching into a slot that is not
+# actually free is worse than leaving one idle for a poll.
+test_capacity_counts_an_unreadable_task_as_occupied() {
+  local home fakebin out
+  home=$(make_home capacity-unknown)
+  mkdir -p "$home/data"
+  printf '## In flight\n- [ ] gone-ship - Gone Ship (repo: alpha) (kind: ship) (since 2026-09-16)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  fm_write_meta "$home/state/gone-ship.meta" \
+    "backend=cmux" "window=workspace:surface" "worktree=$home/projects/missing-wt" \
+    "project=alpha" "harness=codex" "kind=ship" "mode=ship"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "gone-ship") | .current_state.state) == "unknown"
+      and (.tasks[] | select(.id == "gone-ship") | .occupies_capacity) == true
+      and .capacity.in_progress == 1
+      and (.capacity.finished | length) == 0
+  ' >/dev/null || fail "an unreadable task must count as occupied and never as finished: $out"
+  pass "capacity counts an unreadable task as occupied, never as a free slot"
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -1047,6 +1148,8 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_capacity_frees_the_slot_at_done_not_at_landing
+test_capacity_counts_an_unreadable_task_as_occupied
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind

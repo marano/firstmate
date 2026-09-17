@@ -81,7 +81,13 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux and herdr, which own a
+#      than trusting a stale status log. The one exception is an agent firstmate
+#      deliberately stopped with `bin/fm-control.sh <id> exit` to free a
+#      concurrency slot while the work waits to land: that records
+#      state/<id>.agent-stopped, and over a TERMINAL status event (done/failed)
+#      it reads as that terminal state rather than as death or an unavailable
+#      harness. stopped_terminal_state owns the rule and its narrowness.
+#      On tmux and herdr, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
@@ -116,6 +122,7 @@ ID=${1:-}
 # state read resolves the same task generation selected by that snapshot.
 META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+STOPPED_MARKER="$STATE/$ID.agent-stopped"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read
@@ -186,6 +193,38 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# --- deliberately stopped agent --------------------------------------------
+# bin/fm-control.sh <id> exit stops a crew's agent while preserving its
+# endpoint, worktree, and every uncommitted change, so firstmate can free a
+# concurrency slot the moment work is DONE rather than when its PR lands. That
+# leaves a pane holding nothing but a shell, which every source below reads as
+# death or as an unavailable harness - indistinguishable from a wedge, and the
+# opposite of the intent. `exit` therefore records the intentional stop at
+# state/<id>.agent-stopped, and this helper is the ONLY thing that record
+# licenses: converting a TERMINAL status event into that terminal state.
+# Deliberately narrow. A `working:`, `blocked:`, or `needs-decision:` last line
+# means the agent was stopped with work still open, which genuinely needs
+# firstmate, so those keep reading unknown exactly as before. The record is
+# removed whenever an agent is launched for this id (bin/fm-spawn.sh) and by
+# bin/fm-teardown.sh, so it can never outlive the incarnation it describes.
+stopped_terminal_state() {
+  local mapped
+  [ -e "$STOPPED_MARKER" ] || return 1
+  [ -n "$LOG_VERB" ] || return 1
+  mapped=$(map_log_state "$LOG_LINE")
+  case "$mapped" in
+    done|failed) printf '%s' "$mapped" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Emit the stopped-agent reading when this crew has one, else return 1.
+emit_if_stopped_terminal() {
+  local mapped
+  mapped=$(stopped_terminal_state) || return 1
+  emit "$mapped" status-log "agent stopped; $(status_line_note "$LOG_LINE")"
+}
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -816,6 +855,10 @@ if ! pane_readable "$BACKEND_TARGET"; then
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
     tmux:dead|herdr:dead)
+      # An agent gone from a pane that still exists is the exact postcondition
+      # `fm-control.sh <id> exit` proves, so a recorded intentional stop over a
+      # terminal status event reads as that terminal state, not as death.
+      emit_if_stopped_terminal || true
       emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
       ;;
     tmux:*|herdr:*)
@@ -837,7 +880,12 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    # A stopped agent takes its busy wiring with it, so the semantic state goes
+    # unavailable rather than idle. That is the expected shape of a deliberate
+    # exit, not a wedge, so a recorded intentional stop over a terminal status
+    # event is read here too instead of discarding the crew's own last word.
+    *) emit_if_stopped_terminal || true
+       emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi
 
