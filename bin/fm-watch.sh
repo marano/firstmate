@@ -112,6 +112,19 @@
 #                          rows do not feed this escalation, observation is
 #                          read-only, and one parent notification covers each
 #                          no-progress episode
+#   check: fleet idle with ready work: in-progress=<n> capacity=<n> ready=<n> idle=<seconds>s
+#                          this home has a free task slot and dispatchable queued
+#                          work, and has had both continuously for
+#                          FM_IDLE_FLEET_SECS. Detection only - nothing is
+#                          dispatched, and what to start stays firstmate's
+#                          judgement. Deliberately a `check` rather than a
+#                          heartbeat, so the away-mode daemon escalates it
+#                          instead of self-handling it; bin/fm-idle-fleet-lib.sh
+#                          owns the condition and why it lives here
+#   check: fleet idle detector disabled: <why>
+#                          config/fleet-capacity exists but is not one positive
+#                          integer, so the detector refused to evaluate rather
+#                          than default around a typo
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -175,6 +188,13 @@ mkdir -p "$STATE"
 # watcher reads only its presence (afk_record_present below).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# Idle-fleet detection: bin/fm-idle-fleet-lib.sh owns the condition itself, the
+# three numbers it compares, and why the detector lives in this watcher rather
+# than in the away-mode daemon. This watcher supplies only the cadence, the
+# sustain window, and the wake (idle_fleet_tick below). Its own helper owners are
+# already loaded above, so sourcing it here adds no further expansion.
+# shellcheck source=bin/fm-idle-fleet-lib.sh
+. "$SCRIPT_DIR/fm-idle-fleet-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -273,6 +293,24 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # secondmate_wake_stall_tick, never a substitute for it.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
+# Idle-fleet detection cadence and windows (idle_fleet_tick below).
+# SCAN bounds how often the condition is evaluated at all: the cheap half reads
+# only this home's own records, but the ready count costs a backlog subprocess,
+# so it must not ride the 15s poll. It matches the away-mode daemon's own
+# catch-all scan cadence, which is the same kind of periodic fleet read.
+IDLE_FLEET_SCAN_SECS=${FM_IDLE_FLEET_SCAN_SECS:-}
+case "$IDLE_FLEET_SCAN_SECS" in ''|*[!0-9]*|0) IDLE_FLEET_SCAN_SECS=300 ;; esac
+# SECS is how long the condition must hold CONTINUOUSLY before the first alarm.
+# A slot genuinely goes free for a few minutes between one task landing and the
+# next dispatch, and that gap is normal operation, not a stopped fleet.
+IDLE_FLEET_SECS=${FM_IDLE_FLEET_SECS:-}
+case "$IDLE_FLEET_SECS" in ''|*[!0-9]*|0) IDLE_FLEET_SECS=900 ;; esac
+# RESURFACE re-raises a condition that is still holding. One alarm per episode
+# would be enough only if every alarm were acted on; the incident this detector
+# exists for was eight hours of silence, so a single missed or deferred alarm
+# must not buy another one.
+IDLE_FLEET_RESURFACE_SECS=${FM_IDLE_FLEET_RESURFACE_SECS:-}
+case "$IDLE_FLEET_RESURFACE_SECS" in ''|*[!0-9]*|0) IDLE_FLEET_RESURFACE_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -847,6 +885,101 @@ EOF
     wake "$reason"
   done
   return 0
+}
+
+# Idle-fleet detection: a home with a free task slot and dispatchable queued work
+# should not be able to go quiet. bin/fm-idle-fleet-lib.sh owns what the
+# condition is, how each of its three numbers is read, and why the detector is
+# hosted here rather than in the away-mode daemon; this function owns only the
+# cadence, the sustain window, the re-surface window, and the wake.
+#
+# The episode model is two markers. `.idle-fleet-since` holds the epoch the
+# condition first held continuously, and it is what makes a normal gap between
+# one task landing and the next dispatch silent: the condition has to survive
+# IDLE_FLEET_SECS before anything is raised. `.idle-fleet-alerted` holds the
+# epoch of the last alarm in that episode, so a condition that keeps holding
+# re-surfaces once per IDLE_FLEET_RESURFACE_SECS instead of once per scan. The
+# moment the condition stops holding - a dispatch, a drained queue, a slot
+# filling - both markers go and the next episode starts its window from scratch.
+#
+# Detection only. Nothing here dispatches, transitions a backlog item, or touches
+# a task; the wake exists so firstmate decides, under the lifecycle, whether to
+# start anything.
+idle_fleet_tick() {
+  local now since alerted idle reason key queued status
+  [ "$(age_of "$STATE/.last-idle-fleet-scan")" -ge "$IDLE_FLEET_SCAN_SECS" ] || return 0
+  # A state directory this cannot write cannot hold the episode markers below
+  # either, so the detector would run blind rather than degraded. Fail the tick
+  # and let the poll loop report it, exactly as the other marker writers do.
+  touch "$STATE/.last-idle-fleet-scan" || return 1
+  now=$(date +%s)
+
+  fm_idle_fleet_condition "$STATE" "$CONFIG" "$FM_HOME"
+  status=$?
+  case "$status" in
+    0) ;;
+    2)
+      # A capacity that cannot be read is refused rather than defaulted around,
+      # and it is reported once per queued record: silently narrowing the
+      # detector is the failure this whole check exists to remove. Nothing was
+      # evaluated, so any open episode goes with it; the repaired detector then
+      # serves a fresh window rather than maturing one nobody verified.
+      rm -f "$STATE/.idle-fleet-since" "$STATE/.idle-fleet-alerted"
+      reason="check: fleet idle detector disabled: $CONFIG/fleet-capacity is not one positive integer"
+      queued=$(fm_wake_queued_keys check)
+      if ! printf '%s\n' "$queued" | grep -Fx idle-fleet-config >/dev/null 2>&1; then
+        fm_wake_append check idle-fleet-config "$reason" || return 1
+        wake "$reason"
+      fi
+      return 0
+      ;;
+    3)
+      # The backlog tool is the only thing that can answer "is there work to
+      # start", and bin/fm-bootstrap.sh's MISSING diagnostic already owns telling
+      # the operator it is unavailable. A second wake for the same fact would
+      # report it on two cadences, so this stays a triage-log line.
+      # An open episode is left exactly as it was, neither advanced nor reset:
+      # the free slot half WAS verified before this read, and resetting on every
+      # flaky read would let an intermittent backlog suppress the alarm forever.
+      triage_log "idle-fleet detection skipped: the ready queue could not be read"
+      return 0
+      ;;
+    *)
+      rm -f "$STATE/.idle-fleet-since" "$STATE/.idle-fleet-alerted"
+      return 0
+      ;;
+  esac
+
+  since=$(cat "$STATE/.idle-fleet-since" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) since= ;; esac
+  # A marker dated in the future is a clock the scan cannot reason about; restart
+  # the window rather than maturing an episode that never actually held.
+  if [ -z "$since" ] || [ "$since" -gt "$now" ]; then
+    printf '%s\n' "$now" > "$STATE/.idle-fleet-since" || return 1
+    rm -f "$STATE/.idle-fleet-alerted"
+    return 0
+  fi
+  idle=$((now - since))
+  [ "$idle" -ge "$IDLE_FLEET_SECS" ] || return 0
+
+  alerted=$(cat "$STATE/.idle-fleet-alerted" 2>/dev/null || true)
+  case "$alerted" in ''|*[!0-9]*) alerted= ;; esac
+  if [ -n "$alerted" ] && [ "$alerted" -le "$now" ] \
+    && [ "$((now - alerted))" -lt "$IDLE_FLEET_RESURFACE_SECS" ]; then
+    return 0
+  fi
+
+  key='idle-fleet'
+  reason="check: fleet idle with ready work: in-progress=$FM_IDLE_FLEET_IN_PROGRESS capacity=$FM_IDLE_FLEET_CAPACITY ready=$FM_IDLE_FLEET_READY idle=${idle}s"
+  queued=$(fm_wake_queued_keys check)
+  if printf '%s\n' "$queued" | grep -Fx "$key" >/dev/null 2>&1; then
+    # An unhandled alarm for this condition is already durable; a second record
+    # says nothing the first does not.
+    return 0
+  fi
+  fm_wake_append check "$key" "$reason" || return 1
+  printf '%s\n' "$now" > "$STATE/.idle-fleet-alerted" || return 1
+  wake "$reason"
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -2040,6 +2173,15 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+
+  # Idle-fleet detection on its own bounded cadence. Most cycles skip it
+  # entirely, and a cycle that does evaluate it reads only this home's own
+  # records unless a slot is actually free. It cannot starve the sweeps below:
+  # it wakes at most once per FM_IDLE_FLEET_RESURFACE_SECS.
+  idle_fleet_tick || {
+    echo "watcher: idle-fleet detection failed" >&2
+    exit 1
+  }
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
