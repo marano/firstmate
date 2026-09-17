@@ -897,7 +897,6 @@ EOF
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] done - Done child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
-- [ ] failed - Failed child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
 
 ## Queued
 
@@ -906,28 +905,55 @@ EOF
   fm_write_meta "$mate/state/done.meta" \
     "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
-  fm_write_meta "$mate/state/failed.meta" \
-    "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" "done" idle
-  record_claude_state "$mate/state" failed idle
   printf 'done: complete\n' > "$mate/state/done.status"
-  printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
   refresh_local_secondmate_ledgers "$home"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  # A task whose work is done but whose PR has not landed keeps its in-flight
+  # backlog row while its agent frees the concurrency slot at done, not at
+  # landing (capacity is decided elsewhere). That is now the ordinary steady
+  # state, so it must read as a healthy, valid home - never terminal_in_flight.
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "no_active_work"
-      and (.current.reason | contains("terminal child state"))
-      and (.current.reason | contains("done=done"))
+      and .current.reason == null
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "complete"
+      and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done-but-unlanded child must read as a healthy home, not terminal_in_flight: $canonical"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] done - Done child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
+- [ ] failed - Failed child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/failed.meta" \
+    "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" failed idle
+  printf 'failed: stopped\n' > "$mate/state/failed.status"
+  refresh_local_secondmate_ledgers "$home"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  # A genuinely failed child, by contrast, must still invalidate the home and
+  # name only the failed id - the done row beside it stays out of it.
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "states")
+    | .current.state == "no_active_work"
+      and (.current.reason | contains("a failed child state"))
       and (.current.reason | contains("failed=failed"))
+      and (.current.reason | contains("done=done") | not)
       and .provenance.selected == "structured-home"
       and .provenance.trust == "partial-structured"
-      and .invalidity == {kind:"terminal_in_flight",ids:["done","failed"]}
-  ' >/dev/null || fail "terminal in-flight rows discarded the readable home: $canonical"
-  pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
+      and .invalidity == {kind:"terminal_in_flight",ids:["failed"]}
+  ' >/dev/null || fail "a failed in-flight row must still invalidate the home without the done row: $canonical"
+  pass "a done-but-unlanded child stays healthy while a failed child still invalidates the home"
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {

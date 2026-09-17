@@ -249,6 +249,9 @@ aggregation, includes generated_epoch for freshness arithmetic, and marks
 inventory contradictions or unavailable child state invalid.
 kind=secondmate meta records are not child inventory for unowned_current or
 terminal_in_flight; they never have backlog rows.
+An in-flight backlog row whose child work is done but not yet landed is the
+ordinary steady state (capacity frees at done, not at landing) and is never
+terminal_in_flight; that kind flags only a failed child state.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
@@ -1018,7 +1021,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.kind != "secondmate")
-         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(.id == $work.id and .current_state.state == "failed")
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -1037,7 +1040,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         else empty end,
         if ($terminal_in_flight | length) > 0 then
           {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id)),
-           reason:("in-flight backlog item has terminal child state: " +
+           reason:("in-flight backlog item has a failed child state: " +
                    ($terminal_in_flight | map(.id + "=" + .state) | join(", ")))}
         else empty end]) as $strict_invalidities
     | ([ $owned_in_flight[] as $work
