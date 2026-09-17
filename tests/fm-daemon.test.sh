@@ -2636,7 +2636,6 @@ test_daemon_refuses_a_guessed_supervisor_pane() {
     kill -KILL "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     fail "daemon kept running with no resolvable supervisor pane instead of refusing"
-    return 0
   fi
   wait "$pid"
   status=$?
