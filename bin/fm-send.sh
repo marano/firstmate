@@ -7,6 +7,11 @@
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
+# An unrecognized leading "--"-shaped token (e.g. a mistyped --text-file) is
+# refused rather than accepted as message text, because a guessed flag would
+# otherwise be delivered as a record whose entire body is the flag token and
+# exit 0 as if steered. Only the leading position is guarded; "--" appearing
+# later in the message body is ordinary text.
 # The text must be nonempty: an empty or whitespace-only message is refused
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
