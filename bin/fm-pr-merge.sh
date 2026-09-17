@@ -99,6 +99,16 @@
 # explicit captain instruction and never skips the live green check, the
 # away-grant check, or a captain hold.
 #
+# Instead of leaning on those forge flags, this script deletes the pull
+# request's own head branch itself, strictly after the forge has confirmed the
+# merge landed (github_delete_merged_branch, gitlab_delete_merged_branch). It
+# skips deletion, reporting why but never failing the run, when the branch
+# cannot be identified, lives in a fork, is also the base branch, is a
+# protected branch, is the base of another open pull request or merge request,
+# or when any of those reads fails; a deletion command failure is reported the
+# same way. A merge that already landed is never turned into a failed run by a
+# branch cleanup step.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -386,11 +396,18 @@ fi
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+# The PR/MR's own head branch, captured live before the merge so post-merge
+# branch deletion never has to guess a name from something that can change.
+FM_PR_GITHUB_HEAD_REF=
+FM_PR_GITHUB_CROSS_REPO=
+FM_PR_GITLAB_SOURCE_BRANCH=
+FM_PR_GITLAB_FORK=
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local source_branch='' source_project='' target_project=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -413,7 +430,10 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
-        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
+        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end),
+        "source_branch=" + ((.source_branch // "") | tostring),
+        "source_project=" + ((.source_project_id // "") | tostring),
+        "target_project=" + ((.target_project_id // "") | tostring)
       else
         error("merge request payload is not an object")
       end' 2>/dev/null); then
@@ -431,6 +451,9 @@ gitlab_verify_mergeable() {
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
+      source_branch=*) source_branch=${line#source_branch=} ;;
+      source_project=*) source_project=${line#source_project=} ;;
+      target_project=*) target_project=${line#target_project=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
@@ -440,7 +463,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
+  if [ "$named" -ne 11 ] || [ "$total" -ne 11 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -484,6 +507,12 @@ FIELDS
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
+  FM_PR_GITLAB_SOURCE_BRANCH=$source_branch
+  if [ -n "$source_project" ] && [ -n "$target_project" ] && [ "$source_project" = "$target_project" ]; then
+    FM_PR_GITLAB_FORK=false
+  else
+    FM_PR_GITLAB_FORK=true
+  fi
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -570,8 +599,9 @@ github_verify_mergeable() {
   local json fields line red name covered
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local head_ref='' cross_repo=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,isCrossRepository,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -583,7 +613,9 @@ github_verify_mergeable() {
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
-        "base=" + ((.baseRefName // "") | tostring)
+        "head_ref=" + ((.headRefName // "") | tostring),
+        "base=" + ((.baseRefName // "") | tostring),
+        "cross_repo=" + (if (.isCrossRepository | type) == "boolean" then (.isCrossRepository | tostring) else "" end)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -598,14 +630,16 @@ github_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       merge_state=*) merge_state=${line#merge_state=} ;;
       head=*) live_head=${line#head=} ;;
+      head_ref=*) head_ref=${line#head_ref=} ;;
       base=*) base=${line#base=} ;;
+      cross_repo=*) cross_repo=${line#cross_repo=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$base" ]; then
+  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ] || [ -z "$base" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
@@ -664,6 +698,8 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_HEAD_REF=$head_ref
+  FM_PR_GITHUB_CROSS_REPO=$cross_repo
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -763,7 +799,7 @@ github_read_outcome() {
   return 1
 }
 
-github_urlencode_path_segment() {
+url_encode_path_segment() {
   local LC_ALL=C input=$1 encoded='' char octet hex
   while [ -n "$input" ]; do
     char=${input%"${input#?}"}
@@ -797,7 +833,7 @@ github_read_queue_method() {
   FM_PR_GITHUB_QUEUE_STATUS=unreadable
   command -v gh >/dev/null 2>&1 || return 0
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
-  branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
+  branch_path=$(url_encode_path_segment "$FM_PR_GITHUB_BASE")
   api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-queue-rules.XXXXXX") || return 0
   if ! methods=$(gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
@@ -1121,6 +1157,122 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# Delete the pull request's own head branch, but only from the call site that
+# is reached exclusively after the forge has confirmed the merge landed: never
+# call this speculatively, and never move it ahead of that proof. A deletion
+# failure or an unmet safety condition is reported and left in place; it never
+# turns a landed merge into a failed run, so this always returns 0.
+github_delete_merged_branch() {
+  local branch="$FM_PR_GITHUB_HEAD_REF" enc protected_json protected_status=0
+  local open_count
+  if [ -z "$branch" ]; then
+    printf 'actionable: could not determine the head branch for %s; branch left in place\n' \
+      "$URL" >&2
+    return 0
+  fi
+  if [ "$FM_PR_GITHUB_CROSS_REPO" != false ]; then
+    printf 'actionable: the head branch for %s lives in a fork; branch left in place\n' \
+      "$URL" >&2
+    return 0
+  fi
+  if [ "$branch" = "$FM_PR_GITHUB_BASE" ]; then
+    printf 'actionable: head branch %s for %s is also its base branch; branch left in place\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  enc=$(url_encode_path_segment "$branch")
+  protected_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" --jq '.protected' 2>/dev/null) \
+    || protected_status=$?
+  if [ "$protected_status" -ne 0 ]; then
+    if ! gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" >/dev/null 2>&1; then
+      printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
+      return 0
+    fi
+    printf 'actionable: could not confirm branch protection for %s after merging %s; branch left in place\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  if [ "$protected_json" = true ]; then
+    printf 'actionable: %s is a protected branch; branch left in place after merging %s\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  if ! open_count=$(gh api "repos/$PR_OWNER/$PR_REPO/pulls?base=$enc&state=open" --jq 'length' 2>/dev/null); then
+    printf 'actionable: could not confirm %s is not the base of another open pull request; branch left in place after merging %s\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  if [ "$open_count" != 0 ]; then
+    printf 'actionable: %s is the base of %s other open pull request(s); branch left in place after merging %s\n' \
+      "$branch" "$open_count" "$URL" >&2
+    return 0
+  fi
+  if gh api -X DELETE "repos/$PR_OWNER/$PR_REPO/git/refs/heads/$branch" >/dev/null 2>&1; then
+    printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
+  else
+    printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
+      "$branch" "$URL" >&2
+  fi
+  return 0
+}
+
+# GitLab equivalent of github_delete_merged_branch: same proof-after-only call
+# site, same never-fail-the-run contract.
+gitlab_delete_merged_branch() {
+  local branch="$FM_PR_GITLAB_SOURCE_BRANCH" project_enc branch_enc
+  local protected_output protected_status=0 open_count
+  if [ -z "$branch" ]; then
+    printf 'actionable: could not determine the source branch for %s; branch left in place\n' \
+      "$URL" >&2
+    return 0
+  fi
+  if [ "$FM_PR_GITLAB_FORK" != false ]; then
+    printf 'actionable: the source branch for %s lives in a forked project; branch left in place\n' \
+      "$URL" >&2
+    return 0
+  fi
+  project_enc=$(url_encode_path_segment "$PR_PATH")
+  branch_enc=$(url_encode_path_segment "$branch")
+  protected_output=$(GITLAB_HOST="$FM_PR_HOST" glab api \
+    "projects/$project_enc/protected_branches/$branch_enc" 2>&1) || protected_status=$?
+  if [ "$protected_status" -eq 0 ]; then
+    printf 'actionable: %s is a protected branch; branch left in place after merging %s\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  # glab api reports both "not protected" (404) and a genuine read failure as a
+  # nonzero exit; only a 404 in the reported error text confirms the branch is
+  # unprotected, so anything else is a safety-relevant unknown that skips
+  # deletion rather than guessing.
+  case "$protected_output" in
+    *404*) ;;
+    *)
+      printf 'actionable: could not confirm branch protection for %s after merging %s; branch left in place\n' \
+        "$branch" "$URL" >&2
+      return 0
+      ;;
+  esac
+  if ! open_count=$(GITLAB_HOST="$FM_PR_HOST" glab api \
+    "projects/$project_enc/merge_requests?state=opened&target_branch=$branch_enc" --jq 'length' 2>/dev/null); then
+    printf 'actionable: could not confirm %s is not the target of another open merge request; branch left in place after merging %s\n' \
+      "$branch" "$URL" >&2
+    return 0
+  fi
+  if [ "$open_count" != 0 ]; then
+    printf 'actionable: %s is the target of %s other open merge request(s); branch left in place after merging %s\n' \
+      "$branch" "$open_count" "$URL" >&2
+    return 0
+  fi
+  if GITLAB_HOST="$FM_PR_HOST" glab api -X DELETE \
+    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
+    printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
+  else
+    printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
+      "$branch" "$URL" >&2
+  fi
+  return 0
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -1247,4 +1399,13 @@ case "$outcome_rc" in
   *)
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
+esac
+
+# Same reached-only-after-proof point as the outcome report above. A failed or
+# skipped deletion is reported by the provider function and never changes this
+# script's exit status: the merge already landed and is durable regardless of
+# whether its branch cleanup succeeds.
+case "$PROVIDER" in
+  github) github_delete_merged_branch ;;
+  gitlab) gitlab_delete_merged_branch ;;
 esac

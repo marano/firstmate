@@ -58,6 +58,11 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# The head branch name every GitHub fixture below carries, so the branch
+# deletion tests have a concrete, realistic name to assert against without
+# every existing fixture builder call site having to name one.
+GH_TEST_HEAD_BRANCH=fm/example-branch
+
 # Live GitHub JSON for the pre-merge verify, plus gh-axi for the
 # post-merge fallback view. Merge itself is `gh pr merge --match-head-commit`.
 # Args: case_dir head_sha
@@ -65,7 +70,7 @@ write_github_live_json() {
   local case_dir=$1 head=$2
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","headRefName":"$GH_TEST_HEAD_BRANCH","isCrossRepository":false,"baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
 JSON
 }
 
@@ -73,7 +78,7 @@ write_github_red_json() {
   local case_dir=$1 head=$2 name=$3
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","headRefName":"$GH_TEST_HEAD_BRANCH","isCrossRepository":false,"baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"$name","status":"COMPLETED","conclusion":"FAILURE"}]}
 JSON
 }
 
@@ -108,7 +113,7 @@ write_github_rollup_json() {
   done
   printf '%s\n' "$head" > "$case_dir/github-head"
   cat > "$case_dir/github-view.json" <<JSON
-{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","baseRefName":"main","statusCheckRollup":[$rollup]}
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","headRefName":"$GH_TEST_HEAD_BRANCH","isCrossRepository":false,"baseRefName":"main","statusCheckRollup":[$rollup]}
 JSON
 }
 
@@ -190,15 +195,55 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
-    if [ -f "${FM_TEST_GH_RULES_FAIL_BODY:-}" ]; then
-      cat "$FM_TEST_GH_RULES_FAIL_BODY" >&2
-      exit 1
-    fi
-    if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
-      exit 1
-    fi
-    cat "$FM_TEST_GH_RULES"
-    exit 0
+    case " $* " in
+      # The merge-queue ruleset lookup, checked ahead of the plain per-branch
+      # protection read below because its path also contains "/branches/".
+      *"/rules/branches/"*)
+        if [ -f "${FM_TEST_GH_RULES_FAIL_BODY:-}" ]; then
+          cat "$FM_TEST_GH_RULES_FAIL_BODY" >&2
+          exit 1
+        fi
+        if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
+          exit 1
+        fi
+        cat "$FM_TEST_GH_RULES"
+        exit 0
+        ;;
+      *"/git/refs/heads/"*)
+        [ ! -f "${FM_TEST_GH_DELETE_BRANCH_FAILS:-}" ] || exit 1
+        : > "${FM_TEST_GH_DELETE_BRANCH_CALLED:-/dev/null}"
+        exit 0
+        ;;
+      *"/pulls?"*)
+        if [ -f "${FM_TEST_GH_OPEN_PR_COUNT:-}" ]; then
+          cat "$FM_TEST_GH_OPEN_PR_COUNT"
+        else
+          printf '0\n'
+        fi
+        exit 0
+        ;;
+      *"/branches/"*)
+        if [ -f "${FM_TEST_GH_BRANCH_MISSING:-}" ]; then
+          exit 1
+        elif [ -f "${FM_TEST_GH_BRANCH_PROTECTED:-}" ]; then
+          printf 'true\n'
+        else
+          printf 'false\n'
+        fi
+        exit 0
+        ;;
+      *)
+        if [ -f "${FM_TEST_GH_RULES_FAIL_BODY:-}" ]; then
+          cat "$FM_TEST_GH_RULES_FAIL_BODY" >&2
+          exit 1
+        fi
+        if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
+          exit 1
+        fi
+        cat "$FM_TEST_GH_RULES"
+        exit 0
+        ;;
+    esac
     ;;
 esac
 exit 0
@@ -278,6 +323,32 @@ case "${1:-} ${2:-}" in
     : > "$case_dir/glab-merge-called"
     exit 0
     ;;
+  api\ *)
+    case " $* " in
+      *"/protected_branches/"*)
+        if [ -e "$case_dir/glab-branch-protected" ]; then
+          printf '{"name":"protected"}\n'
+          exit 0
+        fi
+        echo 'error: 404 Not Found' >&2
+        exit 1
+        ;;
+      *"/merge_requests?"*)
+        if [ -e "$case_dir/glab-open-mr-count" ]; then
+          cat "$case_dir/glab-open-mr-count"
+        else
+          printf '0\n'
+        fi
+        exit 0
+        ;;
+      *"/repository/branches/"*)
+        [ ! -e "$case_dir/glab-delete-branch-fails" ] || exit 1
+        : > "$case_dir/glab-delete-branch-called"
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -294,6 +365,7 @@ write_mr_json() {
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
   local merge_when_pipeline_succeeds=false merge_after=null
+  local source_branch=fm/example-branch source_project_id=1 target_project_id=1
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -309,6 +381,9 @@ write_mr_json() {
       pipeline) pipeline=$value ;;
       merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
       merge_after) merge_after=$value ;;
+      source_branch) source_branch=$value ;;
+      source_project_id) source_project_id=$value ;;
+      target_project_id) target_project_id=$value ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
@@ -317,10 +392,14 @@ write_mr_json() {
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
-  printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
-    "$discussions" "$head" "$pipeline" >> "$file"
-  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
-    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
+  {
+    printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
+      "$discussions" "$head" "$pipeline"
+    printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s,' \
+      "$merge_when_pipeline_succeeds" "$merge_after"
+    printf '"source_branch":"%s","source_project_id":%s,"target_project_id":%s}\n' \
+      "$source_branch" "$source_project_id" "$target_project_id"
+  } >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
@@ -386,6 +465,11 @@ run_pr_merge() {
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
+  FM_TEST_GH_DELETE_BRANCH_FAILS="$case_dir/github-delete-branch-fails" \
+  FM_TEST_GH_DELETE_BRANCH_CALLED="$case_dir/github-delete-branch-called" \
+  FM_TEST_GH_OPEN_PR_COUNT="$case_dir/github-open-pr-count" \
+  FM_TEST_GH_BRANCH_PROTECTED="$case_dir/github-branch-protected" \
+  FM_TEST_GH_BRANCH_MISSING="$case_dir/github-branch-missing" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -3067,7 +3151,208 @@ test_allow_red_refused_on_gitlab() {
   pass "fm-pr-merge refuses --allow-red on GitLab"
 }
 
+test_verified_merge_deletes_head_branch_after_proof() {
+  local case_dir rc merge_line delete_line
+  case_dir=$(make_case deletes-branch-after-proof)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cafed00d000000000000000000000000cafed00d
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/80 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deletes-branch-after-proof: fm-pr-merge should succeed"
+  assert_grep "branch deleted: $GH_TEST_HEAD_BRANCH" "$case_dir/stdout" \
+    "deletes-branch-after-proof: the head branch was not reported deleted"
+  assert_grep "api -X DELETE repos/example/repo/git/refs/heads/$GH_TEST_HEAD_BRANCH" \
+    "$case_dir/gh.log" \
+    "deletes-branch-after-proof: the delete-ref API call was not made"
+  merge_line=$(grep -n '^pr merge ' "$case_dir/gh.log" | head -1 | cut -d: -f1)
+  delete_line=$(grep -n '/git/refs/heads/' "$case_dir/gh.log" | head -1 | cut -d: -f1)
+  [ -n "$merge_line" ] && [ -n "$delete_line" ] && [ "$delete_line" -gt "$merge_line" ] \
+    || fail "deletes-branch-after-proof: branch deletion did not happen strictly after the merge call"
+  pass "fm-pr-merge deletes the head branch after a verified GitHub merge"
+}
+
+# Mutant proof: an unproved merge must leave the branch alone. Removing the
+# ordering guard that keeps branch deletion strictly after proof of a landed
+# merge turns this test red, because the failed-merge call site here is
+# reached before that proof exists.
+test_unproved_github_merge_leaves_branch_alone() {
+  local case_dir rc
+  case_dir=$(make_case unproved-merge-leaves-branch)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir" fadedfadedfadedfadedfadedfadedfadedfaded
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "unproved-merge-leaves-branch: the failed merge should not report success"
+  assert_no_grep '/git/refs/heads/' "$case_dir/gh.log" \
+    "unproved-merge-leaves-branch: branch deletion ran before the merge was proven"
+  pass "fm-pr-merge never deletes a branch behind an unproved merge"
+}
+
+# Mutant proof: a deletion failure must not turn a landed merge into a failed
+# run. Making deletion failure fatal turns this test red.
+test_branch_deletion_failure_does_not_fail_a_landed_merge() {
+  local case_dir rc
+  case_dir=$(make_case deletion-failure-does-not-fail-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-delete-branch-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deletion-failure-does-not-fail-merge: a landed merge must still exit zero"
+  assert_grep 'verified: https://github.com/example/repo/pull/82 is merged' "$case_dir/stdout" \
+    "deletion-failure-does-not-fail-merge: the merge was not reported as landed"
+  assert_grep "could not delete branch $GH_TEST_HEAD_BRANCH" "$case_dir/stderr" \
+    "deletion-failure-does-not-fail-merge: the deletion failure was not reported"
+  pass "fm-pr-merge reports a landed merge as done even when branch deletion fails"
+}
+
+test_protected_head_branch_is_left_in_place() {
+  local case_dir rc
+  case_dir=$(make_case protected-branch-left-in-place)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" abad1deaabad1deaabad1deaabad1deaabad1dea
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-branch-protected"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/83 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "protected-branch-left-in-place: a landed merge must still exit zero"
+  assert_no_grep '/git/refs/heads/' "$case_dir/gh.log" \
+    "protected-branch-left-in-place: a protected branch was deleted"
+  assert_grep 'is a protected branch' "$case_dir/stderr" \
+    "protected-branch-left-in-place: the protection was not reported"
+  pass "fm-pr-merge never deletes a protected branch"
+}
+
+test_branch_base_of_open_pr_is_left_in_place() {
+  local case_dir rc
+  case_dir=$(make_case branch-base-of-open-pr)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1eaf1eaf1eaf1eaf1eaf1eaf1eaf1eaf1eaf1eaf
+  : > "$case_dir/gh-axi.log"
+  printf '1\n' > "$case_dir/github-open-pr-count"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "branch-base-of-open-pr: a landed merge must still exit zero"
+  assert_no_grep '/git/refs/heads/' "$case_dir/gh.log" \
+    "branch-base-of-open-pr: the branch was deleted despite another open pull request"
+  assert_grep 'is the base of 1 other open pull request(s)' "$case_dir/stderr" \
+    "branch-base-of-open-pr: the open pull request was not reported"
+  pass "fm-pr-merge never deletes a branch that is the base of another open pull request"
+}
+
+test_fork_head_branch_is_left_in_place() {
+  local case_dir rc head=deadfa11deadfa11deadfa11deadfa11deadfa11
+  case_dir=$(make_case fork-branch-left-in-place)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","headRefName":"$GH_TEST_HEAD_BRANCH","isCrossRepository":true,"baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+JSON
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/85 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fork-branch-left-in-place: a landed merge must still exit zero"
+  assert_no_grep '/git/refs/heads/' "$case_dir/gh.log" \
+    "fork-branch-left-in-place: a fork's branch was deleted from the base repository"
+  assert_grep 'lives in a fork' "$case_dir/stderr" \
+    "fork-branch-left-in-place: the fork was not reported"
+  pass "fm-pr-merge never deletes a pull request's fork branch"
+}
+
+test_gitlab_confirmed_merge_deletes_source_branch() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-deletes-source-branch)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-deletes-source-branch: merge should succeed"
+  assert_grep 'branch deleted: fm/example-branch' "$case_dir/stdout" \
+    "gitlab-deletes-source-branch: the source branch was not reported deleted"
+  assert_grep "GITLAB_HOST=$MR_HOST api -X DELETE projects/group%2Fsubgroup%2Fproject/repository/branches/fm%2Fexample-branch" \
+    "$case_dir/glab.log" \
+    "gitlab-deletes-source-branch: the delete-branch API call was not made"
+  pass "fm-pr-merge deletes the source branch after a confirmed GitLab merge"
+}
+
+# Mutant proof (GitLab side): an unconfirmed merge must leave the branch
+# alone, the same guard test_unproved_github_merge_leaves_branch_alone proves
+# for GitHub.
+test_gitlab_unconfirmed_merge_leaves_branch_alone() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-unconfirmed-merge-leaves-branch)
+  write_mr_json "$case_dir/mr-post.json" state=opened
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "gitlab-unconfirmed-merge-leaves-branch: an unconfirmed merge still exits zero while its poll stays armed"
+  assert_no_grep '/repository/branches/' "$case_dir/glab.log" \
+    "gitlab-unconfirmed-merge-leaves-branch: branch deletion ran without a confirmed merge"
+  pass "fm-pr-merge never deletes a GitLab branch behind an unconfirmed merge"
+}
+
+test_gitlab_unreadable_project_id_leaves_branch_alone() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-unreadable-project-id target_project_id=null)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "gitlab-unreadable-project-id: a landed merge must still exit zero"
+  assert_no_grep '/repository/branches/' "$case_dir/glab.log" \
+    "gitlab-unreadable-project-id: branch deletion ran despite an unreadable target project id"
+  assert_grep 'lives in a forked project' "$case_dir/stderr" \
+    "gitlab-unreadable-project-id: the unknown-fork case was not reported"
+  pass "fm-pr-merge treats an unreadable GitLab project id as a fork, not as safe to delete"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
+test_gitlab_unreadable_project_id_leaves_branch_alone
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward
@@ -3107,3 +3392,11 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_grant_revoked_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+test_verified_merge_deletes_head_branch_after_proof
+test_unproved_github_merge_leaves_branch_alone
+test_branch_deletion_failure_does_not_fail_a_landed_merge
+test_protected_head_branch_is_left_in_place
+test_branch_base_of_open_pr_is_left_in_place
+test_fork_head_branch_is_left_in_place
+test_gitlab_confirmed_merge_deletes_source_branch
+test_gitlab_unconfirmed_merge_leaves_branch_alone
