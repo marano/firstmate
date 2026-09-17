@@ -510,6 +510,19 @@ while :; do
   esac
 done
 
+# Refuse an unrecognized leading "--"-shaped token instead of silently taking
+# it as message text: a mistyped flag such as --text-file would otherwise be
+# delivered as a record whose entire body is the flag token, exiting 0 as if
+# steered. Only the leading position is guarded; a legitimate message may
+# still contain "--" later in its body.
+case "${1:-}" in
+--key) ;;
+--*)
+  echo "error: unrecognized flag '$1' (usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>, or fm-send.sh <target> --key <Key>)" >&2
+  exit 1
+  ;;
+esac
+
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
 fi

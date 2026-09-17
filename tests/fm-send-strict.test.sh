@@ -231,6 +231,42 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+# A mistyped flag such as --text-file has no case in the argument parser, so
+# without a guard it falls straight through to MESSAGE=$* and is delivered as
+# a steering record whose entire body is the flag token - a silent success
+# that leaves the real answer never sent. The guard must refuse this before
+# any record is written.
+test_unrecognized_leading_flag_is_refused() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/badflag"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home badflag); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-badflag.meta" "window=sess:fm-lane-badflag" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-badflag --text-file /private/tmp/steer.txt >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrecognized leading flag should be refused, not sent as message text"
+  assert_contains "$(cat "$err")" "unrecognized flag" "the diagnostic should say the flag is unrecognized"
+  assert_contains "$(cat "$err")" "--text-file" "the diagnostic should name the offending token"
+  [ ! -d "$home/state/lane-badflag.inbox" ] || fail "an unrecognized leading flag should not create a steering record"$'\n'"$(ls "$home/state/lane-badflag.inbox")"
+  pass "fm-send strict: an unrecognized leading --flag is refused rather than sent as message text"
+}
+
+# The guard only inspects the leading position: a legitimate message that
+# happens to contain "--" later in its body must still send unchanged.
+test_message_containing_double_dash_after_first_word_still_sends() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/embeddash"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home embeddash); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-dash.meta" "window=sess:fm-lane-dash" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-dash "run the tests -- and report back" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a message containing -- after its first word should still send"
+  grep -qF -- 'run the tests -- and report back' "$home/state/lane-dash.inbox/001.msg" \
+    || fail "a message containing -- after its first word should be recorded unchanged"
+  pass "fm-send strict: a legitimate message containing -- after its first word still sends unchanged"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -239,3 +275,5 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_unrecognized_leading_flag_is_refused
+test_message_containing_double_dash_after_first_word_still_sends
