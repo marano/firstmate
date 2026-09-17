@@ -16,11 +16,14 @@
 # older code.
 #
 # A backlog-vs-metadata inventory mismatch inside a secondmate home
-# (orphan_in_flight, unowned_current, terminal_in_flight) no longer makes that
-# home unreadable: bin/fm-fleet-snapshot.sh keeps its decisions, queued, landed,
-# and live work and carries the mismatch for renderers. The books are still
-# wrong, and only the home that owns them may fix them, so the parent sends one
-# reconcile instruction and stops there.
+# (orphan_in_flight, unowned_current, terminal_in_flight, landing_blocked) no
+# longer makes that home unreadable: bin/fm-fleet-snapshot.sh keeps its
+# decisions, queued, landed, and live work and carries the mismatch for
+# renderers. The books are still wrong, and only the home that owns them may fix
+# them, so the parent sends one reconcile instruction and stops there.
+# landing_blocked is a records-vs-reality mismatch of the same family: the forge
+# head that home recorded is no longer its branch's work, and only that home can
+# push the missing commits or re-arm the poll.
 #
 # What this script owns:
 #   - the durable one-shot request queue under state/reconcile-notify. Bearings
@@ -287,11 +290,11 @@ cmd_request() {
     if .schema == "fm-bearings.v1" then
       any((.secondmate_reconcile // [])[];
         .kind as $kind
-        | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
+        | ["orphan_in_flight","unowned_current","terminal_in_flight","landing_blocked"] | index($kind))
     else
       any((.secondmate_current.records // [])[];
         .reconcile_inventory as $inv
-        | ["orphan_in_flight","unowned_current","terminal_in_flight"] | index($inv.kind))
+        | ["orphan_in_flight","unowned_current","terminal_in_flight","landing_blocked"] | index($inv.kind))
     end
   ' "$tmp" >/dev/null 2>&1; then
     rm -f -- "$tmp"
@@ -310,7 +313,7 @@ cmd_request() {
      | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]*$")))
      | select((.host | type) == "string" and (.host | test("[[:cntrl:]]") | not))
      | .kind as $kind
-     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))]
+     | select(["orphan_in_flight","unowned_current","terminal_in_flight","landing_blocked"] | index($kind))]
     | unique_by([.id,.spawn_gen,.host])[]
   ' "$tmp") || { rm -f -- "$tmp"; fail "cannot identify reconcile notify targets"; }
   while IFS= read -r target; do
@@ -456,7 +459,7 @@ cmd_notify() {
     | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]*$")))
     | select((.host | type) == "string" and (.host | test("[[:cntrl:]]") | not))
     | .kind as $kind
-    | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
+    | select(["orphan_in_flight","unowned_current","terminal_in_flight","landing_blocked"] | index($kind))
     | [.id, .spawn_gen, .host, $kind]
     | join($sep)')
 
