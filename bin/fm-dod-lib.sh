@@ -294,7 +294,8 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green run={run-id}\` and stop. You are finished.
+\`{run-id}\` is the concrete no-mistakes run you drove to that green result, exactly as \`axi run\`/\`axi respond\` printed it - paste that id, never a description of the command you ran. "Applied via axi respond" is a report about a command, not evidence about the commit: a \`done:\` line with no run id is not a complete report, so do not send one.
 EOF
       ;;
     *)
