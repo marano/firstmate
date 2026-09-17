@@ -18,21 +18,22 @@ A cancelled lane's elapsed duration is only a lower bound; its unfinished script
 
 ## Parallel lanes
 
-The two parallel lanes use longest-processing-time assignment over those hints.
-[`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1` and `list_portable_parallel_2`.
+The three parallel lanes use longest-processing-time assignment over those hints.
+[`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1`, `list_portable_parallel_2`, and `list_portable_parallel_3`.
 Read the derived packing estimates with that runner's `--check-coverage`; its header and `--help` own the output fields and the selection-specific `--list-scheduled` weight rules.
 The largest individual hint sets a lower bound on the estimated duration of any split, regardless of how evenly the remaining work is assigned.
 The CI cap and its rationale are owned by [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 
-[`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the lane sums to differ by no more than five percent of the larger sum.
+[`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the widest lane sum to differ from the narrowest by no more than five percent of the widest.
 Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
 These checks do not detect a script outgrowing an existing hint or establish measured job headroom.
 Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
 Reorder the stored memberships to match when the hints change, because the coverage regressions require each lane's stored order to equal its `--list-scheduled` order.
 
-These lanes have less headroom than the serial shards and no rebalance left to spend.
-Across the six 2026-09-17 runs they measured 6.6-8.2 and 7.6-8.2 minutes of script time against a 10-minute cap, and the split is already even at 8.34 and 8.27 minutes of packed weight, so repacking moves about 0.04 minutes.
-Growth here has to be answered by the lane count or the cap, both of which [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) reserves as a separate scope decision.
+The lane was split from two to three on 2026-09-17 by captain decision (raising the cap and accepting the existing headroom were both rejected as not cutting wall-clock merge wait), after the two-lane packing measured 8.34 and 8.27 minutes of packed weight against the 10-minute cap with about 0.04 minutes left to gain from repacking - no rebalance left to spend.
+The three-way LPT split over the same 24-script hints packs 328865, 328538, and 339763 ms (about 5.5, 5.5, and 5.7 minutes), leaving roughly 43% headroom on the heaviest lane instead of a few seconds.
+`tests/fm-captain-hold-lifecycle.test.sh` alone measures 339763ms, more than an even three-way share of the ~997166ms total, so LPT places it alone in shard 3; a fourth lane would not lower that packed max further; it only bounds a shard containing that script.
+Growth beyond this still has to be answered by the lane count or the cap, both of which [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) reserves as a separate scope decision.
 There is no equivalent of `PORTABLE_SERIAL_MAX_SHARD_MS` on these lanes yet; `parallel_max_ms` is reported but not bounded.
 
 ## Portable serial remainder
@@ -93,7 +94,7 @@ Measure native-Windows-only scripts through the focused Git Bash runner and reta
 
 ## Coverage guard
 
-`bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
+`bin/fm-test-run.sh --check-coverage` verifies that all three parallel lanes partition the proven-isolated set.
 It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 It reports the unmeasured serial share as `serial_unhinted=` and refuses when that share exceeds `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, so the shards stay balanced on evidence rather than on the default weight.
@@ -114,7 +115,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 | Lane | Bound | Rationale |
 |---|---|---|
-| portable parallel 1/2 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
+| portable parallel 1/2/3 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
 | portable serial 1-5 | job `timeout-minutes: 30` | Balanced shards pack about 21 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. `PORTABLE_SERIAL_MAX_SHARD_MS` keeps the packed weight inside that margin, so growth is answered by re-sharding rather than by raising this cap. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
