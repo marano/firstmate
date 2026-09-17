@@ -57,9 +57,15 @@
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
-# declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
-# "blocked:": pause for a known external wait expected to clear on its own,
-# blocked when firstmate must act.
+# declared-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
+# "blocked:": pause for a wait expected to clear on its own, blocked when
+# firstmate must act. Ship and scout scaffolds state that as an OBLIGATION at
+# the moment of waiting rather than as a definition of the verb, because the
+# definition form was read as a restriction on an optional report and left
+# self-launched waits undeclared; PAUSE_RULE below is its single owner and is
+# interpolated into both. The secondmate charter keeps the definition form on
+# purpose: an idle secondmate endpoint is healthy (AGENTS.md section 8), so a
+# quiet secondmate owes no declaration.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -95,7 +101,6 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -358,6 +363,27 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# The before-you-wait declaration, rendered into rule 4 of every ship and scout
+# scaffold and stated here exactly once. It is phrased as a step in the waiting
+# flow, not as a definition of the verb: the definition form ("use `paused:`
+# only when...") reads as a restriction on a report the worker was separately
+# told to make sparingly, so a worker waiting on a job it launched itself never
+# reached it. Self-launched waits therefore lead the example list, and the word
+# "external" is gone from the worker-facing trigger. The supervisor-side
+# mechanism prose (bin/fm-watch.sh, docs/architecture.md) keeps that word,
+# because there the wait is external to firstmate rather than to the worker.
+IFS= read -r -d '' PAUSE_RULE <<EOF || true
+   **Before you go quiet to wait, say so.** A job you launched yourself counts exactly as much as
+   something outside the task: a test or build run, a queued \`mutex\` hold, a background command,
+   your own validation round, an upstream release, a rate-limit reset, a scheduled window.
+   Append \`$PAUSED_VERB: {why}\` BEFORE you stop, then \`working:\` or \`done:\` once it reports; add
+   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know when it clears. Firstmate leaves a declared wait
+   alone and rechecks it on a long cadence, but cannot tell an undeclared quiet pane from a wedged
+   worker, so it interrupts you to ask. \`$PAUSED_VERB:\` is a wait you expect to clear on its own;
+   use \`blocked:\` when you are stuck and need help, and never downgrade a real blocker to stay quiet.
+EOF
+PAUSE_RULE=${PAUSE_RULE%$'\n'}
+
 # The machine-wide build/test mutex rule, rendered into every ship and scout
 # scaffold because a project worker reads no other firstmate instruction
 # surface. bin/fm-build-lock.sh's header owns the contract; this is the trigger
@@ -370,6 +396,7 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    Wrap the WHOLE run in ONE invocation, never one per test, file or module: the lock is
    machine-wide, so per-unit wrapping turns one hold into hundreds of handovers that other
    workers have to queue behind.
+   A queued \`mutex\` hold is a wait like any other: declare it under rule 4 before you block on it.
    \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
    If \`mutex\` is not on PATH, run \`$FM_ROOT/bin/fm-build-lock.sh\` directly; its \`--help\` owns
    the contract.
@@ -405,18 +432,13 @@ The report is the only thing that survives, so anything worth keeping must be in
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
-   FYI progress lines; firstmate reads your pane for that.
+   Each append wakes firstmate, so report sparingly: phase changes a supervisor would act on,
+   every start and end of a wait, and every needs-decision/blocked/$PAUSED_VERB/done/failed
+   state. No step-by-step FYI progress lines; firstmate reads your pane for that.
+$PAUSE_RULE
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. When you know when the wait clears, say so in the line with
-   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
-   Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -496,19 +518,16 @@ $RULE1
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
-   firstmate reads your pane for that.
+   Each append wakes firstmate, so report sparingly: phase changes a supervisor would act on
+   (setup done, bug reproduced, fix implemented, validation passed), every start and end of a
+   wait, and every needs-decision/blocked/$PAUSED_VERB/done/failed state. No step-by-step FYI
+   progress lines; firstmate reads your pane for that.
+$PAUSE_RULE
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
-   firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
