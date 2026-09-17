@@ -201,8 +201,11 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # leaves a pane holding nothing but a shell, which every source below reads as
 # death or as an unavailable harness - indistinguishable from a wedge, and the
 # opposite of the intent. `exit` therefore records the intentional stop at
-# state/<id>.agent-stopped, and this helper is the ONLY thing that record
-# licenses: converting a TERMINAL status event into that terminal state.
+# state/<id>.agent-stopped. Two readers share that record, each with one narrow
+# licence, and nothing else may re-derive either. This helper's licence is
+# converting a TERMINAL status event into that terminal state.
+# bin/fm-awaiting-landing-lib.sh holds the other: it reads the record as one of
+# the two proofs that firstmate has taken finished work in hand.
 # Deliberately narrow. A `working:`, `blocked:`, or `needs-decision:` last line
 # means the agent was stopped with work still open, which genuinely needs
 # firstmate, so those keep reading unknown exactly as before. The record is

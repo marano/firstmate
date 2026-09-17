@@ -58,7 +58,8 @@ Its branch, local copy, and every uncommitted change stay exactly where they are
 Stopping the agent is the easy half; staying legible afterwards is the half that needed a record.
 A stopped agent leaves a pane holding nothing but a shell and takes its busy wiring with it, so every current-state source reads it as death or as an unavailable harness - indistinguishable from a wedge, and counted as occupied rather than free.
 Freeing the slot would therefore have made the task look more occupied, not less.
-`exit` writes `state/<id>.agent-stopped`, and [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) is its only consumer.
+`exit` writes `state/<id>.agent-stopped`.
+[`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) reads it to decide a stopped crew's current state, and [`bin/fm-awaiting-landing-lib.sh`](../bin/fm-awaiting-landing-lib.sh) reads it as one of the three records it derives "awaiting landing" from.
 
 That record licenses exactly one thing: reading a terminal status event (`done:` or `failed:`) as that terminal state.
 An agent stopped with work still open keeps reading unknown, because a half-finished task genuinely needs firstmate and must never be laundered into a free slot.
