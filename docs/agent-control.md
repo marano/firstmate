@@ -143,6 +143,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, marker non-regression, and that freeing a slot preserves the branch, local copy, and uncommitted work while recording the stop, all against a stubbed session provider.
 - `tests/fm-crew-state.test.sh` - that the intentional-stop record converts a terminal status event and nothing else.
+- `tests/fm-awaiting-landing.test.sh` - that `bin/fm-awaiting-landing-lib.sh` reads the intentional-stop record as one proof (alongside a recorded `pr=` and a `done` outcome) that finished work is awaiting landing rather than a wedge, and that a diverged recorded landing target is surfaced as blocked rather than read as healthy or gone quiet.
 - `tests/fm-fleet-snapshot-view.test.sh` - the `capacity` projection: finished work frees its slot, an unreadable task does not, and queued-ready excludes blocked and held items.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
