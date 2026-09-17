@@ -1181,6 +1181,32 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
   pass "coverage guard reports and bounds the unmeasured portable serial share"
 }
 
+test_portable_serial_shard_budget_is_reported_and_bounded() {
+  local out max budget
+  # The unmeasured-share bound above only catches a MISSING hint. A hint that is
+  # merely stale leaves the partition looking balanced while the heaviest shard
+  # grows into its CI job cap, which is the failure that actually happened: a
+  # shard was killed at its cap and reported no verdict at all, because a
+  # timed-out job uploads no timing artifact. The guard therefore also bounds
+  # the heaviest shard's packed weight, so growth reds a seconds-long guard
+  # instead of a half-hour shard.
+  out=$("$RUNNER" --check-coverage)
+  assert_contains "$out" "serial_max_ms=" "coverage guard must report the heaviest shard's packed weight"
+  assert_contains "$out" "serial_shard_budget_ms=" "coverage guard must report the per-shard budget"
+  max=$(printf '%s\n' "$out" | sed -n 's/.*serial_max_ms=\([0-9][0-9]*\).*/\1/p')
+  budget=$(printf '%s\n' "$out" | sed -n 's/.*serial_shard_budget_ms=\([0-9][0-9]*\).*/\1/p')
+  [ -n "$max" ] && [ -n "$budget" ] \
+    || fail "coverage summary must carry numeric serial weights: $out"
+  [ "$max" -gt 0 ] || fail "heaviest portable serial shard must carry real work, got $max"
+  [ "$budget" -gt 0 ] || fail "per-shard budget must be positive, got $budget"
+  # Re-shard or refresh the hints when this trips; raising the budget spends the
+  # hang-tripwire margin the CI job cap exists to keep
+  # (docs/fm-test-portable-shards.md).
+  [ "$max" -le "$budget" ] \
+    || fail "heaviest portable serial shard packs ${max}ms, over the ${budget}ms budget"
+  pass "coverage guard reports and bounds the heaviest portable serial shard"
+}
+
 test_portable_serial_shard_lane_refusals() {
   local tmp count rc other
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-shard-lane.XXXXXX")
@@ -1839,6 +1865,7 @@ test_portable_shard_union_and_coverage_guard
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
+test_portable_serial_shard_budget_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family

@@ -66,7 +66,10 @@ jobs:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
     # This cap is intended as a hang tripwire, but the previous lane 1 reached
-    # it; the former "~1 min of serial sum" estimate no longer applies.
+    # it; the former "~1 min of serial sum" estimate no longer applies. Six green
+    # runs on 2026-09-17 measured 6.6-8.2 min of script time here, and the two
+    # lanes are already evenly split, so the next answer to growth is the lane
+    # count or this cap rather than another rebalance.
     # Compare it with the derived hints from fm-test-run.sh --check-coverage
     # and completed job timings, allowing for setup and runner-speed spread.
     # A packed hint sum is not a measured job wall time or proof of headroom.
@@ -159,9 +162,13 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Current runners can take ~20 min for a balanced shard. This 30-minute cap
+    # Current runners can take ~21 min for a balanced shard. This 30-minute cap
     # preserves the timeout as a hang tripwire while allowing runner-speed and
     # job-setup margin; it is not the expected healthy end of the lane.
+    # Answer a shard that outgrows this by re-sharding, not by raising the cap:
+    # bin/fm-test-run.sh derives PORTABLE_SERIAL_MAX_SHARD_MS from this number
+    # and refuses the packed weight there, seconds into the coverage guard,
+    # rather than half an hour into a job that is then killed with no verdict.
     timeout-minutes: 30
     strategy:
       # Every shard reports so one failure never hides another shard's result.
