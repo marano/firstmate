@@ -500,6 +500,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-task-kind-lib.sh
+. "$SCRIPT_DIR/fm-task-kind-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1491,6 +1493,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  # The one kind this script does not choose for itself: it comes from an
+  # existing record, so it is the way an unregistered kind could enter the fleet
+  # and be re-recorded by the meta write below. Every reader that asks
+  # bin/fm-task-kind-lib.sh what a kind means would then be reasoning about a
+  # value that owner has never heard of, which is how the idle-fleet counter came
+  # to be structurally zero. Refuse instead.
+  fm_task_kind_known "$KIND" || {
+    echo "error: task $ID's record has kind '$KIND', which is not one this firstmate records ($(fm_task_kinds)); refusing to relaunch a record no reader can classify" >&2
+    exit 1
+  }
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)

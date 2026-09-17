@@ -2,7 +2,12 @@
 # tests/fm-idle-fleet.test.sh - the idle-fleet alarm: a home with a free task slot
 # and dispatchable queued work must not be able to go quiet.
 #
-# Three layers, because they fail for different reasons:
+# Four layers, because they fail for different reasons:
+#   - bin/fm-task-kind-lib.sh's vocabulary: which kinds a spawn records, and
+#     which of them is work that occupies a task slot. Pinned here because the
+#     counter below is its main reader, and because a counter tested only against
+#     kinds no spawn writes is the defect that made every assertion in this file
+#     pass while the detector read zero work in progress forever.
 #   - bin/fm-idle-fleet-lib.sh's condition as pure functions: what counts as an
 #     in-progress task, how capacity is read and refused, and the whole
 #     free-capacity-AND-ready-work matrix.
@@ -77,10 +82,35 @@ SH
   printf '%s\n' "$dir"
 }
 
-# Record an ordinary crew task: a metadata record, and optionally a status line.
-record_task() {  # <state> <id> [status-line]
-  local state=$1 id=$2 line=${3-}
-  printf 'window=firstmate:fm-%s\nkind=task\nharness=claude\n' "$id" > "$state/$id.meta"
+# Record one task the way a real spawn does, and optionally its latest status
+# line. <kind> defaults to `ship`, which is what bin/fm-spawn.sh records with
+# neither --scout nor --secondmate.
+#
+# THE FIELD SET AND THE KIND BOTH MATTER, and getting the kind wrong here is why
+# this file's assertions all passed while the detector was structurally broken.
+# The fixture used to write `kind=task`, a value no spawn has ever produced, so
+# every case below described a fleet that does not exist: the counter skipped
+# every record, read zero work in progress forever, and the alarm fired on a
+# fleet with two workers actively working. A fixture is only evidence if it looks
+# like what the writer writes.
+record_task() {  # <state> <id> [status-line] [kind]
+  local state=$1 id=$2 line=${3-} kind=${4-ship}
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s/worktrees/%s\n' "$state" "$id"
+    if [ "$kind" = secondmate ]; then
+      printf 'home=%s/homes/%s\n' "$state" "$id"
+    else
+      printf 'project=%s/projects/demo\n' "$state"
+    fi
+    printf 'harness=claude\n'
+    printf 'kind=%s\n' "$kind"
+    [ "$kind" = secondmate ] || printf 'mode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=%s/tmp/%s\n' "$state" "$id"
+    printf 'model=default\neffort=default\n'
+    printf 'spawn_gen=g1.%s\n' "$id"
+  } > "$state/$id.meta"
   [ -z "$line" ] || printf '%s\n' "$line" > "$state/$id.status"
 }
 
@@ -156,15 +186,23 @@ ack_queue() {  # <state>
 # --- the condition, as pure functions ---------------------------------------
 
 test_capacity_defaults_to_one_when_unconfigured() {
-  local dir
+  local dir status
   dir=$(make_home capacity-default)
   # AGENTS.md section 7 sets no fleet-wide concurrency cap, so an unconfigured
   # home must not have one invented for it. Capacity 1 is the narrowest true
-  # reading of "a slot is free": only a completely idle fleet qualifies.
+  # reading of "a slot is free": only a completely idle fleet qualifies, and
+  # every home stays covered without stating anything.
   [ "$(fm_idle_fleet_capacity "$dir/config")" = 1 ] \
     || fail "an unconfigured home did not fall back to detecting a completely idle fleet"
   fm_idle_fleet_capacity_configured "$dir/config" \
     && fail "an absent config/fleet-capacity was reported as configured"
+  # An absent file is USABLE; only a malformed one refuses. Keeping those apart
+  # matters: making absence refuse would switch this detector off by default in
+  # every home that has never written the file, which is every home today.
+  printf 'five\n' > "$dir/config/fleet-capacity"
+  fm_idle_fleet_capacity "$dir/config" >/dev/null 2>&1 && status=0 || status=$?
+  [ "$status" = 2 ] \
+    || fail "a malformed capacity was not refused separately from an absent one (status $status)"
   pass "an unconfigured home detects only a completely idle fleet"
 }
 
@@ -232,10 +270,16 @@ test_in_progress_counts_open_work_and_not_concluded_agents() {
     || fail "a concluded worker was counted as in-progress work"
 
   # A persistent secondmate is not a work item at all.
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\n' > "$state/mate.meta"
-  printf 'working: supervising\n' > "$state/mate.status"
+  record_task "$state" mate 'working: supervising' secondmate
   [ "$(fm_idle_fleet_in_progress "$state")" = 6 ] \
     || fail "a persistent secondmate was counted against task capacity"
+
+  # A scout is work under way just as much as a ship: it occupies a slot until it
+  # reports, and it was skipped along with everything else by the broken counter.
+  record_task "$state" open-scout 'working: investigating' scout
+  [ "$(fm_idle_fleet_in_progress "$state")" = 7 ] \
+    || fail "a scout under way was not counted against task capacity"
+  rm -f "$state/open-scout.meta" "$state/open-scout.status"
 
   # A later append decides, so a worker that resumes after reporting done
   # reclaims its slot rather than staying counted as free forever.
@@ -243,6 +287,136 @@ test_in_progress_counts_open_work_and_not_concluded_agents() {
   [ "$(fm_idle_fleet_in_progress "$state")" = 7 ] \
     || fail "a concluded worker that resumed did not reclaim its slot"
   pass "in-progress counts open work only, never concluded agents or secondmates"
+}
+
+test_the_recorded_kind_vocabulary_is_pinned_and_classified() {
+  local kinds
+  kinds=$(fm_task_kinds)
+  # A TRIPWIRE, not a style assertion. bin/fm-spawn.sh now refuses to record a
+  # kind bin/fm-task-kind-lib.sh does not know, so a new kind has to be
+  # registered there - and this line then reds until someone states whether it is
+  # work that occupies a task slot. Without it a new kind would silently inherit
+  # the exclusion default and be counted with no decision taken.
+  [ "$kinds" = "ship scout secondmate" ] \
+    || fail "the recorded kind vocabulary changed to '$kinds'; classify the new kind below before repinning this"
+
+  fm_task_kind_is_work ship || fail "a ship was not counted as work"
+  fm_task_kind_is_work scout || fail "a scout was not counted as work"
+  fm_task_kind_is_work secondmate \
+    && fail "a persistent secondmate was counted as a work item"
+  # An absent kind= is how a record written before the field existed spells ship.
+  fm_task_kind_is_work "" || fail "a record with no kind= was not treated as a ship"
+
+  fm_task_kind_known "" || fail "an absent kind was not accepted as a known record"
+  fm_task_kind_known ship || fail "ship was not a known kind"
+  # The exact regression: `task` reads like a sensible kind and no spawn writes
+  # it. The broken counter accepted it and nothing else.
+  fm_task_kind_known task \
+    && fail "'task' was accepted as a recorded kind; no spawn has ever written it"
+  fm_task_kind_known program && fail "an unregistered kind was accepted"
+  pass "the kinds a spawn records are pinned, and each one is deliberately classified"
+}
+
+test_in_progress_counts_every_kind_a_spawn_records() {
+  local dir state kind expected=0 total=0
+  dir=$(make_home in-progress-kinds)
+  state="$dir/state"
+
+  # Driven from bin/fm-task-kind-lib.sh - the owner bin/fm-spawn.sh validates its
+  # own kind against - rather than from a list written out here. A second list
+  # written out here is exactly what shipped the bug: the counter carried its own
+  # pair of kinds, '' and `task`, that no spawn writes, and so counted nothing at
+  # all while the alarm reported a busy fleet as stopped.
+  for kind in $(fm_task_kinds); do
+    record_task "$state" "rec-$kind" 'working: implementing' "$kind"
+    total=$((total + 1))
+    if fm_task_kind_is_work "$kind"; then
+      expected=$((expected + 1))
+    fi
+  done
+
+  [ "$(fm_idle_fleet_in_progress "$state")" = "$expected" ] \
+    || fail "a fleet of one record per recorded kind counted $(fm_idle_fleet_in_progress "$state") in progress, not $expected"
+  # Neither half of that may go vacuous: some recorded kind must be work, and
+  # some must not, or the assertion above holds for a reason nobody intended.
+  [ "$expected" -gt 0 ] \
+    || fail "no kind a spawn records counted as work; the counter is structurally zero again"
+  [ "$expected" -lt "$total" ] \
+    || fail "every recorded kind counted as work; the secondmate exclusion is gone"
+  pass "every kind a spawn records is counted, or deliberately not, with none silently skipped"
+}
+
+test_two_working_ships_are_counted_not_reported_as_a_stopped_fleet() {
+  local dir state status
+  dir=$(make_home false-positive-regression)
+  state="$dir/state"
+
+  # THE INCIDENT, as a regression test. The alarm's first live firing reported
+  # `in-progress=0 capacity=1 ready=22` while two real ship tasks were under way
+  # and both workers were demonstrably alive: one waiting out a CI lane, one
+  # running a test family. The count carried its own kinds that no spawn writes,
+  # so it could not leave zero, and `0 < 1` is permanently true - the line
+  # described a stopped fleet that did not exist.
+  record_task "$state" ci-waiter 'paused: waiting on the CI lane'
+  record_task "$state" test-runner 'working: running the secondmate test family'
+  printf '22\n' > "$dir/ready-count"
+
+  # FIRST, the reported case EXACTLY: no config/fleet-capacity, so the effective
+  # capacity is the default 1, which is the `capacity=1` the false alarm printed.
+  # The counter is the whole defect and the whole fix - with it reading 2, the
+  # comparison is 2 < 1, and this fleet is silent without the home configuring
+  # anything. A capacity file cannot be part of the fix: no home has one, and
+  # this is the state every home is in right now.
+  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
+    fm_idle_fleet_condition "$state" "$dir/config" "$dir" && status=0 || status=$?
+  [ "$status" = 1 ] \
+    || fail "the reported false alarm still fires on an unconfigured home (status $status)"
+  [ "$FM_IDLE_FLEET_IN_PROGRESS" = 2 ] \
+    || fail "two live ship tasks were reported as $FM_IDLE_FLEET_IN_PROGRESS in progress, not 2"
+  [ "$FM_IDLE_FLEET_CAPACITY" = 1 ] \
+    || fail "an unconfigured home did not compare against the default capacity of 1"
+
+  # THEN the same fleet against a stated cap, to show the count feeds a real
+  # comparison rather than only ever losing it. With two of five slots busy and a
+  # queue behind them the condition does hold, and firstmate dispatching into the
+  # free slots is exactly what this alarm is for.
+  printf '5\n' > "$dir/config/fleet-capacity"
+  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
+    fm_idle_fleet_condition "$state" "$dir/config" "$dir" \
+    || fail "two busy slots of five with 22 queued did not read as free capacity"
+  [ "$FM_IDLE_FLEET_IN_PROGRESS" = 2 ] \
+    || fail "two live ship tasks were reported as $FM_IDLE_FLEET_IN_PROGRESS in progress, not 2"
+  [ "$FM_IDLE_FLEET_CAPACITY" = 5 ] \
+    || fail "the home's stated capacity was reported as $FM_IDLE_FLEET_CAPACITY, not 5"
+  [ "$FM_IDLE_FLEET_READY" = 22 ] \
+    || fail "the ready queue was reported as $FM_IDLE_FLEET_READY, not 22"
+
+  # A declared `paused:` wait is in progress, not idle. A worker waiting out a CI
+  # lane or the build lock goes deliberately silent for the length of that wait,
+  # so counting only actively-emitting workers would rebuild this same false
+  # report by another route.
+  [ "$(fm_idle_fleet_in_progress "$state")" = 2 ] \
+    || fail "a declared wait was read as a free slot"
+
+  # And that count really does feed the comparison: the same two workers against
+  # a cap of two is a fleet at capacity, which must stay silent however long the
+  # queue is. Without this the count above could be right and still ignored.
+  printf '2\n' > "$dir/config/fleet-capacity"
+  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
+    fm_idle_fleet_condition "$state" "$dir/config" "$dir" && status=0 || status=$?
+  [ "$status" = 1 ] \
+    || fail "a fleet with every slot working still raised the condition (status $status)"
+
+  # The control on the other side: once both workers conclude, those slots are
+  # free again even though nothing landed, and the condition holds.
+  printf 'done: PR https://example.test/pr/1 checks green\n' >> "$state/ci-waiter.status"
+  printf 'failed: pipeline gave up\n' >> "$state/test-runner.status"
+  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
+    fm_idle_fleet_condition "$state" "$dir/config" "$dir" \
+    || fail "a genuinely stopped fleet with 22 ready items did not raise the condition"
+  [ "$FM_IDLE_FLEET_IN_PROGRESS" = 0 ] \
+    || fail "two concluded workers still held their slots"
+  pass "two workers under way are counted as two, against the capacity the home actually stated"
 }
 
 test_condition_needs_both_free_capacity_and_ready_work() {
@@ -605,6 +779,9 @@ test_away_mode_escalates_the_disabled_detector_report() {
 test_capacity_defaults_to_one_when_unconfigured
 test_capacity_reads_a_configured_value_and_refuses_a_malformed_one
 test_in_progress_counts_open_work_and_not_concluded_agents
+test_the_recorded_kind_vocabulary_is_pinned_and_classified
+test_in_progress_counts_every_kind_a_spawn_records
+test_two_working_ships_are_counted_not_reported_as_a_stopped_fleet
 test_condition_needs_both_free_capacity_and_ready_work
 test_condition_separates_a_bad_capacity_from_an_unreadable_queue
 test_watcher_raises_a_sustained_idle_fleet
