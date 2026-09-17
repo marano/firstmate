@@ -66,6 +66,29 @@ await_pid_exit() {  # <pid> [max-iterations]
   return 1
 }
 
+# Wait until <pattern> appears in <file>, on the same iteration bound as
+# await_path. Several cases below need a process's own stderr to tell them it
+# has reached a particular point, which no marker file can report.
+await_grep() {  # <pattern> <file> [max-iterations]
+  local pattern=$1 file=$2 max=${3:-600} i=0
+  while [ "$i" -lt "$max" ]; do
+    grep -q "$pattern" "$file" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# One ordinary invocation, run after every case that kills a process while it is
+# in line. It reaps whatever ticket that kill left behind and, finding nobody
+# else waiting, takes the waiting line itself away - which is what lets the
+# suite's closing "no lock behind" assertion cover the queue too.
+settle_queue() {
+  "$SCRIPT" true >/dev/null 2>&1 || fail "the lock was unusable after the preceding case"
+  assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" \
+    "the waiting line was left behind after the preceding case"
+}
+
 # --- exit status passthrough ------------------------------------------------
 # Mutant: `exit 0` in place of `exit "$STATUS"`.
 
@@ -192,6 +215,166 @@ assert_equals 'reclaimed' "$(cat "$RECLAIM_OUT" 2>/dev/null || true)" \
   "a lock whose holder died must be reclaimed"
 assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "reclaiming must leave the lock clean"
 pass "a lock left by a dead holder is reclaimed instead of blocking forever"
+
+# --- arrival order: a barger cannot overtake an earlier waiter ---------------
+# The starvation this guards against is not hypothetical: a worker that wrapped
+# each individual test in its own invocation released and re-acquired hundreds
+# of times in a row and pushed a fairly waiting worker past its 600s ceiling.
+#
+# The barger is given every advantage a race could hand it, so this case turns
+# on ordering and nothing else. The patient waiter polls slowly, and the lock is
+# released at the one moment its own poll has just been observed, which leaves
+# the barger a whole two-second window in which it polls a hundred times and the
+# waiter not once. Without arrival ordering the barger takes the lock every
+# time; with it, it never can, because its ticket is younger.
+# Mutant: in fm_build_lock_my_turn, return success without comparing this
+# invocation's ticket against the oldest outstanding one.
+
+FAIR_ORDER="$TMP_ROOT/fair-order"
+FAIR_HOLD_MARK="$TMP_ROOT/fair-holding"
+FAIR_RELEASE="$TMP_ROOT/fair-release"
+BARGE_STOP="$TMP_ROOT/fair-barge-stop"
+PATIENT_ERR="$TMP_ROOT/fair-patient.err"
+BARGER_ERR="$TMP_ROOT/fair-barger.err"
+: > "$FAIR_ORDER"
+: > "$PATIENT_ERR"
+: > "$BARGER_ERR"
+
+# Released by a marker rather than a kill, so the handover under test is an
+# ordinary release and not stale-holder recovery.
+"$SCRIPT" sh -c "touch '$FAIR_HOLD_MARK'; while [ ! -e '$FAIR_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+FAIR_HOLDER=$!
+await_path "$FAIR_HOLD_MARK" || fail "the arrival-order fixture never took the lock"
+
+FM_BUILD_LOCK_POLL=2 FM_BUILD_LOCK_NOTICE_INTERVAL=1 \
+  "$SCRIPT" sh -c "printf 'patient\n' >> '$FAIR_ORDER'" >/dev/null 2>"$PATIENT_ERR" &
+PATIENT=$!
+await_grep 'waiting for the machine-wide build lock' "$PATIENT_ERR" \
+  || fail "the patient waiter never reported that it was waiting"
+
+( while [ ! -e "$BARGE_STOP" ]; do
+    FM_BUILD_LOCK_POLL=0.02 FM_BUILD_LOCK_NOTICE_INTERVAL=1 \
+      "$SCRIPT" sh -c "printf 'barger\n' >> '$FAIR_ORDER'" >/dev/null 2>>"$BARGER_ERR" || true
+  done ) &
+BARGER=$!
+await_grep 'waiting for the machine-wide build lock' "$BARGER_ERR" \
+  || fail "the barging loop never reached the lock"
+
+# This line is the patient waiter's own poll, observable from outside: it prints
+# on waking, then sleeps its full two seconds before looking again.
+await_grep 'still waiting' "$PATIENT_ERR" \
+  || fail "the patient waiter never reported a poll"
+touch "$FAIR_RELEASE"
+
+await_pid_exit "$PATIENT" || fail "the patient waiter never acquired the lock"
+wait "$PATIENT" 2>/dev/null || true
+touch "$BARGE_STOP"
+await_pid_exit "$BARGER" || fail "the barging loop never finished"
+wait "$BARGER" 2>/dev/null || true
+
+assert_equals 'patient' "$(head -1 "$FAIR_ORDER")" \
+  "a tight release-then-reacquire loop overtook a waiter that arrived first"
+assert_grep 'barger' "$FAIR_ORDER" \
+  "the barging loop never acquired at all, so this case proved nothing"
+wait "$FAIR_HOLDER" 2>/dev/null || true
+settle_queue
+pass "a tight release-then-reacquire loop never overtakes an earlier waiter"
+
+# --- a waiter that dies in line does not block the waiters behind it --------
+# One ticket left at the head of the line by a waiter that died would wedge
+# everyone behind it, which is worse than the starvation ordering fixes. The
+# renewal backstop is disabled here so only the pid-liveness reaper can save the
+# later waiter, and the later waiter arrives BEHIND the dead one, so it can only
+# get in once that ticket is gone.
+# Mutant: in fm_build_lock_queue_scan, drop the fm_pid_alive reap.
+
+REAP_HOLD_MARK="$TMP_ROOT/reap-holding"
+REAP_RELEASE="$TMP_ROOT/reap-release"
+DEAD_ERR="$TMP_ROOT/reap-dead.err"
+LATER_OUT="$TMP_ROOT/reap-later.out"
+LATER_ERR="$TMP_ROOT/reap-later.err"
+: > "$DEAD_ERR"
+: > "$LATER_ERR"
+
+export FM_BUILD_LOCK_TICKET_STALE=3600
+"$SCRIPT" sh -c "touch '$REAP_HOLD_MARK'; while [ ! -e '$REAP_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+REAP_HOLDER=$!
+await_path "$REAP_HOLD_MARK" || fail "the dead-waiter fixture never took the lock"
+
+"$SCRIPT" sleep 120 >/dev/null 2>"$DEAD_ERR" &
+DOOMED=$!
+await_grep 'waiting for the machine-wide build lock' "$DEAD_ERR" \
+  || fail "the doomed waiter never got into line"
+
+"$SCRIPT" printf 'later\n' > "$LATER_OUT" 2>"$LATER_ERR" &
+LATER=$!
+await_grep 'waiting for the machine-wide build lock' "$LATER_ERR" \
+  || fail "the later waiter never got into line"
+
+# SIGKILL, so no trap runs and the ticket is left behind exactly as a crash
+# would leave it.
+kill -9 "$DOOMED" 2>/dev/null || true
+wait "$DOOMED" 2>/dev/null || true
+touch "$REAP_RELEASE"
+
+await_pid_exit "$LATER" || fail "a ticket left by a dead waiter blocked the waiters behind it"
+wait "$LATER" 2>/dev/null || true
+assert_equals 'later' "$(cat "$LATER_OUT" 2>/dev/null || true)" \
+  "the waiter behind a dead one must still acquire"
+wait "$REAP_HOLDER" 2>/dev/null || true
+unset FM_BUILD_LOCK_TICKET_STALE
+settle_queue
+pass "a waiter that dies while in line does not block the waiters behind it"
+
+# --- a waiter that stops polling loses its place ----------------------------
+# The pid-liveness reaper cannot see a waiter that is alive but no longer
+# renewing its ticket - a stopped process, or an unrelated process that was
+# handed the dead waiter's pid number. The renewal ceiling is the backstop, and
+# this case drives it with a SIGSTOPped waiter so nothing here touches the
+# queue's files directly.
+# Mutant: in fm_build_lock_queue_scan, drop the TICKET_STALE reap.
+
+STOP_HOLD_MARK="$TMP_ROOT/stop-holding"
+STOP_RELEASE="$TMP_ROOT/stop-release"
+STOPPED_ERR="$TMP_ROOT/stop-stopped.err"
+BEHIND_OUT="$TMP_ROOT/stop-behind.out"
+BEHIND_ERR="$TMP_ROOT/stop-behind.err"
+: > "$STOPPED_ERR"
+: > "$BEHIND_ERR"
+
+export FM_BUILD_LOCK_TICKET_STALE=1
+"$SCRIPT" sh -c "touch '$STOP_HOLD_MARK'; while [ ! -e '$STOP_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+STOP_HOLDER=$!
+await_path "$STOP_HOLD_MARK" || fail "the stalled-waiter fixture never took the lock"
+
+"$SCRIPT" sleep 120 >/dev/null 2>"$STOPPED_ERR" &
+STALLED=$!
+await_grep 'waiting for the machine-wide build lock' "$STOPPED_ERR" \
+  || fail "the stalled waiter never got into line"
+
+"$SCRIPT" printf 'behind\n' > "$BEHIND_OUT" 2>"$BEHIND_ERR" &
+BEHIND=$!
+await_grep 'waiting for the machine-wide build lock' "$BEHIND_ERR" \
+  || fail "the waiter behind the stalled one never got into line"
+
+kill -STOP "$STALLED" 2>/dev/null || fail "could not stall the leading waiter"
+touch "$STOP_RELEASE"
+
+await_pid_exit "$BEHIND" || fail "a waiter that stopped renewing its ticket blocked the line"
+wait "$BEHIND" 2>/dev/null || true
+assert_equals 'behind' "$(cat "$BEHIND_OUT" 2>/dev/null || true)" \
+  "the waiter behind a stalled one must still acquire"
+kill -CONT "$STALLED" 2>/dev/null || true
+kill -9 "$STALLED" 2>/dev/null || true
+wait "$STALLED" 2>/dev/null || true
+pkill -P "$STALLED" 2>/dev/null || true
+wait "$STOP_HOLDER" 2>/dev/null || true
+unset FM_BUILD_LOCK_TICKET_STALE
+settle_queue
+pass "a waiter that stops renewing its ticket loses its place instead of wedging the line"
 
 # --- CI stand-down ----------------------------------------------------------
 # With a CI marker set the command must run and the lock must never be taken.
