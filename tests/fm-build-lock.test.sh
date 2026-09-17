@@ -376,6 +376,80 @@ unset FM_BUILD_LOCK_TICKET_STALE
 settle_queue
 pass "a waiter that stops renewing its ticket loses its place instead of wedging the line"
 
+# --- a waiter killed in line leaves no residue in the lock root -------------
+# The lockdir mutex mints its owner directory before the symlink that publishes
+# it, and nothing points at one in between: a process killed inside that window
+# strands a directory no release, no stale recovery and no later invocation
+# would ever reach again. Minting before looking at the lock put every waiter
+# through that window once per poll, so a killed waiter stranded one often
+# enough to red this suite on GitHub's slower runners while passing locally.
+#
+# `mktemp` is shimmed to PARK a minting process inside that window rather than
+# to race it, so this case decides the question instead of sampling it.
+# Mutant: in fm_lock_try_create, mint the owner directory before the
+# lock-exists check again.
+
+MINT_SHIM="$TMP_ROOT/mktemp-shim"
+MINT_MARK="$TMP_ROOT/minted-while-waiting"
+MINT_RELEASE="$TMP_ROOT/mint-release"
+mkdir -p "$MINT_SHIM"
+REAL_MKTEMP=$(command -v mktemp) || fail "mktemp is required to park a minting process"
+
+# Reports every owner directory minted for the PRIMARY build lock and holds its
+# minting process there until this case releases it. The waiting line's own lock
+# mints under a different name, so arriving in line is left at full speed.
+cat > "$MINT_SHIM/mktemp" <<SHIM
+#!/usr/bin/env bash
+set -u
+out=\$("$REAL_MKTEMP" "\$@") || exit \$?
+printf '%s\n' "\$out"
+case "\$*" in
+  *fm-build-lock.owner.*)
+    : > '$MINT_MARK'
+    i=0
+    while [ ! -e '$MINT_RELEASE' ] && [ "\$i" -lt 200 ]; do
+      sleep 0.05
+      i=\$((i + 1))
+    done
+    ;;
+esac
+SHIM
+chmod +x "$MINT_SHIM/mktemp"
+
+MINT_HOLD_MARK="$TMP_ROOT/mint-holding"
+MINT_HOLD_RELEASE="$TMP_ROOT/mint-hold-release"
+MINT_ERR="$TMP_ROOT/mint-waiter.err"
+: > "$MINT_ERR"
+
+"$SCRIPT" sh -c "touch '$MINT_HOLD_MARK'; while [ ! -e '$MINT_HOLD_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+MINT_HOLDER=$!
+await_path "$MINT_HOLD_MARK" || fail "the killed-waiter fixture never took the lock"
+
+PATH="$MINT_SHIM:$PATH" "$SCRIPT" sleep 120 >/dev/null 2>"$MINT_ERR" &
+MINT_WAITER=$!
+
+# Either signal ends this wait, and which one arrives is the whole assertion:
+# the waiter reporting that it is in line means it minted nothing, and the shim
+# reporting a mint means it went through the strandable window to get there.
+MINT_WAIT=0
+while [ "$MINT_WAIT" -lt 600 ]; do
+  [ -e "$MINT_MARK" ] && break
+  grep -q 'waiting for the machine-wide build lock' "$MINT_ERR" 2>/dev/null && break
+  sleep 0.1
+  MINT_WAIT=$((MINT_WAIT + 1))
+done
+assert_absent "$MINT_MARK" \
+  "a waiter polling a held lock minted an owner directory it could be killed inside"
+
+kill -9 "$MINT_WAITER" 2>/dev/null || true
+wait "$MINT_WAITER" 2>/dev/null || true
+touch "$MINT_RELEASE"
+touch "$MINT_HOLD_RELEASE"
+wait "$MINT_HOLDER" 2>/dev/null || true
+settle_queue
+pass "a waiter killed while in line strands nothing in the lock root"
+
 # --- CI stand-down ----------------------------------------------------------
 # With a CI marker set the command must run and the lock must never be taken.
 # "The lock root is empty afterwards" is NOT enough on its own: a run that took

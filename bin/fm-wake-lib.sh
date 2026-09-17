@@ -489,6 +489,39 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
+# Collect owner directories nothing points at any more. An owner directory is
+# minted before the symlink that publishes it, so a process killed in that
+# window strands one: nothing links it, so no release, no stale recovery and no
+# later acquire would ever reach it again, and it would sit in the lock's
+# directory for the life of the machine. This is the same class of residue as a
+# lock left by a dead holder, and it is collected on the same liveness test.
+#
+# A live owner is never touched. The directory the lock currently links is
+# skipped by name, and one whose recorded pid is still alive belongs to a
+# process that is mid-acquire, which reaping would fail for no reason. One with
+# no pid recorded yet is in the same half-created state the lock itself can be
+# in between its link and its pid record, so it gets exactly that grace.
+fm_lock_reap_stray_owners() {  # <lockdir>
+  local lockdir=$1 linked='' entry pid
+  if [ -L "$lockdir" ]; then
+    linked=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+  fi
+  linked=${linked##*/}
+  for entry in "$lockdir".owner.*; do
+    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+    if [ -n "$linked" ] && [ "${entry##*/}" = "$linked" ]; then
+      continue
+    fi
+    pid=$(cat "$entry/pid" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) fm_lock_mid_acquire_is_fresh "$entry" '' && continue ;;
+      *) fm_pid_alive "$pid" && continue ;;
+    esac
+    fm_lock_clean_known_files "$entry"
+    rmdir "$entry" 2>/dev/null || true
+  done
+}
+
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
@@ -536,6 +569,19 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  # Look before minting. A waiter polls this function for the whole of its wait
+  # and loses here every time, so minting first sent every waiter through the
+  # strandable window below once per poll - which is how a SIGKILLed waiter kept
+  # leaving an owner directory behind in the machine-wide build lock's root.
+  # Checking first means the contended path, the only path a waiter ever takes,
+  # mints nothing at all. The second check below is what still decides the race;
+  # this one only declines a lock that is already plainly taken.
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    return 1
+  fi
+  # On the acquiring path rather than the polling one above, so collecting costs
+  # one directory scan per acquisition instead of one per poll of every waiter.
+  fm_lock_reap_stray_owners "$lockdir"
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"

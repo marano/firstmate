@@ -363,6 +363,96 @@ test_lock_empty_pid_uses_minimum_grace() {
   pass "empty mid-acquire lock keeps a minimum grace"
 }
 
+# An owner directory is minted before the symlink that publishes it, so a
+# process killed in between strands one that nothing points at: no release, no
+# stale recovery and no later acquire would ever reach it again, and it would
+# sit beside the lock for the life of the machine. Acquiring collects those, on
+# the same liveness test that reclaims the lock itself, and must leave alone
+# every owner that is still somebody's - a live acquirer's, and one too young to
+# have recorded its pid yet.
+# Mutant: drop the fm_lock_reap_stray_owners call in fm_lock_try_create.
+# Mutant: reap without the fm_pid_alive check.
+# Mutant: reap without the mid-acquire grace for an owner with no pid recorded.
+test_lock_collects_owner_dirs_stranded_by_a_dead_acquirer() {
+  local dir state lockdir dead live rc
+  dir=$(make_case lock-stranded-owners)
+  state="$dir/state"
+  lockdir="$state/.stranded.lock"
+  dead=$(dead_pid)
+
+  # Detached from this script's stdout on purpose: the runner reads each script
+  # through a pipe, so a fixture still holding that pipe after an assertion
+  # exits would stall the whole lane behind this one failure.
+  sleep 60 >/dev/null 2>&1 &
+  live=$!
+
+  mkdir "$lockdir.owner.dead01" "$lockdir.owner.live01" \
+    "$lockdir.owner.half01" "$lockdir.owner.old001"
+  printf '%s\n' "$dead" > "$lockdir.owner.dead01/pid"
+  printf '%s\n' "$live" > "$lockdir.owner.live01/pid"
+  # Stranded before its creator recorded a pid, and now far past any grace.
+  touch -t 202001010000 "$lockdir.owner.old001"
+
+  rc=0
+  FM_LOCK_STALE_AFTER=60 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquiring a free lock beside stranded owner directories failed (rc=$rc)"
+
+  assert_absent "$lockdir.owner.dead01" \
+    "an owner directory stranded by a dead acquirer was never collected"
+  assert_absent "$lockdir.owner.old001" \
+    "an owner directory stranded before its pid was recorded was never collected"
+  [ -d "$lockdir.owner.live01" ] \
+    || fail "a live acquirer's owner directory was collected out from under it"
+  [ -d "$lockdir.owner.half01" ] \
+    || fail "an owner directory too young to have recorded its pid was collected"
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "owner directories stranded by a dead acquirer are collected and live ones are not"
+}
+
+# The guard that keeps the reap off the owner a lock is currently pointing at.
+# An acquire reaches the reap only with the lock absent, so this drives the
+# function directly rather than pretending an acquire gets there. It matters
+# because the lock's own owner records a DEAD pid for the whole window between
+# its holder dying and stale recovery running, which is exactly when liveness
+# alone would not protect it.
+# Mutant: reap without skipping the owner the lock links.
+test_lock_reap_spares_the_owner_a_held_lock_links() {
+  local dir state lockdir dead linked rc
+  dir=$(make_case lock-linked-owner)
+  state="$dir/state"
+  lockdir="$state/.linked.lock"
+  dead=$(dead_pid)
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "could not take the lock whose linked owner must survive a reap (rc=$rc)"
+  [ -L "$lockdir" ] || fail "the lock under test is not the symlink form this guard is about"
+  linked=$(readlink "$lockdir") || fail "the held lock records no owner directory"
+
+  mkdir "$lockdir.owner.dead01"
+  printf '%s\n' "$dead" > "$lockdir.owner.dead01/pid"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_reap_stray_owners "$2"
+  ' _ "$LIB" "$lockdir" || fail "reaping beside a held lock failed"
+
+  [ -d "$linked" ] \
+    || fail "the owner directory the lock points at was collected, orphaning the lock"
+  assert_absent "$lockdir.owner.dead01" \
+    "a stranded owner directory beside a held lock was never collected"
+  pass "reaping spares the owner directory a held lock points at"
+}
+
 test_lock_late_claim_loses_after_recreate() {
   local dir state lockdir out
   dir=$(make_case lock-late-claim)
@@ -1122,6 +1212,8 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
+test_lock_collects_owner_dirs_stranded_by_a_dead_acquirer
+test_lock_reap_spares_the_owner_a_held_lock_links
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
