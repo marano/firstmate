@@ -831,7 +831,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
+    assert_grep '`awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
@@ -844,23 +844,70 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-test_ship_and_scout_teach_validation_round_pause() {
-  local home kind id brief
-  home="$TMP_ROOT/validation-round-pause-home"
+# Rule 4's pause contract must reach a worker as an obligation fired at the
+# moment it goes quiet, not as a definition of when the verb is permitted.
+# Stating it as a definition ("use `paused:` ONLY when you are deliberately
+# idling on a known external wait") left five healthy workers undeclared in one
+# night - waiting on the shared build lock, a test re-run, a background test
+# run, and their own pipeline - because a worker reads that form as a
+# restriction on a report it was separately told to make sparingly, and reads a
+# job it launched itself as neither "external" nor "idling".
+#
+# So this pins the three properties that make a worker act rather than classify:
+# a self-launched job is named in-category, the append is ordered ahead of going
+# quiet, and the wait is closed when it reports. It also pins the `blocked:`
+# escape alongside them, because one of those five alerts was a real starvation
+# condition and nothing here may make a genuine blocker less likely to be raised.
+test_ship_and_scout_oblige_declaring_a_self_launched_wait() {
+  local home kind id brief rule4
+  home="$TMP_ROOT/self-launched-wait-home"
   mkdir -p "$home/data"
 
   for kind in ship scout; do
-    id="brief-validation-round-pause-$kind"
+    id="brief-self-launched-wait-$kind"
     if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
-    assert_grep "your own validation round" "$brief" \
-      "$kind brief did not teach workers to declare their validation-round wait"
+    # Scope every assertion to the rendered status protocol: the obligation only
+    # works where the worker meets the reporting rule, so a stray mention of a
+    # background job elsewhere in the brief must not satisfy this test.
+    rule4="$TMP_ROOT/$id.rule4"
+    awk '/^4\. Report status/ { inside = 1 } /^5\. / { inside = 0 } inside' "$brief" > "$rule4"
+    [ -s "$rule4" ] || fail "$kind brief has no rule 4 status protocol to carry the pause obligation"
+
+    # A job the worker launched itself must be inside the category, and must not
+    # depend on the worker reading to the end of a list of outside-world waits.
+    assert_grep "A job you launched yourself counts" "$rule4" \
+      "$kind rule 4 no longer puts a self-launched job inside the declared-wait category"
+    assert_grep "your own validation round" "$rule4" \
+      "$kind rule 4 no longer names the validation round as a wait to declare"
+    assert_grep "a test or build run" "$rule4" \
+      "$kind rule 4 no longer names a background test or build run as a wait to declare"
+
+    # The report must be ordered ahead of going quiet. A permissive definition of
+    # the verb satisfies neither of these.
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    grep -Eq 'Append `awaiting: \{why\}` BEFORE you stop' "$rule4" \
+      || fail "$kind rule 4 no longer orders the pause append ahead of the worker going quiet"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'then `working:` or `done:` once it reports' "$rule4" \
+      "$kind rule 4 no longer closes the declared wait when the job reports back"
+    assert_no_grep "ONLY when you are deliberately idling" "$rule4" \
+      "$kind rule 4 reverted to defining when the pause verb is permitted"
+
+    # Declaring a wait must never become the quiet alternative to escalating.
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'use `blocked:` when you are stuck and need help' "$rule4" \
+      "$kind rule 4 lost the blocked escape beside the pause obligation"
+    assert_grep "never downgrade a real blocker" "$rule4" \
+      "$kind rule 4 no longer forbids downgrading a real blocker to a declared wait"
   done
-  pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
+  pass "fm-brief.sh: ship and scout scaffolds oblige declaring a self-launched wait"
 }
 
 test_ship_and_scout_teach_reading_stored_text_as_data() {
@@ -1059,7 +1106,7 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
-test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_oblige_declaring_a_self_launched_wait
 test_ship_and_scout_teach_reading_stored_text_as_data
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

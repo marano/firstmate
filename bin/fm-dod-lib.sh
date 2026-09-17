@@ -281,6 +281,7 @@ So drive with \`no-mistakes axi run --wait\` and answer gates with \`no-mistakes
 An elapsed wait is a normal structured return, not a failure: reattach by issuing the same drive call again.
 Never run a \`no-mistakes axi status\` loop to watch a run progress; a single \`axi status\` call as a diagnostic, such as rule 7's daemon-error check, stays allowed.
 If your harness offers a native wait-without-model-calls facility, such as Claude Code's \`Monitor\` tool, use it in place of a reattach loop.
+Any such wait - a native wait facility, a long sleep, or an elapsed \`--wait\` you are about to reissue - is a wait rule 4 makes you declare before you stop.
 Any residual sleep-and-recheck fallback must sleep at least 120 seconds inside a single call, never spin.
 Never poll the PR's own check status yourself with \`gh-axi\`, \`gh\`, or an equivalent - the pipeline's own CI step already reports the CI-ready point that ends your job.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
