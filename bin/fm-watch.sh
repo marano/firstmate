@@ -122,9 +122,10 @@
 #                          instead of self-handling it; bin/fm-idle-fleet-lib.sh
 #                          owns the condition and why it lives here
 #   check: fleet idle detector disabled: <why>
-#                          config/fleet-capacity exists but is not one positive
-#                          integer, so the detector refused to evaluate rather
-#                          than default around a typo
+#                          config/fleet-capacity is absent, or exists but is not
+#                          one positive integer, so the detector refused to
+#                          evaluate rather than default around an unstated cap
+#                          or a typo
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -918,14 +919,23 @@ idle_fleet_tick() {
   status=$?
   case "$status" in
     0) ;;
-    2)
-      # A capacity that cannot be read is refused rather than defaulted around,
-      # and it is reported once per queued record: silently narrowing the
-      # detector is the failure this whole check exists to remove. Nothing was
-      # evaluated, so any open episode goes with it; the repaired detector then
-      # serves a fresh window rather than maturing one nobody verified.
+    2|4)
+      # A capacity this cannot read is refused rather than defaulted around, and
+      # it is reported once per queued record: silently narrowing the detector is
+      # the failure this whole check exists to remove. An ABSENT file is refused
+      # on the same footing as a malformed one, because there is no honest number
+      # to assume for a home that has not stated its cap - the two share one
+      # queued key because they are one operator-facing fact, "this detector
+      # cannot run until config/fleet-capacity says how many tasks this home runs
+      # at once". Nothing was evaluated, so any open episode goes with it; the
+      # repaired detector then serves a fresh window rather than maturing one
+      # nobody verified.
       rm -f "$STATE/.idle-fleet-since" "$STATE/.idle-fleet-alerted"
-      reason="check: fleet idle detector disabled: $CONFIG/fleet-capacity is not one positive integer"
+      if [ "$status" = 4 ]; then
+        reason="check: fleet idle detector disabled: $CONFIG/fleet-capacity is absent, so this home has not said how many tasks it runs at once"
+      else
+        reason="check: fleet idle detector disabled: $CONFIG/fleet-capacity is not one positive integer"
+      fi
       queued=$(fm_wake_queued_keys check)
       if ! printf '%s\n' "$queued" | grep -Fx idle-fleet-config >/dev/null 2>&1; then
         fm_wake_append check idle-fleet-config "$reason" || return 1

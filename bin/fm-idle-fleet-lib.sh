@@ -42,31 +42,48 @@
 #
 # THE THREE NUMBERS.
 #
-#   in-progress - this home's own task records (state/<id>.meta of kind `task`)
-#       whose latest status line does NOT declare a concluded outcome. A crew
-#       that reported `done:` or `failed:` is an idle agent, not in-progress
-#       work: the captain's cap counts work under way, and there is no limit on
-#       idle agents. That distinction is the whole point. Counting the backlog's
-#       own In-flight rows instead would have read 5-of-5 busy through the exact
-#       incident this detector exists for, because nothing merged, so teardown
-#       never ran and every row stayed In flight while every worker sat finished.
-#       `blocked:`, `needs-decision:`, `paused:` and `captain-held:` DO count as
-#       in progress: that work is open, not concluded, and it already has its own
-#       escalation owners, so freeing its slot here would pile a second alarm on
-#       a condition someone is already being told about.
+#   in-progress - this home's own work records (every state/<id>.meta whose
+#       kind is a work item, per bin/fm-task-kind-lib.sh) whose latest status
+#       line does NOT declare a concluded outcome.
+#
+#       WHAT COUNTS AS IN PROGRESS, and it is deliberately not "emitting". Only
+#       `done:` and `failed:` conclude. `working:`, `blocked:`,
+#       `needs-decision:`, `paused:`, `captain-held:` and a record with no status
+#       line at all are all open work holding their slot. A worker waiting out a
+#       CI lane or queued behind the build lock declares `paused:` and then goes
+#       deliberately silent for as long as the wait lasts; that silence is the
+#       protocol working, not a stopped fleet. Counting only actively-emitting
+#       workers would therefore rebuild this very false positive by another
+#       route, and it would double-report besides: blocked and held work already
+#       has its own escalation owners, so freeing its slot here would pile a
+#       second alarm on a condition someone is being told about already.
+#
+#       A crew that reported `done:` or `failed:` IS free capacity, whatever is
+#       still unlanded behind it: the captain's cap counts work under way and
+#       there is no limit on idle agents. Counting the backlog's own In-flight
+#       rows instead would have read 5-of-5 busy through the exact incident this
+#       detector exists for, because nothing merged, so teardown never ran and
+#       every row stayed In flight while every worker sat finished.
+#
 #       Persistent secondmates never count; they are not work items.
 #
 #   capacity - config/fleet-capacity, one positive integer, the number of tasks
 #       this home runs at once. Nothing reads it as authority: no dispatch
 #       consults it and no spawn is refused for exceeding it. It exists only so
 #       this comparison can tell a busy fleet from a stopped one.
-#       ABSENT is not zero and not unlimited: AGENTS.md section 7 sets no
-#       fleet-wide concurrency cap, so with nothing configured the effective
-#       capacity is 1 and the detector fires only on a completely idle fleet.
-#       That is the narrowest true reading of "capacity is free" that
-#       needs no invented number. MALFORMED is refused rather than defaulted, so
-#       a typo cannot quietly restore the silence this detector removes; the
-#       caller reports it instead of evaluating.
+#       ABSENT IS REFUSED, exactly as a malformed value is, and this is the
+#       second half of the same fix. There is no number to fall back to that is
+#       not invented: AGENTS.md section 7 sets no fleet-wide concurrency cap, and
+#       a home's real cap lives in its own data/captain.md as prose. The
+#       original default of 1 looks like the cautious choice and is not - it
+#       silently makes the detector deaf in every home that runs more than one
+#       task at a time, because in-progress can then never be below capacity
+#       while anything at all is under way. Baking one captain's cap into shared
+#       code instead would be the same wrong answer with a different number.
+#       So the absence is made LOUD: the caller reports that the detector cannot
+#       run until the home states its cap, once, and evaluates nothing. A
+#       MALFORMED value is refused on the same reasoning and reported the same
+#       way, so a typo cannot quietly restore the silence this detector removes.
 #
 #   ready - dispatchable-now queued work, from `tasks-axi ready` through
 #       bin/fm-tasks-axi.sh, which owns addressing this home's backlog. That
@@ -83,7 +100,7 @@ set -u
 _FM_IDLE_FLEET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Helper owners, sourced only when the caller has not already loaded them. The
-# watcher has all three by the time it sources this file, so this costs it nothing;
+# watcher has them all by the time it sources this file, so this costs it nothing;
 # a test or a standalone caller gets a self-contained library either way.
 if ! command -v fm_meta_get >/dev/null 2>&1; then
   # shellcheck source=/dev/null
@@ -97,21 +114,28 @@ if ! command -v fm_run_timed >/dev/null 2>&1; then
   # shellcheck source=/dev/null
   . "$_FM_IDLE_FLEET_LIB_DIR/fm-timeout-lib.sh"
 fi
+if ! command -v fm_task_kind_is_work >/dev/null 2>&1; then
+  # shellcheck source=/dev/null
+  . "$_FM_IDLE_FLEET_LIB_DIR/fm-task-kind-lib.sh"
+fi
 
 # Longest this library will wait for the backlog read. bin/fm-timeout-lib.sh owns
 # the bound itself; a non-positive value is not a bound, so it is rejected here.
 FM_IDLE_FLEET_READY_TIMEOUT_DEFAULT=20
 
-# The effective capacity for <config-dir>.
-# 0 and a value on stdout: usable (configured, or the unconfigured default of 1).
-# 2 and nothing on stdout: config/fleet-capacity exists but is not one positive
-# integer in a plain regular file, which the caller reports rather than defaults.
+# The configured capacity for <config-dir>.
+# 0 and a value on stdout: config/fleet-capacity names one positive integer.
+# 2 and nothing on stdout: it exists but is not one positive integer in a plain
+# regular file.
+# 4 and nothing on stdout: it does not exist, so this home has never said how
+# many tasks it runs at once.
+# Both refusals are reported by the caller rather than defaulted around; the
+# header's capacity paragraph owns why an absent file has no honest default.
 fm_idle_fleet_capacity() {  # <config-dir>
   local config=$1 file value
   file="$config/fleet-capacity"
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    printf '1\n'
-    return 0
+    return 4
   fi
   [ -f "$file" ] && [ ! -L "$file" ] || return 2
   # Exactly one line: a second line means the file says more than one thing, and
@@ -129,12 +153,6 @@ fm_idle_fleet_capacity() {  # <config-dir>
   printf '%s\n' "$value"
 }
 
-# 0 when <config-dir> names a capacity of its own, 1 when the default applies.
-# Only for reporting: fm_idle_fleet_capacity already returns the value to use.
-fm_idle_fleet_capacity_configured() {  # <config-dir>
-  [ -e "$1/fleet-capacity" ] || [ -L "$1/fleet-capacity" ]
-}
-
 # Count this home's own task records that have not reported a concluded outcome.
 fm_idle_fleet_in_progress() {  # <state-dir>
   local state=$1 meta task kind count=0
@@ -144,8 +162,12 @@ fm_idle_fleet_in_progress() {  # <state-dir>
     task=${task%.meta}
     case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
-    # An absent kind is the long-standing default for an ordinary crew task.
-    case "$kind" in ''|task) ;; *) continue ;; esac
+    # bin/fm-task-kind-lib.sh is the one owner of which kinds bin/fm-spawn.sh
+    # records and which of them is work. Asking it is the whole fix: this line
+    # used to carry its own list of kinds - '' and `task` - that no spawn has
+    # ever written, so every real record fell through and this count could not
+    # leave zero.
+    fm_task_kind_is_work "$kind" || continue
     case "$(status_line_verb "$(last_status_line "$state/$task.status")")" in
       done|failed) continue ;;
     esac
@@ -194,12 +216,14 @@ fm_idle_fleet_ready_count() {  # <fm-home>
 #       dispatchable, is working or has nothing to do; neither is a fault.
 #   2 - config/fleet-capacity is malformed. Nothing was evaluated.
 #   3 - the ready count could not be read. Nothing was evaluated.
+#   4 - config/fleet-capacity is absent, so this home has no stated cap to
+#       compare against. Nothing was evaluated.
 fm_idle_fleet_condition() {  # <state-dir> <config-dir> <fm-home>
   local state=$1 config=$2 home=$3 capacity in_progress ready
   FM_IDLE_FLEET_IN_PROGRESS=
   FM_IDLE_FLEET_CAPACITY=
   FM_IDLE_FLEET_READY=
-  capacity=$(fm_idle_fleet_capacity "$config") || return 2
+  capacity=$(fm_idle_fleet_capacity "$config") || return $?
   in_progress=$(fm_idle_fleet_in_progress "$state")
   # shellcheck disable=SC2034 # Read by callers (bin/fm-watch.sh's idle_fleet_tick).
   FM_IDLE_FLEET_CAPACITY=$capacity
