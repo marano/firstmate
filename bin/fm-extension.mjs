@@ -685,15 +685,38 @@ async function installPackage(home, sourceInfo) {
         || sourceAfterCopy.manifestDigest !== sourceInfo.manifestDigest) {
       fail("integrity-mismatch", "package changed while it was copied into the managed store");
     }
+    // POSIX allows rename() to require write permission on the directory named
+    // by `old`, and macOS enforces it: renaming the sealed 0555 staging root
+    // fails EACCES there, so every bind fails on such a kernel. Restore owner
+    // write on the staging root for the rename alone - it stays owner-only, and
+    // it lives inside the home-private package parent - then seal the published
+    // directory. The validation below still proves the published tree is 0555.
+    // This rename publishes an unsealed 0700 directory at `destination` for the
+    // window between here and the chmod(0o555) below. A concurrent installPackage
+    // for the same digest that hits the EEXIST/ENOTEMPTY branch just below, or a
+    // SIGKILL/OOM/power loss inside this window, can leave that directory behind;
+    // every later install or bind then refuses it with "package root mode is
+    // unsafe: 700" until it is removed by hand. That residual risk is knowingly
+    // accepted here and tracked separately - it is not closed by this change.
+    await chmod(temporary, 0o700);
     try {
       await rename(temporary, destination);
-      return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
       await removeManagedTree(temporary);
       const winner = await validatePackage(destination, { installed: true });
       if (winner.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "concurrent package install produced a different tree");
       return { packageInfo: winner };
+    }
+    try {
+      await chmod(destination, 0o555);
+      return { packageInfo: await validatePackage(destination, { installed: true }) };
+    } catch (error) {
+      // Our rename created this directory, so we own its cleanup. Leaving an
+      // unsealed or unvalidated tree behind would make the content-addressed
+      // path fail every later bind instead of letting one retry.
+      await removeManagedTree(destination).catch(() => {});
+      throw error;
     }
   } catch (error) {
     await removeManagedTree(temporary).catch(() => {});
