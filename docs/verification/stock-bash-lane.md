@@ -10,6 +10,10 @@ Every other CI job runs on `ubuntu-latest`, which is Bash 5.
 macOS still ships Bash 3.2.57 as `/bin/bash`, and constructs that only break there are invisible to every Linux job.
 The best-known member of that class is `"${arr[@]}"` on an empty array under `set -u`, which Bash before 4.4 treats as unbound.
 
+A second member, measured on `main` on 2026-09-17 under `/bin/bash` 3.2.57(1)-release, is pattern substitution whose pattern is a quoted path.
+Bash 3.2 chooses the pattern/replacement separator by scanning the expansion text for the first `/` without honouring the double quotes around it, so `${command/"$ROOT/bin/emit.sh"/"$replacement"}` splits the pattern at `"$ROOT` and substitutes silently wrong text rather than failing; Bash 4+ honours the quotes and substitutes correctly.
+Holding both sides in variables first, as `${command/"$emit_command"/"$record_command"}`, leaves no literal `/` in the expansion text, so both versions agree while the quotes still keep the match literal instead of a glob.
+
 `bash -n` cannot see it.
 A parse sweep answers "does this file parse", and an unbound-variable expansion is a runtime failure in a file that parses cleanly.
 That distinction is the whole reason a job can be green while the code it names is broken.
