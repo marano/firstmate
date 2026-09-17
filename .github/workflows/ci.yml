@@ -60,16 +60,23 @@ jobs:
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
-  # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
-  # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
+  # Three duration-balanced portable parallel shards of the Phase 2
+  # proven-isolated set only. Composition owner: bin/fm-test-run.sh
+  # (docs/fm-test-portable-shards.md). Split from two lanes to three on
+  # 2026-09-17 by captain decision: the two-lane packing had no rebalance left
+  # to spend (8.34/8.27 min against this 10-minute cap), so cutting wall-clock
+  # merge wait required more lanes rather than more headroom or a higher cap.
+  # tests/fm-captain-hold-lifecycle.test.sh alone (339763ms) exceeds an even
+  # three-way split of the total, so shard 3 is that single script and a
+  # fourth lane would not lower the packed max further.
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # This cap is intended as a hang tripwire, but the previous lane 1 reached
-    # it; the former "~1 min of serial sum" estimate no longer applies. Six green
-    # runs on 2026-09-17 measured 6.6-8.2 min of script time here, and the two
-    # lanes are already evenly split, so the next answer to growth is the lane
-    # count or this cap rather than another rebalance.
+    # This cap is intended as a hang tripwire. The three-way split measured
+    # 328865/328538/339763ms (about 5.5-5.7 min) of packed hint weight against
+    # this 10-minute cap on 2026-09-17, leaving about 43% headroom on the
+    # heaviest lane; the prior two-lane split ran 8.27-8.34 min with almost no
+    # margin left to rebalance.
     # Compare it with the derived hints from fm-test-run.sh --check-coverage
     # and completed job timings, allowing for setup and runner-speed spread.
     # A packed hint sum is not a measured job wall time or proof of headroom.
@@ -151,6 +158,47 @@ jobs:
         with:
           name: fm-test-timing-portable-parallel-2
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
+          if-no-files-found: warn
+
+  tests-portable-parallel-3:
+    name: Behavior portable parallel 3
+    runs-on: ubuntu-latest
+    # Same timeout rationale as portable parallel shard 1 above. This shard is
+    # tests/fm-captain-hold-lifecycle.test.sh alone: LPT packing places the
+    # single dominant script by itself once splitting it further would not
+    # lower any lane's packed weight.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install pinned ShellCheck
+        run: |
+          set -eu
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned actionlint
+        run: |
+          set -eu
+          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
+      - name: Run portable parallel shard 3
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          bin/fm-test-run.sh --lane portable-parallel-3 \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-3.json"
+      - name: Upload shard 3 timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-portable-parallel-3
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-3.json
           if-no-files-found: warn
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
@@ -365,6 +413,7 @@ jobs:
     needs:
       - tests-portable-parallel-1
       - tests-portable-parallel-2
+      - tests-portable-parallel-3
       - tests-portable-serial
       - tests-herdr
     if: always()
