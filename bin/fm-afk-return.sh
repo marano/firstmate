@@ -509,6 +509,14 @@ EOF
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
+  # A stdout write failure earlier in this function (evidence publication
+  # racing a broken output stream) can leave a command substitution's captured
+  # text non-numeric; an unguarded `-gt`/`$(( ))` on that text throws a fatal
+  # arithmetic-syntax error that unwinds the whole function before the
+  # write_gate/return-3 path below ever runs. Clamp to a count so a broken
+  # stream degrades the brief's numbers, not the gate's control flow.
+  case "$routine" in ''|*[!0-9]*) routine=0 ;; esac
+  case "$captain" in ''|*[!0-9]*) captain=0 ;; esac
   if [ "$routine" -gt 0 ]; then
     printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
     printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
