@@ -68,7 +68,13 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state" "$dir/config" "$fakebin"
+  # See the FM_ROOT_OVERRIDE fallback above: an absent config/fleet-capacity
+  # now makes bin/fm-idle-fleet-lib.sh's detector refuse loudly on a real
+  # watcher's first tick. Suites built on this case driver run a real
+  # watcher/arm/lock cycle and assert on a specific wake or a quiet one; state
+  # a capacity here too, once, so that refusal never consumes the report.
+  printf '5\n' > "$dir/config/fleet-capacity"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

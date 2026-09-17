@@ -127,6 +127,12 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  # An absent config/fleet-capacity makes bin/fm-idle-fleet-lib.sh's detector
+  # refuse loudly on a real watcher's first tick (bin/fm-watch.sh's
+  # idle_fleet_tick). run_watcher_bounded drives a real watcher and asserts on
+  # a specific check line; state a capacity once so that refusal never
+  # consumes the one thing a cycle reports.
+  printf '5\n' > "$dir/home/config/fleet-capacity"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"

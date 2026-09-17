@@ -2781,7 +2781,13 @@ EOF
 test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/config"
+  # An absent config/fleet-capacity makes bin/fm-idle-fleet-lib.sh's detector
+  # refuse loudly on a real watcher's first tick, and the production wake()
+  # this test does not override exits the watcher on that report. State a
+  # capacity once so the idle secondmate scenario under test is what this
+  # watcher's first cycle actually reports.
+  printf '5\n' > "$home/config/fleet-capacity"
   window="firstmate:fm-domain"
   cat > "$home/state/domain.meta" <<EOF
 window=$window
