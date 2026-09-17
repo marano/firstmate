@@ -18,17 +18,6 @@
 if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
   FM_ROOT_OVERRIDE="$(fm_test_tmproot fm-wake-tangle-root)"
   export FM_ROOT_OVERRIDE
-  # An absent config/fleet-capacity now makes bin/fm-idle-fleet-lib.sh's
-  # detector refuse loudly on a watcher's first tick for this home (see
-  # fm_idle_fleet_capacity there). These suites drive the real watcher/arm/
-  # daemon and assert on a specific wake or a quiet cycle; that refusal would
-  # consume the one thing a cycle reports and starve the assertion under test.
-  # State a capacity for this fallback home once, as a real operator eventually
-  # must, so it never becomes the thing these cycles report. Scoped to the
-  # fallback branch only: a suite that sets its own FM_ROOT_OVERRIDE is
-  # deliberately controlling that home's config itself.
-  mkdir -p "$FM_ROOT_OVERRIDE/config"
-  printf '5\n' > "$FM_ROOT_OVERRIDE/config/fleet-capacity"
 fi
 
 # Wedge-alarm notifier recorder (safety seam). The away-mode wedge alarm fires a
@@ -68,13 +57,7 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$dir/config" "$fakebin"
-  # See the FM_ROOT_OVERRIDE fallback above: an absent config/fleet-capacity
-  # now makes bin/fm-idle-fleet-lib.sh's detector refuse loudly on a real
-  # watcher's first tick. Suites built on this case driver run a real
-  # watcher/arm/lock cycle and assert on a specific wake or a quiet one; state
-  # a capacity here too, once, so that refusal never consumes the report.
-  printf '5\n' > "$dir/config/fleet-capacity"
+  mkdir -p "$dir/state" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

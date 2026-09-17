@@ -124,12 +124,7 @@ META
 # spawn_remote_secondmate() writes it: no spawn_gen, remote_host instead).
 make_remote_parent_home() {  # <name> <mate-id> <remote-home> <host> -> echoes home dir
   local home="$TMP_ROOT/$1" id=$2 rhome host=$4
-  mkdir -p "$home/data" "$home/state" "$home/config"
-  # An absent config/fleet-capacity makes bin/fm-idle-fleet-lib.sh's detector
-  # refuse loudly on a real watcher's first tick. This fixture drives a real
-  # bin/fm-watch.sh and asserts on a specific outcome; state a capacity once so
-  # that refusal never consumes the one thing a cycle reports.
-  printf '5\n' > "$home/config/fleet-capacity"
+  mkdir -p "$home/data" "$home/state"
   # Canonicalize: fm-on.sh's registry route parser rejects an empty path
   # component, and $TMP_ROOT can carry one (a raw mktemp base under a
   # trailing-slash TMPDIR), same as make_main_home's $abs above.

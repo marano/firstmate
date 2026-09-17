@@ -185,25 +185,25 @@ ack_queue() {  # <state>
 
 # --- the condition, as pure functions ---------------------------------------
 
-test_an_unconfigured_capacity_is_refused_rather_than_guessed() {
-  local dir out status
-  dir=$(make_home capacity-absent)
-  # AGENTS.md section 7 sets no fleet-wide concurrency cap and a home's real cap
-  # lives in its private captain preferences as prose, so there is no honest
-  # number to fall back to. The old fallback of 1 was not the cautious choice it
-  # looks like: with it, in-progress can never fall below capacity while any work
-  # is under way, so the alarm goes deaf in every home that runs more than one
-  # task at a time. An unstated cap is made loud instead.
-  out=$(fm_idle_fleet_capacity "$dir/config") && status=0 || status=$?
-  [ "$status" = 4 ] \
-    || fail "an absent config/fleet-capacity was not refused as unstated (status $status)"
-  [ -z "$out" ] || fail "a refused capacity still printed a value: $out"
-  # Separately from malformed, because they are different operator repairs.
+test_capacity_defaults_to_one_when_unconfigured() {
+  local dir status
+  dir=$(make_home capacity-default)
+  # AGENTS.md section 7 sets no fleet-wide concurrency cap, so an unconfigured
+  # home must not have one invented for it. Capacity 1 is the narrowest true
+  # reading of "a slot is free": only a completely idle fleet qualifies, and
+  # every home stays covered without stating anything.
+  [ "$(fm_idle_fleet_capacity "$dir/config")" = 1 ] \
+    || fail "an unconfigured home did not fall back to detecting a completely idle fleet"
+  fm_idle_fleet_capacity_configured "$dir/config" \
+    && fail "an absent config/fleet-capacity was reported as configured"
+  # An absent file is USABLE; only a malformed one refuses. Keeping those apart
+  # matters: making absence refuse would switch this detector off by default in
+  # every home that has never written the file, which is every home today.
   printf 'five\n' > "$dir/config/fleet-capacity"
   fm_idle_fleet_capacity "$dir/config" >/dev/null 2>&1 && status=0 || status=$?
   [ "$status" = 2 ] \
-    || fail "a malformed capacity no longer reports separately from an absent one (status $status)"
-  pass "an unstated capacity is refused and reported, never guessed at"
+    || fail "a malformed capacity was not refused separately from an absent one (status $status)"
+  pass "an unconfigured home detects only a completely idle fleet"
 }
 
 test_capacity_reads_a_configured_value_and_refuses_a_malformed_one() {
@@ -214,6 +214,8 @@ test_capacity_reads_a_configured_value_and_refuses_a_malformed_one() {
   printf '5\n' > "$file"
   [ "$(fm_idle_fleet_capacity "$dir/config")" = 5 ] \
     || fail "a configured capacity of 5 was not read back"
+  fm_idle_fleet_capacity_configured "$dir/config" \
+    || fail "a present config/fleet-capacity was not reported as configured"
   printf '  7  \n' > "$file"
   [ "$(fm_idle_fleet_capacity "$dir/config")" = 7 ] \
     || fail "surrounding whitespace defeated a valid capacity"
@@ -352,20 +354,33 @@ test_two_working_ships_are_counted_not_reported_as_a_stopped_fleet() {
   # THE INCIDENT, as a regression test. The alarm's first live firing reported
   # `in-progress=0 capacity=1 ready=22` while two real ship tasks were under way
   # and both workers were demonstrably alive: one waiting out a CI lane, one
-  # running a test family. BOTH numbers were fabricated - the count carried its
-  # own kinds that no spawn writes, so it could not leave zero, and the capacity
-  # was a built-in default no home had ever stated - so the line described a
-  # stopped fleet that did not exist.
-  #
-  # What this pins is the NUMBERS, not the comparison. With two of five slots
-  # busy and a queue behind them the condition does hold, and firstmate
-  # dispatching into the free slots is exactly what it is for. What must never
-  # happen again is a working fleet being reported as an empty one.
-  printf '5\n' > "$dir/config/fleet-capacity"
+  # running a test family. The count carried its own kinds that no spawn writes,
+  # so it could not leave zero, and `0 < 1` is permanently true - the line
+  # described a stopped fleet that did not exist.
   record_task "$state" ci-waiter 'paused: waiting on the CI lane'
   record_task "$state" test-runner 'working: running the secondmate test family'
   printf '22\n' > "$dir/ready-count"
 
+  # FIRST, the reported case EXACTLY: no config/fleet-capacity, so the effective
+  # capacity is the default 1, which is the `capacity=1` the false alarm printed.
+  # The counter is the whole defect and the whole fix - with it reading 2, the
+  # comparison is 2 < 1, and this fleet is silent without the home configuring
+  # anything. A capacity file cannot be part of the fix: no home has one, and
+  # this is the state every home is in right now.
+  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
+    fm_idle_fleet_condition "$state" "$dir/config" "$dir" && status=0 || status=$?
+  [ "$status" = 1 ] \
+    || fail "the reported false alarm still fires on an unconfigured home (status $status)"
+  [ "$FM_IDLE_FLEET_IN_PROGRESS" = 2 ] \
+    || fail "two live ship tasks were reported as $FM_IDLE_FLEET_IN_PROGRESS in progress, not 2"
+  [ "$FM_IDLE_FLEET_CAPACITY" = 1 ] \
+    || fail "an unconfigured home did not compare against the default capacity of 1"
+
+  # THEN the same fleet against a stated cap, to show the count feeds a real
+  # comparison rather than only ever losing it. With two of five slots busy and a
+  # queue behind them the condition does hold, and firstmate dispatching into the
+  # free slots is exactly what this alarm is for.
+  printf '5\n' > "$dir/config/fleet-capacity"
   FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
     fm_idle_fleet_condition "$state" "$dir/config" "$dir" \
     || fail "two busy slots of five with 22 queued did not read as free capacity"
@@ -449,18 +464,11 @@ test_condition_separates_a_bad_capacity_from_an_unreadable_queue() {
     || fail "a refused evaluation still read the backlog"
 
   rm -f "$dir/config/fleet-capacity"
-  FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
-    fm_idle_fleet_condition "$state" "$dir/config" "$dir" && status=0 || status=$?
-  [ "$status" = 4 ] || fail "an unstated capacity did not refuse to evaluate (status $status)"
-  [ -z "$FM_IDLE_FLEET_READY" ] \
-    || fail "a home with no stated capacity still read the backlog"
-
-  printf '3\n' > "$dir/config/fleet-capacity"
   printf 'fail\n' > "$dir/ready-count"
   FM_FAKE_READY_COUNT_FILE="$dir/ready-count" PATH="$dir/fakebin:$PATH" \
     fm_idle_fleet_condition "$state" "$dir/config" "$dir" && status=0 || status=$?
   [ "$status" = 3 ] || fail "an unreadable ready queue was not reported separately (status $status)"
-  pass "an unstated capacity, a malformed one, and an unreadable queue are three separate refusals"
+  pass "a malformed capacity and an unreadable queue are separate, named refusals"
 }
 
 # --- the watcher, driven as a real subprocess -------------------------------
@@ -691,50 +699,10 @@ test_watcher_reports_a_capacity_it_cannot_read() {
   pass "a capacity the detector cannot read is reported once and retires its episode"
 }
 
-test_watcher_reports_a_capacity_that_was_never_stated() {
-  local dir state out
-  dir=$(make_home tick-absent-capacity)
-  state="$dir/state"
-  record_task "$state" solo
-  printf '15\n' > "$dir/ready-count"
-
-  # No config/fleet-capacity at all - the state every home was in when this
-  # detector shipped, and the reason it compared against an invented 1. The home
-  # is told once, and nothing is evaluated against a guess.
-  out=$(run_tick "$dir" 1000 FM_IDLE_FLEET_SECS=1)
-  grep -F 'check: fleet idle detector disabled:' <<<"$out" >/dev/null \
-    || fail "a home that never stated its capacity was silently given one: $out"
-  grep -F 'is absent' <<<"$out" >/dev/null \
-    || fail "the report did not say the capacity was never stated: $out"
-  grep -F 'idle-fleet-config' "$state/.wake-queue" >/dev/null \
-    || fail "the report did not reach the durable wake queue"
-  [ ! -e "$state/.idle-fleet-since" ] \
-    || fail "a refused evaluation left an episode window open"
-
-  # Reported once, not on every scan.
-  clear_scan_gate "$dir"
-  out=$(run_tick "$dir" 1100 FM_IDLE_FLEET_SECS=1)
-  [ -z "$out" ] || fail "the report repeated while still queued: $out"
-  [ "$(grep -c 'idle-fleet-config' "$state/.wake-queue")" = 1 ] \
-    || fail "the report was duplicated"
-
-  # The control: once the home states its cap, the same fleet alarms normally.
-  ack_queue "$state" || fail "the report could not be acknowledged"
-  printf '5\n' > "$dir/config/fleet-capacity"
-  clear_scan_gate "$dir"
-  run_tick "$dir" 1200 FM_IDLE_FLEET_SECS=1 >/dev/null
-  clear_scan_gate "$dir"
-  out=$(run_tick "$dir" 1300 FM_IDLE_FLEET_SECS=1)
-  grep -F 'check: fleet idle with ready work:' <<<"$out" >/dev/null \
-    || fail "a repaired detector did not evaluate the condition: $out"
-  pass "a capacity that was never stated disables the detector loudly, and repairing it restores the alarm"
-}
-
 test_watcher_stays_quiet_when_the_ready_queue_cannot_be_read() {
   local dir state out since
   dir=$(make_home tick-unreadable-queue)
   state="$dir/state"
-  printf '5\n' > "$dir/config/fleet-capacity"
   record_task "$state" solo 'done: PR https://example.test/pr/1 checks green'
   printf '15\n' > "$dir/ready-count"
 
@@ -808,7 +776,7 @@ test_away_mode_escalates_the_disabled_detector_report() {
   pass "away mode escalates a detector it can no longer run"
 }
 
-test_an_unconfigured_capacity_is_refused_rather_than_guessed
+test_capacity_defaults_to_one_when_unconfigured
 test_capacity_reads_a_configured_value_and_refuses_a_malformed_one
 test_in_progress_counts_open_work_and_not_concluded_agents
 test_the_recorded_kind_vocabulary_is_pinned_and_classified
@@ -823,7 +791,6 @@ test_watcher_resurfaces_a_condition_that_keeps_holding
 test_watcher_does_not_duplicate_an_unhandled_alarm
 test_scan_cadence_keeps_the_backlog_read_off_the_poll_path
 test_watcher_reports_a_capacity_it_cannot_read
-test_watcher_reports_a_capacity_that_was_never_stated
 test_watcher_stays_quiet_when_the_ready_queue_cannot_be_read
 test_away_mode_escalates_the_idle_fleet_alarm
 test_away_mode_escalates_the_disabled_detector_report

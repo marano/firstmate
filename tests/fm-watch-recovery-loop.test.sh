@@ -174,11 +174,7 @@ test_handling_successor_does_not_go_blind() {
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
-  mkdir -p "$home/data" "$home/config"
-  # An absent config/fleet-capacity makes bin/fm-idle-fleet-lib.sh's detector
-  # refuse loudly on a real watcher's first tick, which would otherwise starve
-  # this test's own bounded-startup assertion of the one thing a cycle reports.
-  printf '5\n' > "$home/config/fleet-capacity"
+  mkdir -p "$home/data"
   : > "$state/crew.meta"
   printf 'pending:downtime:gap.1.aaa\n' > "$state/.watcher-down"
   chmod 600 "$state/.watcher-down"

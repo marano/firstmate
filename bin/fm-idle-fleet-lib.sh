@@ -71,19 +71,16 @@
 #       this home runs at once. Nothing reads it as authority: no dispatch
 #       consults it and no spawn is refused for exceeding it. It exists only so
 #       this comparison can tell a busy fleet from a stopped one.
-#       ABSENT IS REFUSED, exactly as a malformed value is, and this is the
-#       second half of the same fix. There is no number to fall back to that is
-#       not invented: AGENTS.md section 7 sets no fleet-wide concurrency cap, and
-#       a home's real cap lives in its own data/captain.md as prose. The
-#       original default of 1 looks like the cautious choice and is not - it
-#       silently makes the detector deaf in every home that runs more than one
-#       task at a time, because in-progress can then never be below capacity
-#       while anything at all is under way. Baking one captain's cap into shared
-#       code instead would be the same wrong answer with a different number.
-#       So the absence is made LOUD: the caller reports that the detector cannot
-#       run until the home states its cap, once, and evaluates nothing. A
-#       MALFORMED value is refused on the same reasoning and reported the same
-#       way, so a typo cannot quietly restore the silence this detector removes.
+#       ABSENT MEANS 1, the narrowest true reading of "a slot is free": only a
+#       completely idle fleet qualifies, which needs no invented number and
+#       leaves no home uncovered by default. A MALFORMED value is refused and
+#       reported instead of defaulted around, so a typo cannot quietly restore
+#       the silence this detector removes.
+#       That default was not what misreported the incident this file's counter
+#       fix addresses. The in-progress count above was structurally zero, so the
+#       comparison read 0 < 1 and would have held against any capacity at all;
+#       raising the default would only have hidden a broken counter one fleet
+#       size longer.
 #
 #   ready - dispatchable-now queued work, from `tasks-axi ready` through
 #       bin/fm-tasks-axi.sh, which owns addressing this home's backlog. That
@@ -123,19 +120,16 @@ fi
 # the bound itself; a non-positive value is not a bound, so it is rejected here.
 FM_IDLE_FLEET_READY_TIMEOUT_DEFAULT=20
 
-# The configured capacity for <config-dir>.
-# 0 and a value on stdout: config/fleet-capacity names one positive integer.
-# 2 and nothing on stdout: it exists but is not one positive integer in a plain
-# regular file.
-# 4 and nothing on stdout: it does not exist, so this home has never said how
-# many tasks it runs at once.
-# Both refusals are reported by the caller rather than defaulted around; the
-# header's capacity paragraph owns why an absent file has no honest default.
+# The effective capacity for <config-dir>.
+# 0 and a value on stdout: usable (configured, or the unconfigured default of 1).
+# 2 and nothing on stdout: config/fleet-capacity exists but is not one positive
+# integer in a plain regular file, which the caller reports rather than defaults.
 fm_idle_fleet_capacity() {  # <config-dir>
   local config=$1 file value
   file="$config/fleet-capacity"
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    return 4
+    printf '1\n'
+    return 0
   fi
   [ -f "$file" ] && [ ! -L "$file" ] || return 2
   # Exactly one line: a second line means the file says more than one thing, and
@@ -151,6 +145,12 @@ fm_idle_fleet_capacity() {  # <config-dir>
   esac
   [ "$value" -gt 0 ] 2>/dev/null || return 2
   printf '%s\n' "$value"
+}
+
+# 0 when <config-dir> names a capacity of its own, 1 when the default applies.
+# Only for reporting: fm_idle_fleet_capacity already returns the value to use.
+fm_idle_fleet_capacity_configured() {  # <config-dir>
+  [ -e "$1/fleet-capacity" ] || [ -L "$1/fleet-capacity" ]
 }
 
 # Count this home's own task records that have not reported a concluded outcome.
@@ -216,14 +216,12 @@ fm_idle_fleet_ready_count() {  # <fm-home>
 #       dispatchable, is working or has nothing to do; neither is a fault.
 #   2 - config/fleet-capacity is malformed. Nothing was evaluated.
 #   3 - the ready count could not be read. Nothing was evaluated.
-#   4 - config/fleet-capacity is absent, so this home has no stated cap to
-#       compare against. Nothing was evaluated.
 fm_idle_fleet_condition() {  # <state-dir> <config-dir> <fm-home>
   local state=$1 config=$2 home=$3 capacity in_progress ready
   FM_IDLE_FLEET_IN_PROGRESS=
   FM_IDLE_FLEET_CAPACITY=
   FM_IDLE_FLEET_READY=
-  capacity=$(fm_idle_fleet_capacity "$config") || return $?
+  capacity=$(fm_idle_fleet_capacity "$config") || return 2
   in_progress=$(fm_idle_fleet_in_progress "$state")
   # shellcheck disable=SC2034 # Read by callers (bin/fm-watch.sh's idle_fleet_tick).
   FM_IDLE_FLEET_CAPACITY=$capacity

@@ -58,11 +58,6 @@ make_world() { # <name>
   MATE="$WORLD/mate"
   mkdir -p "$WORLD/root" "$MAIN"/{state,data,config,projects} "$MATE"/{state,data,config,projects,bin}
   : > "$MATE/AGENTS.md"
-  # An absent config/fleet-capacity makes bin/fm-idle-fleet-lib.sh's detector
-  # refuse loudly on a real watcher's first tick. This suite drives a real
-  # bin/fm-watch.sh and asserts on a specific wake or a quiet cycle; state a
-  # capacity once so that refusal never consumes the one thing a cycle reports.
-  printf '5\n' > "$MAIN/config/fleet-capacity"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
 }
