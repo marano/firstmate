@@ -1137,13 +1137,30 @@ EOF
   record_claude_idle "$home/state" terminal-ship
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  # A done-but-unlanded child is the ordinary steady state after capacity frees
+  # at done rather than at landing, so it must read as a healthy home.
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done-but-unlanded ship must read as a healthy home, not terminal_in_flight: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] terminal-ship - Failed child still in flight (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  printf 'failed: gave up\n' > "$home/state/terminal-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
     .valid == false
       and .invalidity == {kind:"terminal_in_flight",ids:["terminal-ship"]}
-      and (.reason | contains("terminal-ship=done"))
+      and (.reason | contains("terminal-ship=failed"))
       and (.reason | contains("mate=") | not)
-  ' >/dev/null || fail "ordinary terminal in-flight ship must still produce terminal_in_flight without listing the secondmate: $out"
-  pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
+  ' >/dev/null || fail "ordinary failed in-flight ship must still produce terminal_in_flight without listing the secondmate: $out"
+  pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight, and treats a done-but-unlanded child as healthy"
 }
 
 test_empty_fleet_json
