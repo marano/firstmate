@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -1681,11 +1683,68 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# Relaunch is the only control verb that republishes a whole task record,
+# including the keys other producers own, and a task whose PR is already
+# recorded is the case that matters most: the work is finished, the PR is open,
+# and the agent is being replaced while the PR waits to land. Two things must
+# hold together - the merge watch must still authenticate afterwards, and the
+# record this spawn publishes must leave the other producers' keys where they
+# put them, the PR identity that bin/fm-pr-check.sh appends last included.
+test_relaunch_of_a_recorded_pr_keeps_the_merge_watch_armed() {
+  local dir out rc state head
+  dir=$(new_case pr-armed rl42)
+  add_ship_task "$dir" rl42 claude
+  state="$dir/home/state"
+  head=0123456789abcdef0123456789abcdef01234567
+  # fm-pr-check.sh reads the forge for the head commit through gh, and calls the
+  # repository guard through FM_ROOT; both are stubbed so arming is hermetic.
+  mkdir -p "$dir/root/bin"
+  cat > "$dir/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/root/bin/fm-guard.sh"
+  cat > "$dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" headRefOid "*) printf '%s\n' '$head' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    "$ROOT/bin/fm-pr-check.sh" rl42 https://github.com/o/r/pull/42 >/dev/null \
+    || fail "could not arm the merge watch for the fixture task"
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the freshly armed merge watch did not authenticate"
+
+  out=$(run_control "$dir" rl42 relaunch --note "stopped while the PR waits to land"); rc=$?
+  expect_code 0 "$rc" "relaunching a task whose PR is recorded should succeed"$'\n'"$out"
+
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the relaunch disarmed the merge watch: $(cat "$state/rl42.meta")"
+  [ "$(meta_field "$dir" rl42 pr)" = https://github.com/o/r/pull/42 ] \
+    || fail "the recorded PR did not survive the relaunch"
+  [ -n "$(meta_field "$dir" rl42 control_relaunch_tx)" ] \
+    || fail "the relaunch recorded no transaction id, so this case proves nothing"
+
+  # The republished record must keep the PR identity at the tail, where
+  # bin/fm-pr-check.sh appended it: a spawn-owned key written below it would put
+  # this spawn's own tail on top of another producer's.
+  [ "$(tail -2 "$state/rl42.meta")" = "pr=https://github.com/o/r/pull/42
+pr_head=$head" ] \
+    || fail "the relaunch buried the PR identity under its own keys:"$'\n'"$(cat "$state/rl42.meta")"
+
+  pass "fm-control relaunch: a recorded PR keeps its merge watch armed and stays at the record's tail"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_of_a_recorded_pr_keeps_the_merge_watch_armed
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

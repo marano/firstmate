@@ -17,6 +17,12 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+# Authenticating a task record's PR identity needs that record's key vocabulary,
+# which has its own owner. Sourced here rather than by each caller so every
+# consumer of this library reads a record by the same vocabulary.
+# shellcheck source=bin/fm-meta-keys-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-meta-keys-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -285,8 +291,24 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Authenticate the canonical PR identity recorded in a task record, reading the
+# record as a set rather than a sequence: bin/fm-meta-keys-lib.sh owns why key
+# order in a task record carries no authority, and requiring the PR identity to
+# come last once disarmed a live merge watch the moment a relaunch appended its
+# own transaction id behind it.
+#
+# A record authenticates when every non-blank line is <key>=<value> with the
+# key drawn from the task-record vocabulary, no key appears twice unless its
+# producer appends by design, exactly one pr= line reconstructs its canonical
+# URL, and any pr_head= carries a valid head. A key firstmate does not write is
+# refused wherever it appears, and so is a second copy of a key - fm_meta_get
+# reads the LAST occurrence, so a repeated key is how an appended line
+# redefines what other consumers read. A blank line is ignored rather than
+# refused: it carries no key, so it can neither introduce an unknown key nor
+# redefine an existing one, and a relaunch that writes one ahead of pr= must
+# not disarm the merge watch.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line key value pr_count=0 invalid=0 seen=' '
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -296,10 +318,20 @@ fm_pr_metadata_identity_parse() {
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      pr=*)
+      "") continue ;;
+      *=*) key=${line%%=*} value=${line#*=} ;;
+      *) invalid=1; continue ;;
+    esac
+    fm_meta_task_key_known "$key" || { invalid=1; continue; }
+    if ! fm_meta_task_key_repeatable "$key"; then
+      case "$seen" in
+        *" $key "*) invalid=1; continue ;;
+      esac
+      seen="$seen$key "
+    fi
+    case "$key" in
+      pr)
         pr_count=$((pr_count + 1))
-        [ "$pr_count" -eq 1 ] || continue
-        value=${line#pr=}
         if fm_pr_url_parse "$value"; then
           FM_PR_META_PROVIDER=$FM_PR_PROVIDER
           FM_PR_META_URL=$FM_PR_URL
@@ -307,23 +339,12 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_PATH=$FM_PR_PATH
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
-        seen_pr=1
         ;;
-      pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
-        ;;
+      pr_head) fm_pr_head_valid "$value" || invalid=1 ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ "$invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 

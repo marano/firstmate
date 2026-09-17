@@ -206,8 +206,10 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr= only because that is the
+# order fm-pr-check.sh itself publishes; fm_pr_metadata_identity_parse reads a
+# record as a set, so a case that needs a key after pr= may write it there.
+# Every key must come from the task-record vocabulary, wherever it sits.
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   shift 3
@@ -2417,7 +2419,185 @@ SH
   pass "poll retirement preserves a replacement authority record"
 }
 
+# A task record is written by several independent producers, each of which
+# rewrites only its own keys by stripping them and appending them again, so
+# whichever producer wrote last owns the tail of the file and key ORDER carries
+# no authority (bin/fm-meta-keys-lib.sh). These pin the consequence for the
+# merge poll: every key firstmate itself writes authenticates wherever it sits,
+# including a key invented after this test was written, while a key firstmate
+# does not write is still refused - as is a second copy of a key, which is how
+# an appended line redefines what fm_meta_get reads.
+test_record_authentication_is_position_free() {
+  local dir state url key extra
+  dir=$(make_case record-position)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/31
+
+  # Every key firstmate writes, one case per key, placed AFTER the recorded PR
+  # identity - the position a producer that writes later than fm-pr-check.sh
+  # leaves it in. The loop reads the vocabulary rather than a list copied here,
+  # so a key added to it later is covered by this assertion on the same commit
+  # that invents it, and no new key can quietly reintroduce the positional trap.
+  for key in $FM_META_TASK_RECORD_KEYS; do
+    case "$key" in
+      pr|pr_head) continue ;;
+    esac
+    # Nothing before pr= may repeat the key under test, so the leading context
+    # line is written only when it is not the key being placed after pr=.
+    : > "$state/task-a.meta"
+    [ "$key" = window ] || printf 'window=fm-task-a\n' >> "$state/task-a.meta"
+    printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+    printf '%s=position-free\n' "$key" >> "$state/task-a.meta"
+    fm_pr_metadata_identity_parse "$state/task-a.meta" \
+      || fail "a record carrying $key= after pr= did not authenticate"
+    [ "$FM_PR_META_URL" = "$url" ] \
+      || fail "a record carrying $key= after pr= lost the canonical PR identity"
+  done
+
+  # The same for the whole spawn-owned block at once, which is the shape a
+  # relaunch of an already recorded PR publishes.
+  : > "$state/task-a.meta"
+  printf 'pr=%s\n' "$url" >> "$state/task-a.meta"
+  for key in $FM_META_SPAWN_OWNED_KEYS; do
+    printf '%s=owned\n' "$key" >> "$state/task-a.meta"
+  done
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a record with the whole spawn-owned block after pr= did not authenticate"
+
+  # The PR identity itself is read wherever it sits, first line or last.
+  fm_write_meta "$state/task-a.meta" \
+    "pr=$url" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "window=fm-task-a" \
+    "worktree=$dir/wt"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a record whose PR identity is not last did not authenticate"
+  [ "$FM_PR_META_NUMBER" = 31 ] || fail "the PR number was not read from a leading pr= line"
+
+  # An attested record legitimately carries more than one decisions_reviewed /
+  # decision_keys pair, because bin/fm-captain-hold.sh appends a fresh pair
+  # rather than rewriting the one it wrote.
+  fm_write_meta "$state/task-a.meta" \
+    "window=fm-task-a" \
+    "decisions_reviewed=1" \
+    "decision_keys=first" \
+    "pr=$url" \
+    "decisions_reviewed=1" \
+    "decision_keys=first,second"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a twice-attested record did not authenticate"
+
+  # Refusals. A key firstmate does not write is refused wherever it appears,
+  # and so is a repeated key, a line that is not key=value, a second PR
+  # identity, and an invalid head.
+  for extra in 'evil=1' 'wOrKtRee=/evil' 'x_request_ts_evil=1' '_=1' '=orphan'; do
+    fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "$extra"
+    ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+      || fail "an unknown key '$extra' after pr= was accepted"
+    fm_write_meta "$state/task-a.meta" "window=fm-task-a" "$extra" "pr=$url"
+    ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+      || fail "an unknown key '$extra' before pr= was accepted"
+  done
+  fm_write_meta "$state/task-a.meta" \
+    "window=fm-task-a" "worktree=$dir/wt" "pr=$url" "worktree=/evil"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "an appended line redefining worktree= was accepted"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "harness=claude" "harness=codex"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a repeated harness= was accepted"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "no-equals-sign-at-all"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a line carrying no = at all was accepted"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "" "harness=claude"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a blank line in the record was refused"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "" "pr=$url"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a blank line before pr= still authenticated"
+  [ "$FM_PR_META_NUMBER" = 31 ] || fail "the PR number was not read past a leading blank line"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" "pr=$url"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a second pr= was accepted"
+  fm_write_meta "$state/task-a.meta" "pr_head=not-a-sha" "pr=$url"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "an invalid pr_head= before pr= was accepted"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a record with no pr= was accepted"
+
+  pass "task-record authentication reads the record as a set, and still refuses unknown and repeated keys"
+}
+
+# The armed poll authenticates the whole artifact set, not just the record, so
+# prove the position-free record survives that gate too: this is the predicate
+# bin/fm-watch.sh calls before it will run a task's merge poll at all.
+test_armed_poll_survives_a_later_producer_appending_its_own_key() {
+  local dir state url rc
+  dir=$(make_case record-position-armed)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/32
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 32 "$POLL" \
+    || fail "could not prepare the poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the freshly armed poll did not authenticate"
+
+  # A producer that writes after the PR identity - a relaunch's transaction id
+  # is the one that broke this live - must not disarm the watch.
+  printf 'control_relaunch_tx=%s\n' '72759.20260917T183045Z.8922' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a relaunch transaction id recorded after pr= disarmed the merge poll"
+
+  # The captain's symptom was the watcher's, so assert it there too. The
+  # always-waking stop check is what ends a bounded cycle whose PR poll stays
+  # silent on an open PR, so the cycle completes either way and the wake queue
+  # is the evidence.
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the bounded watcher did not complete: $(cat "$dir/watch.err")"
+  assert_no_grep 'rejected unauthenticated state checks' "$state/.wake-queue" \
+    "the watcher filed an unauthenticated-check alarm for a relaunched task's merge poll"
+  assert_grep '--json state' "$dir/gh.log" \
+    "the watcher never ran the merge poll, so this case proves nothing"
+
+  # An injected key firstmate does not write still refuses the check, and the
+  # watcher still raises the alarm for it. This half gets its own case with no
+  # stop check: the alarm ends the cycle by itself, and a stop check would end
+  # it from inside the check loop before the alarm is filed.
+  dir=$(make_case record-position-injected)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/33
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 33 "$POLL" \
+    || fail "could not prepare the injected case's poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the injected case's poll"
+  printf 'control_relaunch_tx=%s\n' '72759.20260917T183045Z.8922' >> "$state/task-a.meta"
+  printf 'evil=1\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an injected unknown key left the merge poll authenticated"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch2.out" 2> "$dir/watch2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the bounded watcher did not complete after injection: $(cat "$dir/watch2.err")"
+  assert_grep 'rejected unauthenticated state checks' "$state/.wake-queue" \
+    "an injected unknown key did not raise the unauthenticated-check alarm"
+  assert_grep 'task-a.check.sh' "$state/.wake-queue" \
+    "the unauthenticated-check alarm did not name the injected task's check"
+
+  pass "an armed merge poll survives a later producer's own key and still refuses an injected one"
+}
+
 test_parser_matrix
+test_record_authentication_is_position_free
+test_armed_poll_survives_a_later_producer_appending_its_own_key
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

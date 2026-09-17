@@ -76,6 +76,8 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-meta-keys-lib.sh: fm-pr-lib.sh sources it for the task-record key vocabulary.
+  ln -s "$ROOT/bin/fm-meta-keys-lib.sh" "$fake/bin/fm-meta-keys-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings
@@ -176,6 +178,8 @@ SH
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-meta-keys-lib.sh: fm-pr-lib.sh sources it for the task-record key vocabulary.
+  ln -s "$ROOT/bin/fm-meta-keys-lib.sh" "$fake/bin/fm-meta-keys-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings

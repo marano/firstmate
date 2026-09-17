@@ -490,6 +490,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-meta-keys-lib.sh
+. "$SCRIPT_DIR/fm-meta-keys-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -4072,10 +4074,14 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+# Every key this spawn writes itself, stripped from the prior record so the
+# block below replaces it rather than leaving a second copy behind. The list is
+# bin/fm-meta-keys-lib.sh's, so a key this spawn learns to write is rewritten
+# here and recognised by every reader of a task record in the same edit.
 preserve_relaunch_meta() {
-  awk -F= '
+  awk -F= -v owned_keys="$FM_META_SPAWN_OWNED_KEYS" '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split(owned_keys, keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4123,11 +4129,17 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  # Last, and last for a reason: this spawn is the only producer that emits a
+  # whole record in one pass, including the keys other producers own. Keeping
+  # its own keys above the preserved block leaves those keys where their
+  # producers put them - in particular the PR identity that bin/fm-pr-check.sh
+  # appends last stays at the tail, so a relaunch republishes the same record
+  # shape it read instead of burying another producer's tail under its own.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
