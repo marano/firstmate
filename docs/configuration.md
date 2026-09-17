@@ -204,7 +204,9 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 ## Fleet capacity (config/fleet-capacity)
 
 The optional local, gitignored `config/fleet-capacity` names how many tasks this home runs at once.
-Only the idle-fleet alarm reads it, and nothing enforces it: a dispatch is never refused for exceeding it, and [`../AGENTS.md`](../AGENTS.md) section 7 still sets no fleet-wide concurrency cap.
+Nothing reads it as authority.
+No dispatch consults it, no spawn is refused or deferred for exceeding it, and [`../AGENTS.md`](../AGENTS.md) section 7 still sets no fleet-wide concurrency cap.
+It exists only because the idle-fleet alarm needs something to compare its in-progress count against in order to tell a busy fleet from a stopped one; it is not a limit the fleet is held to, and raising or lowering it changes when that alarm fires and nothing else.
 The file must hold one positive base-10 integer on a single line, with surrounding whitespace ignored; a zero, a negative, a non-number, internal whitespace, a second line, an empty file, and a symlink are each refused rather than defaulted around, because a typo that quietly narrowed the alarm would restore the silence it exists to remove.
 A refused value disables the alarm and reports itself as a supervision notification naming the file, so a home never runs with a detector it cannot read and no word of it.
 With the file absent the effective capacity is 1, so the alarm fires only on a completely idle fleet - the narrowest true reading of "a slot is free" that needs no invented number.

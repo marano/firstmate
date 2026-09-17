@@ -57,10 +57,13 @@
 #       Persistent secondmates never count; they are not work items.
 #
 #   capacity - config/fleet-capacity, one positive integer, the number of tasks
-#       this home runs at once. ABSENT is not zero and not unlimited: AGENTS.md
-#       section 7 sets no fleet-wide concurrency cap, so with nothing configured
-#       the effective capacity is 1 and the detector fires only on a completely
-#       idle fleet. That is the narrowest true reading of "capacity is free" that
+#       this home runs at once. Nothing reads it as authority: no dispatch
+#       consults it and no spawn is refused for exceeding it. It exists only so
+#       this comparison can tell a busy fleet from a stopped one.
+#       ABSENT is not zero and not unlimited: AGENTS.md section 7 sets no
+#       fleet-wide concurrency cap, so with nothing configured the effective
+#       capacity is 1 and the detector fires only on a completely idle fleet.
+#       That is the narrowest true reading of "capacity is free" that
 #       needs no invented number. MALFORMED is refused rather than defaulted, so
 #       a typo cannot quietly restore the silence this detector removes; the
 #       caller reports it instead of evaluating.
