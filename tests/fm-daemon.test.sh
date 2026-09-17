@@ -26,6 +26,12 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# The daemon no longer substitutes a guessed supervisor pane when none is
+# resolved, so the units below that exercise INJECTION pin one explicitly. The
+# units that own pane DISCOVERY clear it again with a prefix assignment.
+FM_SUPERVISOR_TARGET="%fm-test-supervisor-pane"
+export FM_SUPERVISOR_TARGET
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -2577,6 +2583,83 @@ test_fm_send_exits_nonzero_on_unproven_submit() {
 # for the duration of that one call only, so these tests are deterministic
 # regardless of what runtime backend is running this test suite itself.
 
+# --- no guessed supervisor pane (the 2026-09-17 silent-fallback reproduction) -
+# The daemon used to fall back to a hardcoded "firstmate:0" tmux target. On this
+# machine that name resolved to a real but unrelated bare shell, so startup
+# validation PASSED, the daemon logged a healthy start, and it then deferred
+# every escalation forever into a pane that never ran firstmate. The fake tmux
+# from make_supercase answers display-message for any target, so it reproduces
+# exactly that condition: the guess would validate. The daemon must refuse
+# before it ever gets there.
+# The same no-guess rule one layer down: injection itself. fm_super_main now
+# refuses to start without a resolved pane, so this only fires in a sourced or
+# test context - but typing an escalation into a guessed pane is the exact
+# silent loss above, so it must refuse rather than default.
+test_inject_refuses_without_a_resolved_supervisor_pane() {
+  local dir state sent capture
+  dir=$(make_supercase inject-no-supervisor-pane)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty composer: nothing else would block the type
+  afk_enter "$state"
+
+  if PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=tmux \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    inject_msg "escalation that must not be typed anywhere" "$state"; then
+    fail "inject_msg accepted an unresolved supervisor pane"
+  fi
+  [ ! -s "$sent" ] || fail "inject_msg typed into a guessed pane: $(cat "$sent")"
+  pass "inject_msg refuses rather than typing an escalation into a guessed pane"
+}
+
+test_daemon_refuses_a_guessed_supervisor_pane() {
+  local dir state out status=0
+  dir=$(make_supercase daemon-no-supervisor-pane)
+  state="$dir/state"
+
+  # Run it bounded, never as a blocking capture: the whole failure this pins is
+  # "started anyway", and a daemon that starts runs forever, so an unbounded
+  # call would hang the suite instead of reporting the regression.
+  local pid waited=0
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' "$AFK_START" > "$dir/start.out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 40 ]; do
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    fail "daemon kept running with no resolvable supervisor pane instead of refusing"
+  fi
+  wait "$pid"
+  status=$?
+  out=$(cat "$dir/start.out")
+
+  [ "$status" -ne 0 ] || fail "daemon started with no resolvable supervisor pane"
+  assert_contains "$out" "cannot resolve the pane running firstmate" \
+    "daemon did not refuse an unresolvable supervisor pane"
+  assert_contains "$out" "FM_SUPERVISOR_TARGET" "refusal did not name the override it looked for"
+  assert_contains "$out" "TMUX_PANE" "refusal did not name the tmux marker it looked for"
+  assert_contains "$out" "HERDR_PANE_ID" "refusal did not name the herdr marker it looked for"
+  assert_not_contains "$out" "firstmate:0" "daemon still named a guessed fallback target"
+  assert_not_contains "$out" "does not resolve to a tmux pane" \
+    "daemon guessed a target and fell through to target validation"
+  if [ -f "$state/.supervise-daemon.log" ]; then
+    assert_contains "$(cat "$state/.supervise-daemon.log")" "no supervisor pane resolved" \
+      "daemon log did not record why startup was refused"
+    assert_not_contains "$(cat "$state/.supervise-daemon.log")" "daemon starting" \
+      "daemon reported a healthy start with no supervisor pane"
+  fi
+  assert_absent "$state/.supervise-daemon.pid" "refused daemon left its pidfile behind"
+  pass "daemon refuses an unresolvable supervisor pane instead of guessing one that validates"
+}
+
 test_discover_supervisor_backend_precedence() {
   local out
   out=$(FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='%9' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
@@ -2611,11 +2694,22 @@ test_discover_supervisor_target_herdr() {
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
   if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
-    fail "bare fallback should return non-zero"
+    fail "resolving nothing should return non-zero"
   fi
-  [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
+  [ -z "$out" ] || fail "resolving nothing must print no target at all, not a guess: $out"
 
-  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' supervisor_target_source)
+  [ "$out" = "FM_SUPERVISOR_TARGET" ] || fail "source should name the explicit override: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' supervisor_target_source)
+  [ "$out" = "TMUX_PANE" ] || fail "source should name the tmux marker: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 supervisor_target_source)
+  [ "$out" = "HERDR_ENV(HERDR_PANE_ID)" ] || fail "source should name the herdr marker: $out"
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' supervisor_target_source); then
+    fail "source should return non-zero when nothing resolves"
+  fi
+  [ "$out" = "NONE" ] || fail "source should report NONE when nothing resolves: $out"
+
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition, then no target at all"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -2897,6 +2991,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_daemon_refuses_a_guessed_supervisor_pane
+test_inject_refuses_without_a_resolved_supervisor_pane
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

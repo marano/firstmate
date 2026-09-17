@@ -35,6 +35,10 @@
 # separate terminal would make it discover its OWN pane, so this captures the
 # captain pane FIRST (from the pane this script runs in) and passes it in as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+# Both daemon entries (`start` and `start-native`) therefore resolve that pane
+# BEFORE arming anything and refuse when nothing resolves, so a home whose
+# firstmate runs outside every addressable pane never enters a half-armed away
+# posture that the daemon would then refuse to supervise.
 #
 # Usage:
 #   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
@@ -555,7 +559,7 @@ fm_afk_launch_start() {
   fm_afk_launch_record_require || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    fm_afk_launch_log "cannot resolve the pane running firstmate; looked for $FM_SUPERVISOR_TARGET_SOURCES and found none. Away mode is NOT armed: run firstmate inside a tmux or herdr pane, or set FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) to firstmate's own pane."
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
@@ -624,6 +628,16 @@ fm_afk_launch_start_native() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
+  # A harness-native background daemon inherits THIS process's environment, so
+  # the pane it would discover is the one resolved here. Prove it resolves
+  # before arming anything: the daemon refuses an unresolvable pane at startup
+  # (bin/fm-supervisor-target-lib.sh), and without this check that refusal would
+  # land after state/.afk was already written, leaving the home looking away
+  # while nothing supervises it.
+  if ! discover_supervisor_target >/dev/null; then
+    fm_afk_launch_log "cannot resolve the pane running firstmate; looked for $FM_SUPERVISOR_TARGET_SOURCES and found none. Away mode is NOT armed: run firstmate inside a tmux or herdr pane, or set FM_SUPERVISOR_TARGET (and FM_SUPERVISOR_BACKEND) to firstmate's own pane."
+    return 1
+  fi
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1

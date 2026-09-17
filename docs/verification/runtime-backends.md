@@ -1462,6 +1462,7 @@ Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `con
 The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.sh` and the same live entry point: Bearings continues through a pending return catch-up, projects its posture as an action-free warning outside Captain's Call, and drops that warning after the gate clears, while an active away window still refuses.
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
+Requiring a real supervisor pane is a pure environment-marker decision with no harness-rendered signal, so it is pinned portably rather than per harness: `tests/fm-afk-launch.test.sh` covers entry refusing and arming nothing without one, and `tests/fm-daemon.test.sh` covers the daemon refusing at startup even where a guessed target would have passed its own existence validation.
 
 ## Zellij
 
