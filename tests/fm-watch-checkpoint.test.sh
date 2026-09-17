@@ -12,6 +12,12 @@ make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/data" "$home/config"
+  # An absent config/fleet-capacity now makes the idle-fleet detector refuse
+  # loudly on the watcher's first tick (bin/fm-idle-fleet-lib.sh), which would
+  # consume this cycle's one reportable reason ahead of the quiet-checkpoint
+  # exit these cases assert on. State a capacity once, as a real operator
+  # eventually must.
+  printf '5\n' > "$home/config/fleet-capacity"
   printf '%s\n' "$home"
 }
 

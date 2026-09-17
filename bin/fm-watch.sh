@@ -2184,15 +2184,6 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
-  # Idle-fleet detection on its own bounded cadence. Most cycles skip it
-  # entirely, and a cycle that does evaluate it reads only this home's own
-  # records unless a slot is actually free. It cannot starve the sweeps below:
-  # it wakes at most once per FM_IDLE_FLEET_RESURFACE_SECS.
-  idle_fleet_tick || {
-    echo "watcher: idle-fleet detection failed" >&2
-    exit 1
-  }
-
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -2291,6 +2282,19 @@ while :; do
     fi
     touch "$STATE/.last-check"
   fi
+
+  # Idle-fleet detection on its own bounded cadence. Most cycles skip it
+  # entirely, and a cycle that does evaluate it reads only this home's own
+  # records unless a slot is actually free. It cannot starve the sweeps below:
+  # it wakes at most once per FM_IDLE_FLEET_RESURFACE_SECS. Evaluated AFTER the
+  # per-task checks above: those name a specific, already-due task outcome
+  # (e.g. a merged PR), and wake() exits the cycle on the first thing it
+  # reports, so this detector must not spend that one report on a config nag
+  # ahead of a check that was already due this same cycle.
+  idle_fleet_tick || {
+    echo "watcher: idle-fleet detection failed" >&2
+    exit 1
+  }
 
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end

@@ -63,6 +63,12 @@ chmod +x "$FAKEBIN/tmux" "$FAKEBIN/no-mistakes"
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" \
   "$HOME_DIR/projects/task" "$HOME_DIR/bin"
+# An absent config/fleet-capacity now makes the idle-fleet detector refuse
+# loudly on the watcher's first tick (bin/fm-idle-fleet-lib.sh), which would
+# consume this cycle's one reportable reason ahead of the summary-refresh
+# assertions these cases exercise. State a capacity once, as a real operator
+# eventually must.
+printf '5\n' > "$HOME_DIR/config/fleet-capacity"
 HOME_DIR=$(cd "$HOME_DIR" && pwd -P)
 printf '# Seeded Firstmate home\n' > "$HOME_DIR/AGENTS.md"
 printf 'mate\n' > "$HOME_DIR/.fm-secondmate-home"
@@ -166,6 +172,7 @@ pass "watcher-carried status append publishes the real home summary"
 # publishable through both fleet snapshot modes and the real home-summary writer.
 mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
   "$LARGE_HOME/projects"
+printf '5\n' > "$LARGE_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
 printf 'large\n' > "$LARGE_HOME/.fm-secondmate-home"
 large_id_suffix=$(printf 'i%.0s' $(seq 1 110))
@@ -205,6 +212,7 @@ pass "large backlog snapshots and home-summary publication stay within exec limi
 
 mkdir -p "$STATELESS_HOME/data" "$STATELESS_HOME/config" \
   "$STATELESS_HOME/projects"
+printf '5\n' > "$STATELESS_HOME/config/fleet-capacity"
 printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
   > "$STATELESS_HOME/data/backlog.md"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STATELESS_HOME" \
@@ -259,6 +267,7 @@ pass "parent snapshot consumes large child ledgers without argument transport"
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
+printf '5\n' > "$CADENCE_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$CADENCE_HOME/AGENTS.md"
 printf 'cadence\n' > "$CADENCE_HOME/.fm-secondmate-home"
 cat > "$CADENCE_HOME/data/backlog.md" <<'EOF'
@@ -319,6 +328,7 @@ jq '.state = "no_active_work" | .active_children = [] | .holds = []
   "$HOME_DIR/state/home-summary.json" > "$HOME_DIR/state/home-summary.poisoned"
 mv -f "$HOME_DIR/state/home-summary.poisoned" "$HOME_DIR/state/home-summary.json"
 mkdir -p "$PARENT_HOME/state" "$PARENT_HOME/data" "$PARENT_HOME/config" "$PARENT_HOME/projects"
+printf '5\n' > "$PARENT_HOME/config/fleet-capacity"
 printf -- '- mate - fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-08-28)\n' \
   "$HOME_DIR" > "$PARENT_HOME/data/secondmates.md"
 cat > "$PARENT_HOME/data/backlog.md" <<'EOF'
@@ -621,6 +631,7 @@ pass "valid publication ignores an unavailable failure record"
 COST_HOME="$TMP_ROOT/cost-home"
 mkdir -p "$COST_HOME/state" "$COST_HOME/data" "$COST_HOME/config" \
   "$COST_HOME/projects/task"
+printf '5\n' > "$COST_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$COST_HOME/AGENTS.md"
 printf 'cost\n' > "$COST_HOME/.fm-secondmate-home"
 fm_git_init_commit "$COST_HOME/projects/task"
@@ -675,6 +686,7 @@ pass "publication completes on a home carrying accumulated status history"
 REMOTE_HOME="$TMP_ROOT/remote-home"
 mkdir -p "$REMOTE_HOME/state" "$REMOTE_HOME/data" "$REMOTE_HOME/config" \
   "$REMOTE_HOME/projects" "$TMP_ROOT/sshbin"
+printf '5\n' > "$REMOTE_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$REMOTE_HOME/AGENTS.md"
 printf 'remote\n' > "$REMOTE_HOME/.fm-secondmate-home"
 cat > "$REMOTE_HOME/data/backlog.md" <<'EOF'
@@ -738,6 +750,7 @@ pass "producer skips remote per-task state probes"
 BEAT_HOME="$TMP_ROOT/beat-home"
 mkdir -p "$BEAT_HOME/state" "$BEAT_HOME/data" "$BEAT_HOME/config" \
   "$BEAT_HOME/projects"
+printf '5\n' > "$BEAT_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$BEAT_HOME/AGENTS.md"
 printf 'beat\n' > "$BEAT_HOME/.fm-secondmate-home"
 cat > "$BEAT_HOME/data/backlog.md" <<'EOF'
@@ -805,6 +818,7 @@ pass "a stalled publication does not delay the watcher liveness beacon"
 RESTART_HOME="$TMP_ROOT/restart-home"
 mkdir -p "$RESTART_HOME/state" "$RESTART_HOME/data" "$RESTART_HOME/config" \
   "$RESTART_HOME/projects/task"
+printf '5\n' > "$RESTART_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$RESTART_HOME/AGENTS.md"
 printf 'restart\n' > "$RESTART_HOME/.fm-secondmate-home"
 fm_git_init_commit "$RESTART_HOME/projects/task"
@@ -923,6 +937,7 @@ pass "publication remains single-flight across watcher restart"
 REPORT_HOME="$TMP_ROOT/report-home"
 mkdir -p "$REPORT_HOME/state" "$REPORT_HOME/data" "$REPORT_HOME/config" \
   "$REPORT_HOME/projects"
+printf '5\n' > "$REPORT_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$REPORT_HOME/AGENTS.md"
 printf 'report\n' > "$REPORT_HOME/.fm-secondmate-home"
 cat > "$REPORT_HOME/data/backlog.md" <<'EOF'
@@ -947,6 +962,7 @@ run_bootstrap_detect() {
 COMPAT_HOME="$TMP_ROOT/compat-home"
 mkdir -p "$COMPAT_HOME/state" "$COMPAT_HOME/data" "$COMPAT_HOME/config" \
   "$COMPAT_HOME/projects"
+printf '5\n' > "$COMPAT_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$COMPAT_HOME/AGENTS.md"
 printf 'compat\n' > "$COMPAT_HOME/.fm-secondmate-home"
 cat > "$COMPAT_HOME/data/backlog.md" <<'EOF'
@@ -993,6 +1009,7 @@ ORDER_HOME="$TMP_ROOT/order-home"
 ORDER_DATE_BIN="$TMP_ROOT/order-date-bin"
 mkdir -p "$ORDER_HOME/state" "$ORDER_HOME/data" "$ORDER_HOME/config" \
   "$ORDER_HOME/projects" "$ORDER_DATE_BIN"
+printf '5\n' > "$ORDER_HOME/config/fleet-capacity"
 printf '# Seeded Firstmate home\n' > "$ORDER_HOME/AGENTS.md"
 printf 'order\n' > "$ORDER_HOME/.fm-secondmate-home"
 cat > "$ORDER_HOME/data/backlog.md" <<'EOF'
