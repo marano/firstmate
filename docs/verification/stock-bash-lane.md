@@ -124,8 +124,19 @@ Identifier=com.apple.bash
 ```
 
 Exit 137 is SIGKILL: the copied binary's signature does not validate outside its original path.
-This is inherent to pinning `bash` to the system shell, so the ancestry contract those three assert is not reachable under stock Bash on macOS at all.
-That is a finding for the harness-detection owner, not something this lane can fix.
+The faked process never runs, so the harness resolves nothing and the test reads that empty result as a detection failure.
+
+The detection itself is fine, which was checked rather than assumed.
+Presenting the same process name through a symlink, whose signature still validates, resolves correctly:
+
+```text
+$ ln -s /bin/bash "$TMP/muse-bin-0.1.0-R708.1"
+$ "$TMP/muse-bin-0.1.0-R708.1" -c 'bin/fm-harness.sh'
+muse
+```
+
+So this is an artifact of the tests' process-faking technique under a system-shell pin, not a defect in `bin/fm-harness.sh`.
+It does mean the ancestry contract those three assert is unreachable in this lane, which is why they are excluded by name rather than left to fail.
 
 Two tests failed for reasons this host cannot attribute: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
 Neither shows the Bash 3.2 signature and neither copies the interpreter.
