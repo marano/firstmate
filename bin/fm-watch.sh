@@ -62,7 +62,11 @@
 #                          escalation count, and demand-deep-inspection marker,
 #                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
-#                          tool process.
+#                          tool process. A task that
+#                          bin/fm-awaiting-landing-lib.sh reports awaiting
+#                          landing never reaches any of this triage, in either
+#                          posture: no stale wake, no wedge timer, and no
+#                          escalation count.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -195,6 +199,13 @@ mkdir -p "$STATE"
 # already loaded above, so sourcing it here adds no further expansion.
 # shellcheck source=bin/fm-idle-fleet-lib.sh
 . "$SCRIPT_DIR/fm-idle-fleet-lib.sh"
+# Awaiting landing: bin/fm-awaiting-landing-lib.sh is the one owner of "finished,
+# held by firstmate, nothing says it cannot land", and the pane-staleness loop
+# below asks it rather than inferring that state from the status verb or the
+# deliberate-stop record. Its own helper owners (the classifier and PR libraries)
+# are already loaded above, so sourcing it here adds no further expansion.
+# shellcheck source=bin/fm-awaiting-landing-lib.sh
+. "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -2442,6 +2453,27 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
+    # Awaiting landing: finished work firstmate is holding sits on a quiet pane by
+    # design, whether its agent was stopped deliberately or left alive and idle,
+    # and it has no worker action outstanding, so it was never eligible for the
+    # stale alarm or the wedge ladder. The owner decides the state; this only reads
+    # it. The pane observation is still recorded, so the churn evidence above and a
+    # later exit from the state see the pane as it really is, and only the triage
+    # below is skipped. Every per-hash position the window held - the stale
+    # classification, the wedge timer, the escalation count - is dropped, so the
+    # task holds no place on the ladder while quiet, and one that leaves the state
+    # (a new status event, or a landing target that stopped matching) is classified
+    # afresh rather than resuming a timer that measured legitimately quiet time.
+    if fm_awaiting_landing "$task" "$STATE"; then
+      if [ "$h" = "$prev" ]; then
+        echo $(( $(cat "$cf" 2>/dev/null || echo 0) + 1 )) > "$cf"
+      else
+        printf '%s' "$h" > "$hf"
+        echo 0 > "$cf"
+      fi
+      clear_stale_hash_tracking "$key"
+      continue
+    fi
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
     # harness renders its busy indicator) so busy-looking strings in displayed

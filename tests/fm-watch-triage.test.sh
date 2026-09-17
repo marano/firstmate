@@ -3086,6 +3086,236 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- awaiting landing: the stale path reads bin/fm-awaiting-landing-lib.sh ---
+# Finished work firstmate is holding for landing sits on a quiet pane by design.
+# 2026-09-17 measured two false alarms on exactly that state: an agent firstmate
+# stopped deliberately to free its slot was stale-alarmed and then climbed the
+# wedge ladder ("possible wedge, escalation 1"), and a done task with its PR
+# recorded was stale-alarmed while its agent sat alive and idle. The watcher now
+# asks the one owner of that state instead of inferring it. The three tests below
+# pin what that buys and what it must never cost: no alarm, no place on the wedge
+# ladder, and a real wedge that is NOT awaiting landing still alarming and
+# escalating. The state is decided by the real owner over real records - the
+# status log, the metadata, the stop record, and a real git worktree wherever a
+# landing target is verified - never by a stub.
+
+# A stale-ready task: its pane already seen once, so the first poll enters stale
+# triage, and its status log already marked surfaced, so the signal path cannot
+# pre-empt the stale path under test. Prints the window's marker key.
+landing_stale_task() {  # <state> <id> <window> <capture-file> <pane-text> <status-line> [meta key=value ...]
+  local state=$1 id=$2 window=$3 capture=$4 pane=$5 line=$6 key
+  shift 6
+  printf '%s' "$pane" > "$capture"
+  fm_write_meta "$state/$id.meta" "window=$window" "kind=ship" "$@"
+  printf '%s\n' "$line" > "$state/$id.status"
+  printf '%s' "$(seen_sig "$state/$id.status")" > "$state/.seen-${id}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$key"
+}
+
+# The record bin/fm-control.sh `exit` writes when firstmate stops an agent on purpose.
+landing_stop_agent() {  # <state> <id>
+  printf 'stopped_at=2026-09-17T02:00:00Z\nverb=exit\nresult=stopped\n' > "$1/$2.agent-stopped"
+}
+
+landing_watch() {  # <state> <fakebin> <out> <window> <capture-file> [env assignment...]
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5
+  shift 5
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
+}
+
+# Hold <pid>'s watcher to <cycles> whole poll cycles over an awaiting-landing task:
+# it must wake nothing, and its escalation counter must read zero after every one.
+# A watcher that exits early is reported by the counter first, because a climbed
+# counter is exactly the ladder entry the task was never eligible for. Reaps <pid>.
+landing_assert_quiet() {  # <state> <pid> <out> <key> <cycles> <label>
+  local state=$1 pid=$2 out=$3 key=$4 cycles=$5 label=$6 i=0 count
+  while [ "$i" -lt "$cycles" ]; do
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"
+      count=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+      [ "$count" = 0 ] || fail "$label: the escalation counter climbed to $count - it entered the wedge ladder: $(cat "$out")"
+      fail "$label: raised a stale alarm instead of staying quiet: $(cat "$out")"
+    fi
+    count=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)
+    [ "$count" = 0 ] || { reap "$pid"; fail "$label: the escalation counter climbed to $count"; }
+    i=$((i + 1))
+  done
+  reap "$pid"
+  [ ! -s "$out" ] || fail "$label: printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "$label: queued a wake"
+}
+
+test_awaiting_landing_raises_no_stale_alarm() {
+  local dir state fakebin out capture window key pid head
+  # The fake crew state reads unknown - not provably working - so any pane this
+  # reaches stale triage with is surfaced at once. Each leg closes with its own
+  # control: remove only the acknowledgement and the same pane must alarm, which
+  # proves the quiet came from the owner's answer and not from an unreached path.
+
+  # Leg 1: the agent stopped deliberately to free its slot, leaving only a shell.
+  dir=$(make_case awaiting-landing-stopped); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-landed-stopped"
+  key=$(landing_stale_task "$state" landed-stopped "$window" "$capture" 'fm-landed-stopped $' \
+    'done: work complete, ready to land' "worktree=$dir/wt")
+  landing_stop_agent "$state" landed-stopped
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a deliberately stopped task awaiting landing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stopped leg's intentional watcher stop"
+  rm -f "$state/landed-stopped.agent-stopped"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "control: the same stopped pane without its stop record did not alarm"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "control: the unacknowledged stopped pane printed the wrong wake: $(cat "$out")"
+
+  # Leg 2: the PR is recorded and holds this branch's real head, and the agent is
+  # alive and idle at its prompt.
+  dir=$(make_case awaiting-landing-alive); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-landed-alive"
+  fm_git_worktree "$dir/repo" "$dir/wt" fm/landed-alive >/dev/null 2>&1 || fail "could not build the alive leg's worktree"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  key=$(landing_stale_task "$state" landed-alive "$window" "$capture" '> waiting for your next message' \
+    'done: PR https://example.test/pr/23 checks green run=r23' "worktree=$dir/wt" \
+    'pr=https://example.test/pr/23' "pr_head=$head")
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=claude
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "an idle live task awaiting landing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the alive leg's intentional watcher stop"
+  fm_write_meta "$state/landed-alive.meta" "window=$window" "kind=ship" "worktree=$dir/wt"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=claude
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "control: the same idle pane with no PR recorded did not alarm"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "control: the unacknowledged idle pane printed the wrong wake: $(cat "$out")"
+  pass "a task awaiting landing raises no stale alarm, stopped or alive, while the same pane unacknowledged still does"
+}
+
+test_awaiting_landing_never_enters_the_wedge_ladder() {
+  local dir state fakebin out capture window key pid since
+  # The run step reads working - the orphaned CI monitor behind the measured
+  # "possible wedge, escalation 1" - which is what lets a quiet pane be absorbed
+  # as provably working and timed toward escalation. The threshold is 1s, so any
+  # read that lets this task onto the ladder escalates within a poll or two.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+
+  # Leg 1, the idle entrance. The position is seeded as already held and long
+  # overdue - classified and timed before the hold was recorded - so a task that
+  # is merely left where it stood escalates on the very first poll.
+  dir=$(make_case awaiting-landing-ladder-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-landed-idle"
+  key=$(landing_stale_task "$state" landed-idle "$window" "$capture" 'fm-landed-idle $' \
+    'done: PR https://example.test/pr/24 checks green run=r24' "worktree=$dir/wt" \
+    'pr=https://example.test/pr/24')
+  landing_stop_agent "$state" landed-idle
+  cp "$state/.hash-$key" "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a stopped task awaiting landing"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a task awaiting landing still holds a wedge timer on the ladder"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the idle leg's intentional watcher stop"
+
+  # Leaving the state starts afresh. Firstmate relaunches the agent for review
+  # feedback, which drops the stop record, and it reports working: the next
+  # classification must open a NEW wedge timer rather than resume the one that
+  # measured legitimately quiet time.
+  rm -f "$state/landed-idle.agent-stopped"
+  printf 'working: addressing review feedback\n' >> "$state/landed-idle.status"
+  printf '%s' "$(seen_sig "$state/landed-idle.status")" > "$state/.seen-landed-idle_status"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=240 FM_FAKE_TMUX_CURRENT_COMMAND=claude
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 2 "a task that just left awaiting landing"
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) fail "a task that left awaiting landing was not timed afresh: '$since'" ;; esac
+  [ $(( $(date +%s) - since )) -lt 240 ] || fail "a task that left awaiting landing resumed its old wedge timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the exit leg's intentional watcher stop"
+
+  # Leg 2, the busy entrance. A busy pane past the completed-turn bound is the
+  # ladder's other door (busy_turn_bound_check).
+  dir=$(make_case awaiting-landing-ladder-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-landed-busy"
+  key=$(landing_stale_task "$state" landed-busy "$window" "$capture" 'Working... (3600.1s)' \
+    'done: PR https://example.test/pr/25 checks green run=r25' "harness=pi" "worktree=$dir/wt" \
+    'pr=https://example.test/pr/25')
+  record_pi_busy "$state" landed-busy
+  touch -t 200001010000 "$state/landed-busy.meta"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a busy task awaiting landing past the turn bound"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a busy task awaiting landing was timed toward a wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a task awaiting landing never enters the wedge ladder: its escalation counter stays at zero through both entrances"
+}
+
+# Run one watcher over a stale-ready task whose run step reads working, with a 1s
+# wedge threshold, and require it to alarm with the ladder climbed to <n>.
+landing_expect_escalation() {  # <state> <fakebin> <out> <window> <capture-file> <key> <n> <label>
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5 key=$6 n=$7 label=$8 pid
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "$label: never alarmed"; }
+  grep -F "stale: $window (idle " "$out" | grep -F "possible wedge, escalation $n" >/dev/null \
+    || fail "$label: did not alarm as a possible wedge at escalation $n: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = "$n" ] \
+    || fail "$label: the escalation counter did not climb to $n"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the escalation"
+}
+
+test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
+  local dir state fakebin out capture window key head
+  # THE REFUSAL: quiet is licensed only by the owner's answer, so every task it
+  # does not call awaiting landing keeps the whole ladder - including near misses
+  # that carry some of the same records.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # A genuine wedge: work still open, pane frozen. It alarms, then climbs again.
+  dir=$(make_case landing-refusal-wedged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-wedged-open"
+  key=$(landing_stale_task "$state" wedged-open "$window" "$capture" 'idle building output' \
+    'working: still monitoring ci')
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 1 "a genuinely wedged task"
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 2 "a genuinely wedged task, again"
+
+  # Stopped deliberately with a PR recorded, but its work still open: neither the
+  # stop record nor the PR licenses quiet on its own.
+  dir=$(make_case landing-refusal-stopped-open); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-stopped-open"
+  key=$(landing_stale_task "$state" stopped-open "$window" "$capture" 'fm-stopped-open $' \
+    'working: rebasing onto main' 'pr=https://example.test/pr/26')
+  landing_stop_agent "$state" stopped-open
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 1 "a task stopped with its work open"
+
+  # Reported done, but nothing records that firstmate took it in hand.
+  dir=$(make_case landing-refusal-unacknowledged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-done-unacked"
+  key=$(landing_stale_task "$state" done-unacked "$window" "$capture" 'idle after the report' \
+    'done: PR https://example.test/pr/27 checks green run=r27')
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 1 "an unacknowledged done task"
+
+  # Done and held, but the branch moved past the head its PR records: landing is
+  # blocked, which the owner reports as not quiet.
+  dir=$(make_case landing-refusal-blocked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-landing-blocked"
+  fm_git_worktree "$dir/repo" "$dir/wt" fm/landing-blocked >/dev/null 2>&1 || fail "could not build the blocked leg's worktree"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'never pushed' || fail "could not advance the blocked leg's branch"
+  key=$(landing_stale_task "$state" landing-blocked "$window" "$capture" 'idle after the push' \
+    'done: PR https://example.test/pr/28 checks green run=r28' "worktree=$dir/wt" \
+    'pr=https://example.test/pr/28' "pr_head=$head")
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 1 "a done task whose landing is blocked"
+  unset FM_FAKE_CREW_STATE
+  pass "a wedged task that is not awaiting landing still alarms and still escalates, near misses included"
+}
+
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
 # 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
 # and/or the harness's rendered busy footer) is unconditional, unbounded proof
@@ -4927,6 +5157,9 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_awaiting_landing_raises_no_stale_alarm
+test_awaiting_landing_never_enters_the_wedge_ladder
+test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
