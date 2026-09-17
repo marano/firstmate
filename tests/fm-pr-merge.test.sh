@@ -3332,7 +3332,27 @@ test_gitlab_unconfirmed_merge_leaves_branch_alone() {
   pass "fm-pr-merge never deletes a GitLab branch behind an unconfirmed merge"
 }
 
+test_gitlab_unreadable_project_id_leaves_branch_alone() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-unreadable-project-id target_project_id=null)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "gitlab-unreadable-project-id: a landed merge must still exit zero"
+  assert_no_grep '/repository/branches/' "$case_dir/glab.log" \
+    "gitlab-unreadable-project-id: branch deletion ran despite an unreadable target project id"
+  assert_grep 'lives in a forked project' "$case_dir/stderr" \
+    "gitlab-unreadable-project-id: the unknown-fork case was not reported"
+  pass "fm-pr-merge treats an unreadable GitLab project id as a fork, not as safe to delete"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
+test_gitlab_unreadable_project_id_leaves_branch_alone
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward

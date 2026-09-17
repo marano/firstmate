@@ -508,10 +508,10 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
   FM_PR_GITLAB_SOURCE_BRANCH=$source_branch
-  if [ -n "$source_project" ] && [ -n "$target_project" ] && [ "$source_project" != "$target_project" ]; then
-    FM_PR_GITLAB_FORK=true
-  else
+  if [ -n "$source_project" ] && [ -n "$target_project" ] && [ "$source_project" = "$target_project" ]; then
     FM_PR_GITLAB_FORK=false
+  else
+    FM_PR_GITLAB_FORK=true
   fi
 }
 
