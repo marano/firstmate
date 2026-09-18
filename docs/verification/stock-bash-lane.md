@@ -10,6 +10,10 @@ Every other CI job runs on `ubuntu-latest`, which is Bash 5.
 macOS still ships Bash 3.2.57 as `/bin/bash`, and constructs that only break there are invisible to every Linux job.
 The best-known member of that class is `"${arr[@]}"` on an empty array under `set -u`, which Bash before 4.4 treats as unbound.
 
+A second member, measured on `main` on 2026-09-17 under `/bin/bash` 3.2.57(1)-release, is pattern substitution whose pattern is a quoted path.
+Bash 3.2 chooses the pattern/replacement separator by scanning the expansion text for the first `/` without honouring the double quotes around it, so `${command/"$ROOT/bin/emit.sh"/"$replacement"}` splits the pattern at `"$ROOT` and substitutes silently wrong text rather than failing; Bash 4+ honours the quotes and substitutes correctly.
+Holding both sides in variables first, as `${command/"$emit_command"/"$record_command"}`, leaves no literal `/` in the expansion text, so both versions agree while the quotes still keep the match literal instead of a glob.
+
 `bash -n` cannot see it.
 A parse sweep answers "does this file parse", and an unbound-variable expansion is a runtime failure in a file that parses cleanly.
 That distinction is the whole reason a job can be green while the code it names is broken.
@@ -138,9 +142,10 @@ muse
 So this is an artifact of the tests' process-faking technique under a system-shell pin, not a defect in `bin/fm-harness.sh`.
 It does mean the ancestry contract those three assert is unreachable in this lane, which is why they are excluded by name rather than left to fail.
 
-Two tests failed for reasons this host cannot attribute: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
-Neither shows the Bash 3.2 signature and neither copies the interpreter.
-Both are left IN the lane deliberately: excluding a test on unproven local evidence loses coverage, and the `macos-stock-bash` job is the authority on whether they fail on a runner.
+Two tests failed for reasons this host could not attribute at measurement time: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
+Neither showed the Bash 3.2 signature and neither copies the interpreter.
+`tests/fm-extension-binding.test.sh`'s failure was later diagnosed as macOS 26.3 enforcing POSIX's write-permission requirement on `rename()`'s source directory, which made every bind fail EACCES against a staging root already sealed to 0555; `bin/fm-extension.mjs` now reorders `installPackage` to rename before sealing (see its comment at the rename site) so the source directory is still owner-writable when the rename runs. `tests/fm-afk-return.test.sh` remains unattributed.
+Both were left IN the lane deliberately: excluding a test on unproven local evidence loses coverage, and the `macos-stock-bash` job is the authority on whether they fail on a runner.
 
 Several early failures were the measurement rig rather than the code, recorded here so they are not re-reported as findings.
 `tests/fm-lint-workflows.test.sh` failed until the pinned `actionlint` was on PATH, `tests/fm-kimi-harness.test.sh` failed until `python3` had `tomllib`, and `tests/fm-remote-herdr-guard.test.sh` failed while `jq` was the macOS platform binary.

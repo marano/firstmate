@@ -1539,7 +1539,7 @@ test_control_registered_followon_is_guarded() {
 }
 
 test_rechain_delivers_second_post_on_same_thread() {
-  local parent log out posts command command_log
+  local parent log out posts command command_log emit_command record_command
   parent=$(make_home rechain-parent)
   log="$parent/curl.log"; : > "$log"
   seed_repro_commitment "$parent" public-final-a req-rechain main scout-a
@@ -1570,7 +1570,15 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
+  # Hold both paths in variables first. Bash 3.2 - the stock macOS shell - picks
+  # the pattern/replacement separator by scanning the expansion text for the
+  # first `/` without honouring the double quotes around it, so writing the
+  # paths inline splits the pattern at "$ROOT and silently substitutes garbage.
+  # A variable reference carries no literal `/`, so 3.2 and 4+ agree, and the
+  # quotes still keep the match literal rather than a glob.
+  emit_command="$ROOT/bin/fm-public-followup-emit.sh"
+  record_command="$parent/fakebin/record-emit"
+  command=${command/"$emit_command"/"$record_command"}
   command=${command//<value>/https://github.com/example/repo/pull/99}
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"
