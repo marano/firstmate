@@ -41,6 +41,13 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
+# A task whose work nothing shows was ever started (teardown_work_was_started
+# owns the evidence) is requeued instead of closed, with the reason in its
+# body, under the same record as `mode=requeue`: cleanup of a worker that never
+# ran must not read as shipped work. The items a grouped dispatch delivers
+# (`delivers=` in its record) move with it, closed by a close or retention and
+# requeued by a requeue; bin/fm-backlog-transition-lib.sh MEMBERSHIP owns that
+# contract.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -485,6 +492,14 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     esac
   fi
   [ "$TEARDOWN_LEGACY_PENDING" = 1 ] || TEARDOWN_META_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+fi
+# The items a grouped dispatch delivers move with it
+# (bin/fm-backlog-transition-lib.sh MEMBERSHIP owns the record), so an
+# unreadable membership refuses here while every record is still intact.
+FM_BACKLOG_TRANSITION_MEMBERS=()
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && ! fm_backlog_members_of_meta "$META" "$ID"; then
+  echo "error: task $ID's record does not name the items it delivers readably ($FM_BACKLOG_TRANSITION_ERROR); refusing teardown before any cleanup - repair its delivers= line and retry" >&2
+  exit 1
 fi
 # Cleanup never closes a captain call (see the header). Asked here, before any
 # destructive step, so "cannot tell" can refuse while everything is intact.
@@ -1399,6 +1414,29 @@ work_is_landed() {
   content_in_default
 }
 
+# Was this task's work ever started? Cleanup must not record work nobody did as
+# done, which is what closing a dispatch whose worker never ran used to do: a
+# harness that died at launch left a live shell prompt, and its cleanup closed
+# the item exactly like a shipped one. Any one of these is evidence: a status
+# line, which every worker writes from its first phase; a pull request this
+# teardown already holds; or a commit on the task's copy that no remote holds,
+# counted only when the repository has remotes to compare against, since
+# without one every commit of its history would read as new. A scout is judged
+# by its report, which teardown already requires, and has nothing to add here.
+# Absent all evidence the item is requeued, not closed, and never refused:
+# nothing is there to lose.
+teardown_work_was_started() {
+  [ "$KIND" = ship ] || return 0
+  [ -z "$PR_URL" ] || return 0
+  if [ -f "$STATE/$ID.status" ] && grep -q '[^[:space:]]' "$STATE/$ID.status" 2>/dev/null; then
+    return 0
+  fi
+  teardown_owns_worktree || return 1
+  [ -d "$WT" ] || return 1
+  [ -n "$(git -C "$WT" for-each-ref --count=1 --format=x refs/remotes 2>/dev/null)" ] || return 1
+  [ -n "$(git -C "$WT" log --format=%H -1 HEAD --not --remotes -- 2>/dev/null)" ]
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -1439,8 +1477,17 @@ backlog_refresh_reminder() {
   else
     backlog_display="${DATA%/}/backlog.md"
   fi
+  if [ "$BACKLOG_CLOSED" = 1 ] && [ "${#FM_BACKLOG_TRANSITION_MEMBERS[@]}" -gt 0 ]; then
+    if [ "$BACKLOG_TRANSITION" = requeue ]; then
+      printf '%s\n' "Backlog: the items $ID was to deliver are back in Queued with it: ${FM_BACKLOG_TRANSITION_MEMBERS[*]}."
+    else
+      printf '%s\n' "Backlog: the items $ID delivered are closed with it: ${FM_BACKLOG_TRANSITION_MEMBERS[*]}."
+    fi
+  fi
   if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
     printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+  elif [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = requeue ]; then
+    printf '%s\n' "Backlog: $ID is back in Queued in $backlog_display, not closed: its worker left no commit, no status line, and no pull request, so nothing shows the work was started. Its body records why; dispatch it again when ready."
   elif [ "$BACKLOG_CLOSED" = 1 ]; then
     printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
@@ -3255,14 +3302,18 @@ fi
 
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && ! teardown_work_was_started; then
+  BACKLOG_TRANSITION=requeue
+fi
 BACKLOG_TRANSITION_FLAGS=()
-[ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
+[ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=("--$BACKLOG_TRANSITION")
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   backlog_done_args || {
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
+  [ "$BACKLOG_TRANSITION" != requeue ] || BACKLOG_DONE_ARGS=()
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored
@@ -3535,6 +3586,8 @@ if [ "$BACKLOG_CLOSED" = 1 ]; then
     META_LOCK_HELD=0
     if [ "$BACKLOG_TRANSITION" = retain ]; then
       echo "error: $ID's endpoint and local copy are cleaned up, but its captain-held backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
+    elif [ "$BACKLOG_TRANSITION" = requeue ]; then
+      echo "error: $ID's endpoint and local copy are cleaned up, but its unstarted backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending requeue is recorded and the next session start retries it" >&2
     else
       echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
     fi

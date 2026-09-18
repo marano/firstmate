@@ -91,11 +91,12 @@
 #          the backlog row inside the script that moves the task's record
 #          (bin/fm-backlog-transition-lib.sh), so this sweep exists for the
 #          crash window inside those scripts and for drift a home was already
-#          carrying: it finishes the authoritative close or captain-call
-#          retention an interrupted cleanup recorded, and marks In flight any
-#          item this home already owns a worker for. The worker-record sweep
-#          never starts a captain-held or closed item, and reconciliation never
-#          reads or writes another home; the fleet snapshot's classifier and
+#          carrying: it finishes the authoritative close, captain-call
+#          retention, or unstarted requeue an interrupted cleanup recorded,
+#          and marks In flight any item this home already owns a worker for.
+#          The worker-record sweep never starts a captain-held or closed
+#          item, and reconciliation never reads or writes another home; the
+#          fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
 #          The `code-root <file>` variant is a detect-only local check that runs
@@ -1265,6 +1266,12 @@ backlog_record_reconcile() {
           ;;
         answered)
           echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
+          ;;
+        requeued)
+          echo "BOOTSTRAP_INFO: returned the unstarted backlog item for $label to Queued after an interrupted cleanup"
+          ;;
+        requeued_incomplete)
+          echo "BOOTSTRAP_INFO: returned the unstarted backlog item for $label to Queued after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
       esac
     else

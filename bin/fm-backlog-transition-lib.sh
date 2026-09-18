@@ -11,11 +11,15 @@
 # same process, under the per-task meta lock it already holds, before it reports
 # success. Nothing else - not a later agent turn, not a printed reminder - is
 # load-bearing for the pairing.
-#   bin/fm-spawn.sh      meta published => `tasks-axi start`
+#   bin/fm-spawn.sh      meta published => `tasks-axi start`, for the unit and
+#                        every member it delivers (MEMBERSHIP below)
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
 #                        with the deliverable recorded when the row is still an
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
-#                        cleanup never retires the captain's own question
+#                        cleanup never retires the captain's own question, or a
+#                        requeue with the reason recorded when nothing shows the
+#                        work was ever started, so cleanup never records work
+#                        nobody did as done
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
 # cross-home nudge stay defense in depth, not the primary mechanism.
@@ -52,7 +56,10 @@
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that closes the row
+# closes a row that reads as an open captain call. An unstarted task's record
+# carries `mode=requeue` and no completion link, and replay returns the row to
+# Queued instead. The record also names each member the unit delivers, so replay
+# moves the same members. An answer that closes the row
 # first applies any supported retained artifact from the validated record, then
 # replay simply retires the record.
 
@@ -69,7 +76,7 @@ FM_BACKLOG_ROW_ERROR=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
-# retained_incomplete | answered | stale | noop.
+# retained_incomplete | requeued | requeued_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
@@ -707,6 +714,235 @@ fm_backlog_row_artifact_supported() {
   esac
 }
 
+# Append <line> as the last paragraph of a task body, leaving a body that
+# already carries that exact line alone, so a replayed transition never
+# duplicates it. The body is read through fm_backlog_row_field's data decode,
+# never from rendered `show` output.
+fm_backlog_body_append_line() {  # <data-dir> <id> <line>
+  local authorized_data=$1 id=$2 line=$3 body new_body tmp
+  fm_backlog_row_field "$authorized_data" "$id" body || return $?
+  body=$FM_BACKLOG_ROW_FIELD_VALUE
+  case $'\n'"$body"$'\n' in
+    *$'\n'"$line"$'\n'*) return 0 ;;
+  esac
+  new_body=$line
+  [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-body.XXXXXX") || {
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the body line for $id"
+    return 1
+  }
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    FM_BACKLOG_TRANSITION_ERROR="cannot stage the body line for $id"
+    return 1
+  fi
+  if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
+# Return an In flight row to Queued with <reason> recorded as the last line of
+# its body. Only an In flight row moves: a row already Queued needs nothing, and
+# a row someone already closed is left closed, because reopening it here would
+# discard a completion this transition knows nothing about. A vanished row has
+# nothing left to return.
+fm_backlog_requeue() {  # <data-dir> <id> <reason>
+  local data=$1 id=$2 reason=$3 status
+  fm_backlog_row_probe "$data" "$id"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    [ "$FM_BACKLOG_ROW_RESULT" != not_found ] || return 0
+    FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+    return "$status"
+  fi
+  case "$FM_BACKLOG_ROW_STATE" in
+    in_flight\ *) ;;
+    *) return 0 ;;
+  esac
+  fm_backlog_body_append_line "$data" "$id" "$reason" || return $?
+  fm_backlog_mutate "$data" reopen "$id"
+}
+
+# MEMBERSHIP. A grouped dispatch is one worker delivering several backlog items
+# in one job. The dispatch unit is the task that owns the worker and its record;
+# the items it delivers are its members. Membership is recorded exactly once,
+# at dispatch, as `delivers=<id>[,<id>...]` in the unit's own task record
+# (bin/fm-spawn.sh --delivers), and it is the only membership source: nothing
+# here derives it from a brief's or a pull request's prose, which drifts. Spawn
+# moves every member In flight in the same commit as the unit, so neither a
+# later dispatch nor the ready count sees a member as waiting work while its
+# unit is under way. A member the worker hands back is removed from the record
+# by `bin/fm-tasks-axi.sh handback`, which also returns it to Queued with the
+# reason in its body. Teardown carries the remaining members into its pending
+# transition record (one `member=<id>` line each) and moves them with the unit:
+# a close closes every member with the unit's own completion link, and a
+# requeue returns every member to Queued. A member is therefore closed only by
+# the close of a unit whose work landed, never by the unit closing alone.
+#
+# Set by fm_backlog_members_parse, and read by the members transitions below and
+# by the pending-transition record writer: the members the current transition
+# moves along with its unit.
+FM_BACKLOG_TRANSITION_MEMBERS=()
+
+# Parse a membership value into FM_BACKLOG_TRANSITION_MEMBERS. Returns 1 with
+# FM_BACKLOG_TRANSITION_ERROR set for an empty entry, an unsafe id, a duplicate,
+# or the unit naming itself; an empty value is a unit with no members.
+fm_backlog_members_parse() {  # <unit-id> <value>
+  local unit=$1 value=$2 member seen=' '
+  local -a members=()
+  FM_BACKLOG_TRANSITION_MEMBERS=()
+  [ -n "$value" ] || return 0
+  case "$value" in
+    ,*|*,|*,,*)
+      FM_BACKLOG_TRANSITION_ERROR="membership of $unit has an empty entry: $value"
+      return 1
+      ;;
+  esac
+  IFS=, read -r -a members <<< "$value"
+  for member in "${members[@]}"; do
+    case "$member" in
+      ''|.*|*[!A-Za-z0-9._-]*)
+        FM_BACKLOG_TRANSITION_ERROR="membership of $unit names an invalid item id: $member"
+        return 1
+        ;;
+    esac
+    if [ "$member" = "$unit" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="membership of $unit names the unit itself"
+      return 1
+    fi
+    case "$seen" in
+      *" $member "*)
+        FM_BACKLOG_TRANSITION_ERROR="membership of $unit names $member twice"
+        return 1
+        ;;
+    esac
+    seen="$seen$member "
+    FM_BACKLOG_TRANSITION_MEMBERS+=("$member")
+  done
+}
+
+# Read a unit's membership from its task record into
+# FM_BACKLOG_TRANSITION_MEMBERS. More than one `delivers=` line is refused
+# rather than resolved by position (bin/fm-meta-keys-lib.sh owns why).
+fm_backlog_members_of_meta() {  # <meta> <unit-id>
+  local meta=$1 unit=$2 count value
+  FM_BACKLOG_TRANSITION_MEMBERS=()
+  count=$(LC_ALL=C awk -F= '$1 == "delivers" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable membership in task record $meta"
+    return 1
+  }
+  [ "$count" -ne 0 ] || return 0
+  if [ "$count" -ne 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="task record $meta has $count membership fields; at most one is allowed"
+    return 1
+  fi
+  value=$(LC_ALL=C awk -F= '$1 == "delivers" { sub(/^[^=]*=/, ""); print }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable membership in task record $meta"
+    return 1
+  }
+  fm_backlog_members_parse "$unit" "$value"
+}
+
+# Can <member> join <unit>'s dispatch? It must be Queued and not held, and a
+# blocker is accepted only when the unit itself is the sole blocker - the usual
+# way a grouped card was parked behind the job that will deliver it. A member
+# blocked by anything else still has an unfinished dependency, and a member
+# already In flight or closed is someone else's work or already done.
+fm_backlog_member_dispatchable() {  # <data-dir> <unit-id> <member>
+  local data=$1 unit=$2 member=$3 status
+  fm_backlog_row_probe "$data" "$member"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      FM_BACKLOG_TRANSITION_ERROR="member $member has no backlog item in this home"
+    else
+      FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+    fi
+    return 1
+  fi
+  case "$FM_BACKLOG_ROW_STATE" in
+    queued\ no\ no) return 0 ;;
+    queued\ no\ yes)
+      fm_backlog_row_field "$data" "$member" blocked_by || return 1
+      [ "$FM_BACKLOG_ROW_FIELD_VALUE" = "$unit" ] && return 0
+      FM_BACKLOG_TRANSITION_ERROR="member $member is blocked by $FM_BACKLOG_ROW_FIELD_VALUE, not only by $unit"
+      return 1
+      ;;
+  esac
+  FM_BACKLOG_TRANSITION_ERROR="member $member is not dispatchable in state $FM_BACKLOG_ROW_STATE"
+  return 1
+}
+
+# Move every member In flight. A member already In flight is left there, so the
+# commit's retry converges instead of failing on its own first attempt.
+fm_backlog_members_start() {  # <data-dir> <member>...
+  local data=$1 member
+  shift
+  for member in "$@"; do
+    if ! fm_backlog_row_probe "$data" "$member"; then
+      FM_BACKLOG_TRANSITION_ERROR="member $member could not be read before dispatch commit: ${FM_BACKLOG_ROW_ERROR:-$FM_BACKLOG_ROW_RESULT}"
+      return 1
+    fi
+    case "$FM_BACKLOG_ROW_STATE" in
+      in_flight\ no\ *) ;;
+      queued\ no\ *) fm_backlog_start "$data" "$member" || return 1 ;;
+      *)
+        FM_BACKLOG_TRANSITION_ERROR="member $member is not dispatchable in state $FM_BACKLOG_ROW_STATE"
+        return 1
+        ;;
+    esac
+  done
+}
+
+# Undo fm_backlog_members_start for a dispatch that is being rolled back: every
+# member it left In flight returns to Queued. The whole list is attempted even
+# after a failure, so one stuck row does not strand the rest.
+fm_backlog_members_unstart() {  # <data-dir> <member>...
+  local data=$1 member failed=''
+  shift
+  for member in "$@"; do
+    fm_backlog_row_probe "$data" "$member" || continue
+    case "$FM_BACKLOG_ROW_STATE" in
+      in_flight\ *) fm_backlog_mutate "$data" reopen "$member" || failed="$failed $member" ;;
+    esac
+  done
+  [ -z "$failed" ] && return 0
+  FM_BACKLOG_TRANSITION_ERROR="members left In flight by a rolled-back dispatch:$failed"
+  return 1
+}
+
+# Close every member of FM_BACKLOG_TRANSITION_MEMBERS with the unit's own
+# completion links. `tasks-axi done` on a closed row only backfills its links,
+# so a replay converges; a member that has vanished has nothing to close.
+fm_backlog_members_close() {  # <data-dir> [flag...]
+  local data=$1 member
+  shift
+  for member in "${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}"; do
+    if ! fm_backlog_row_probe "$data" "$member"; then
+      [ "$FM_BACKLOG_ROW_RESULT" = not_found ] && continue
+      FM_BACKLOG_TRANSITION_ERROR="member $member could not be read: $FM_BACKLOG_ROW_ERROR"
+      return 1
+    fi
+    fm_backlog_done "$data" "$member" "$@" || return 1
+  done
+}
+
+# Return every member of FM_BACKLOG_TRANSITION_MEMBERS to Queued, naming the
+# unit whose dispatch did not deliver it.
+fm_backlog_members_requeue() {  # <data-dir> <unit-id>
+  local data=$1 unit=$2 member
+  for member in "${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}"; do
+    fm_backlog_requeue "$data" "$member" \
+      "Returned to Queued by the cleanup of $unit, the dispatch that was to deliver it: that work did not land, so this item was not recorded as done." \
+      || return 1
+  done
+}
+
+# The reason a requeued unit carries in its body.
+FM_BACKLOG_REQUEUE_UNSTARTED_REASON="Returned to Queued by cleanup: its worker left no commit, no status line, and no pull request, so nothing shows this work was started and it was not recorded as done."
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone), preserve supported
@@ -716,7 +952,7 @@ fm_backlog_row_artifact_supported() {
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local arg deliverable=''
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -741,30 +977,8 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     previous_arg=$arg
   done
   if [ -n "$deliverable" ]; then
-    fm_backlog_row_field "$authorized_data" "$id" body || return $?
-    body=$FM_BACKLOG_ROW_FIELD_VALUE
-    line="Deliverable of the finished work: $deliverable"
-    case $'\n'"$body"$'\n' in
-      *$'\n'"$line"$'\n'*) ;;
-      *)
-        new_body=$line
-        [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-        tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        }
-        if ! printf '%s\n' "$new_body" > "$tmp"; then
-          rm -f -- "$tmp"
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        fi
-        if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-          rm -f -- "$tmp"
-          return 1
-        fi
-        rm -f -- "$tmp"
-        ;;
-    esac
+    fm_backlog_body_append_line "$authorized_data" "$id" \
+      "Deliverable of the finished work: $deliverable" || return $?
   fi
   if [ "${#row_args[@]}" -gt 0 ]; then
     fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
@@ -968,21 +1182,38 @@ fm_backlog_dispatch_rollback() {
   return 0
 }
 
+# Each of the three teardown transitions moves the members in
+# FM_BACKLOG_TRANSITION_MEMBERS (MEMBERSHIP above) after the unit and before the
+# pending record is retired, so an interruption between them replays both.
 fm_backlog_close_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_done "$data" "$id" "$@" || return 1
+  fm_backlog_members_close "$data" "$@" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
 # The captain-held twin of the close transition: same record, same ordering,
-# `reopen` with the deliverable recorded instead of `done`.
+# `reopen` with the deliverable recorded instead of `done`. The captain's
+# question is about the unit's row; the work itself landed, so its members
+# close exactly as they would have.
 fm_backlog_retain_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_retain "$data" "$id" "$@" || return 1
+  fm_backlog_members_close "$data" "$@" || return 1
+  fm_backlog_record_remove "$marker" "pending-close record" "$state"
+}
+
+# The unstarted twin: nothing shows the work was done, so the unit and every
+# member go back to Queued with the reason in their bodies instead of closing.
+fm_backlog_requeue_transition() {
+  local meta=$1 marker=$2 data=$3 id=$4 state=$5
+  [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
+  fm_backlog_requeue "$data" "$id" "$FM_BACKLOG_REQUEUE_UNSTARTED_REASON" || return 1
+  fm_backlog_members_requeue "$data" "$id" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
@@ -996,6 +1227,7 @@ fm_backlog_atomic_transition() {
     rollback) fm_backlog_dispatch_rollback "$@" ;;
     close) fm_backlog_close_transition "$@" ;;
     retain) fm_backlog_retain_transition "$@" ;;
+    requeue) fm_backlog_requeue_transition "$@" ;;
     *) FM_BACKLOG_TRANSITION_ERROR="unknown backlog atomic transition $operation"; return 2 ;;
   esac
 }
@@ -1010,13 +1242,14 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
-  local args=()
+  local args=() members=() member saved_members=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
+  FM_BACKLOG_CLOSE_VALIDATED_MEMBERS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
   raw_bytes=$(fm_backlog_bytes_of_file "$marker" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
@@ -1034,6 +1267,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       cleanup_incomplete=*) cleanup_incomplete=${line#cleanup_incomplete=}; cleanup_incomplete_count=$((cleanup_incomplete_count + 1)) ;;
       mode=*) mode=${line#mode=}; mode_count=$((mode_count + 1)) ;;
       arg=*) args+=("${line#arg=}") ;;
+      member=*) members+=("${line#member=}") ;;
       *) FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"; return 1 ;;
     esac
   done < "$marker"
@@ -1042,7 +1276,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     return 1
   fi
   case "$mode" in
-    close|retain) ;;
+    close|retain|requeue) ;;
     *)
       FM_BACKLOG_TRANSITION_ERROR="invalid transition mode in pending-close record $marker"
       return 1
@@ -1168,18 +1402,37 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close arguments in $marker"; return 1 ;;
   esac
+  # A requeue records no completion link: nothing was completed.
+  if [ "$mode" = requeue ] && [ "${#args[@]}" -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="invalid pending-close arguments in $marker"
+    return 1
+  fi
+  for member in "${members[@]+"${members[@]}"}"; do
+    case "$member" in
+      *,*) FM_BACKLOG_TRANSITION_ERROR="invalid member in pending-close record $marker"; return 1 ;;
+    esac
+  done
+  saved_members=("${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}")
+  if ! fm_backlog_members_parse "$id" "$(IFS=,; printf '%s' "${members[*]+"${members[*]}"}")"; then
+    FM_BACKLOG_TRANSITION_MEMBERS=("${saved_members[@]+"${saved_members[@]}"}")
+    FM_BACKLOG_TRANSITION_ERROR="invalid member in pending-close record $marker ($FM_BACKLOG_TRANSITION_ERROR)"
+    return 1
+  fi
+  FM_BACKLOG_TRANSITION_MEMBERS=("${saved_members[@]+"${saved_members[@]}"}")
   FM_BACKLOG_CLOSE_VALIDATED_ID=$id
   FM_BACKLOG_CLOSE_VALIDATED_DATA=$data_resolved
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=$marker_spawn_gen
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=$cleanup_incomplete
   FM_BACKLOG_CLOSE_VALIDATED_MODE=$mode
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
+  FM_BACKLOG_CLOSE_VALIDATED_MEMBERS=("${members[@]+"${members[@]}"}")
 }
 
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
-# instead of a close; the remaining flags are the same completion links either
-# transition records.
-fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
+# and `--requeue` the unstarted one (`mode=requeue`) instead of a close; the
+# remaining flags are the same completion links a close or retention records.
+# FM_BACKLOG_TRANSITION_MEMBERS is recorded as one `member=<id>` line each.
+fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain|--requeue] [flag...]
   local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
   local mode=close serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
@@ -1196,10 +1449,10 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close cleanup state"; return 1 ;;
   esac
   shift 6
-  if [ "${1:-}" = --retain ]; then
-    mode=retain
-    shift
-  fi
+  case "${1:-}" in
+    --retain) mode=retain; shift ;;
+    --requeue) mode=requeue; shift ;;
+  esac
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
       serialized_args+=("local%20main")
@@ -1216,6 +1469,9 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     [ "$mode" = close ] || printf 'mode=%s\n' "$mode"
     for arg in "${serialized_args[@]+"${serialized_args[@]}"}"; do
       printf 'arg=%s\n' "$arg"
+    done
+    for arg in "${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}"; do
+      printf 'member=%s\n' "$arg"
     done
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   fm_backlog_close_marker_validate "$tmp" "$data" "$id" "$state" \
@@ -1275,8 +1531,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
-  [ "$mode" = close ] || mode_flags=(--retain)
+  [ "$mode" = close ] || mode_flags=("--$mode")
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  FM_BACKLOG_TRANSITION_MEMBERS=("${FM_BACKLOG_CLOSE_VALIDATED_MEMBERS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_MEMBERS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
@@ -1302,7 +1559,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE
-    if [ "${row_state%% *}" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    if [ "$mode" != requeue ] && [ "${row_state%% *}" != "done" ] \
+       && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
       mode=retain
     fi
   else
@@ -1316,9 +1574,18 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     done\ *)
       if [ "$mode" = retain ]; then
         # The captain's answer closed the row before this replay; the retained
-        # transition owes it nothing more than retiring the record.
+        # transition owes it nothing more than its members and retiring the
+        # record.
+        fm_backlog_members_close "$data" "${args[@]+"${args[@]}"}" || return 1
         fm_backlog_close_marker_remove "$marker" "$state" || return 1
         FM_BACKLOG_CLOSE_REPLAY_RESULT=answered
+        return 0
+      fi
+      if [ "$mode" = requeue ]; then
+        # Someone closed the unit since; fm_backlog_requeue leaves a closed row
+        # closed, so only the members are owed.
+        fm_backlog_atomic_transition requeue '' "$marker" "$data" "$id" "$state" || return 1
+        FM_BACKLOG_CLOSE_REPLAY_RESULT=requeued
         return 0
       fi
       if fm_backlog_atomic_transition close '' "$marker" "$data" "$id" "$state" \
@@ -1345,6 +1612,12 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
         FM_BACKLOG_CLOSE_REPLAY_RESULT=retained_incomplete
       else
         FM_BACKLOG_CLOSE_REPLAY_RESULT=retained
+      fi
+    elif [ "$mode" = requeue ]; then
+      if [ "$cleanup_incomplete" = 1 ]; then
+        FM_BACKLOG_CLOSE_REPLAY_RESULT=requeued_incomplete
+      else
+        FM_BACKLOG_CLOSE_REPLAY_RESULT=requeued
       fi
     elif [ "$cleanup_incomplete" = 1 ]; then
       FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--delivers <id>[,<id>...]] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -24,6 +24,16 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --delivers names the other backlog items this ship task delivers in the same
+#   job - a grouped dispatch, where <task-id> is the dispatch unit. It is recorded
+#   as delivers= in the unit's task record and every member moves In flight in
+#   the same commit as the unit, so teardown can close exactly those items with
+#   the unit's PR. Each member must be Queued, unheld, blocked by nothing but the
+#   unit, and have no worker record of its own; anything else refuses before an
+#   endpoint or local copy exists. It is refused on --scout, --secondmate,
+#   --relaunch (which carries the record forward), batch dispatch, and a home
+#   without automatic backlog transitions. bin/fm-backlog-transition-lib.sh
+#   MEMBERSHIP owns the contract, including handing a member back.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -143,7 +153,9 @@
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi.
+#   never falls back to pi. Every adapter launched by bare name (claude, codex,
+#   opencode, grok, gemini) is checked on PATH the same way, so a spawn never
+#   reports success for a harness whose pane could only print command-not-found.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -526,6 +538,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+DELIVERS_ARG=
+DELIVERS_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -565,6 +579,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    delivers)
+      DELIVERS_ARG=$a
+      DELIVERS_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -619,6 +637,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --delivers) want_value=delivers ;;
+  --delivers=*)
+    DELIVERS_ARG=${a#--delivers=}
+    DELIVERS_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -654,6 +677,23 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+[ "$DELIVERS_SET" -eq 0 ] || [ -n "$DELIVERS_ARG" ] || {
+  echo "error: --delivers requires a non-empty value" >&2
+  exit 1
+}
+# A grouped dispatch's membership is recorded once, at the unit's first spawn
+# (bin/fm-backlog-transition-lib.sh MEMBERSHIP). A relaunch carries the record
+# forward unchanged, and only a ship delivers backlog items.
+if [ "$DELIVERS_SET" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --relaunch keeps the task's recorded membership; --delivers applies only to its first dispatch, and a card handed back leaves through bin/fm-tasks-axi.sh handback" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || {
+    echo "error: --delivers applies only to ship spawns; a scout delivers a report and a secondmate is not a backlog item" >&2
+    exit 1
+  }
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1059,10 +1099,16 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_commit_rollback() {
+  local members_ok=1
+  fm_backlog_members_unstart "$DATA" "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}" || {
+    members_ok=0
+    echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  }
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
     "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
-    return 0
+    [ "$members_ok" = 1 ] && return 0
+    return 1
   fi
   echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
   return 1
@@ -1285,6 +1331,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  if [ "$DELIVERS_SET" -eq 1 ]; then
+    echo "error: --delivers names the items ONE dispatch delivers, so it cannot be shared across a batch; spawn the grouped task on its own" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1332,6 +1382,14 @@ fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
 }
+SPAWN_MEMBERS=()
+if [ "$DELIVERS_SET" -eq 1 ]; then
+  fm_backlog_members_parse "$ID" "$DELIVERS_ARG" || {
+    echo "error: --delivers: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 2
+  }
+  SPAWN_MEMBERS=("${FM_BACKLOG_TRANSITION_MEMBERS[@]}")
+fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -1952,6 +2010,17 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 case "$HARNESS" in
+# These launch by bare name, so the pane resolves them from PATH only after
+# its endpoint and worktree exist. A missing CLI there is a shell prompt
+# printing "command not found": no agent, no status line, and an endpoint that
+# reads as alive, which no later check can tell from a working worker. Refuse
+# while nothing exists yet, exactly as the resolved-path adapters below do.
+claude | codex | opencode | grok | gemini)
+  resolve_pi_executable "$HARNESS" >/dev/null || {
+    echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
     echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -2932,10 +3001,25 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
+  for SPAWN_MEMBER in "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}"; do
+    if [ -e "$STATE/$SPAWN_MEMBER.meta" ] || [ -L "$STATE/$SPAWN_MEMBER.meta" ] \
+       || [ -e "$STATE/$SPAWN_MEMBER.backlog-close" ] || [ -L "$STATE/$SPAWN_MEMBER.backlog-close" ]; then
+      echo "error: $SPAWN_MEMBER has its own worker record in this home, so $ID cannot also deliver it; refusing before creating its endpoint or local copy" >&2
+      exit 1
+    fi
+    if ! fm_backlog_member_dispatchable "$DATA" "$ID" "$SPAWN_MEMBER"; then
+      echo "error: $ID cannot deliver $SPAWN_MEMBER: $FM_BACKLOG_TRANSITION_ERROR; refusing before creating its endpoint or local copy" >&2
+      exit 1
+    fi
+  done
 else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
     echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  if [ "${#SPAWN_MEMBERS[@]}" -gt 0 ]; then
+    echo "error: --delivers moves the delivered items with $ID, which needs this home's automatic backlog transitions ($FM_BACKLOG_TRANSITION_SKIP); spawn without it and track the items by hand" >&2
     exit 1
   fi
 fi
@@ -4101,6 +4185,9 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  # Not spawn-owned: a relaunch carries the unit's membership forward through
+  # preserve_relaunch_meta, and bin/fm-tasks-axi.sh handback rewrites it.
+  [ "${#SPAWN_MEMBERS[@]}" -eq 0 ] || echo "delivers=$DELIVERS_ARG"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4169,8 +4256,12 @@ fi
 # this task's own meta lock, so a steer or teardown racing the same id stays
 # serialized exactly as before. The call itself is deferred to the final commit
 # point below so every earlier launch-delivery failure remains unwindable.
+# A grouped dispatch moves its members first, so the unit's own transition stays
+# the final fallible step and a failure before it leaves the unit Queued, as the
+# rollback below assumes.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  fm_backlog_members_start "$DATA" "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}" || return 1
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
 }
 
