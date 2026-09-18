@@ -83,13 +83,13 @@ refuse_if_away() {
 }
 
 valid_id() {
-  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$1" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
 }
 
 # One "<id>\t<owner>\t<summary>" line per live captain call.
 live_calls() {
   local json
-  json=$("$SCRIPT_DIR/fm-bearings-snapshot.sh" --json 2>/dev/null) || return 1
+  json=$(FM_BEARINGS_DECISIONS=100000 "$SCRIPT_DIR/fm-bearings-snapshot.sh" --json 2>/dev/null) || return 1
   printf '%s\n' "$json" | jq -r '
     .decisions_open[]? | select(.verb == "captain-hold")
     | [.id, .owner, (.summary // "" | gsub("[\t\r\n]"; " "))] | @tsv'
