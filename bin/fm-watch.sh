@@ -206,6 +206,12 @@ mkdir -p "$STATE"
 # are already loaded above, so sourcing it here adds no further expansion.
 # shellcheck source=bin/fm-awaiting-landing-lib.sh
 . "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"
+# Unrecorded-PR detection: bin/fm-unrecorded-pr-lib.sh owns the condition (an
+# open PR on a task's branch while its record carries no pr=) and its one forge
+# query per sweep; this watcher supplies the cadence, re-surface window, and
+# wake (unrecorded_pr_tick below).
+# shellcheck source=bin/fm-unrecorded-pr-lib.sh
+. "$SCRIPT_DIR/fm-unrecorded-pr-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -322,6 +328,14 @@ case "$IDLE_FLEET_SECS" in ''|*[!0-9]*|0) IDLE_FLEET_SECS=900 ;; esac
 # must not buy another one.
 IDLE_FLEET_RESURFACE_SECS=${FM_IDLE_FLEET_RESURFACE_SECS:-}
 case "$IDLE_FLEET_RESURFACE_SECS" in ''|*[!0-9]*|0) IDLE_FLEET_RESURFACE_SECS=3600 ;; esac
+# Unrecorded-PR detection cadence (unrecorded_pr_tick below). SCAN bounds how
+# often the condition is evaluated; a sweep with a candidate costs one forge
+# query, so it must not ride the poll cadence. RESURFACE is how often a finding
+# firstmate handled without recording the PR is raised again while it holds.
+UNRECORDED_PR_SCAN_SECS=${FM_UNRECORDED_PR_SCAN_SECS:-}
+case "$UNRECORDED_PR_SCAN_SECS" in ''|*[!0-9]*|0) UNRECORDED_PR_SCAN_SECS=300 ;; esac
+UNRECORDED_PR_RESURFACE_SECS=${FM_UNRECORDED_PR_RESURFACE_SECS:-}
+case "$UNRECORDED_PR_RESURFACE_SECS" in ''|*[!0-9]*|0) UNRECORDED_PR_RESURFACE_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -991,6 +1005,71 @@ idle_fleet_tick() {
   fm_wake_append check "$key" "$reason" || return 1
   printf '%s\n' "$now" > "$STATE/.idle-fleet-alerted" || return 1
   wake "$reason"
+}
+
+# Unrecorded-PR detection: bin/fm-unrecorded-pr-lib.sh owns what the condition
+# is (a task of this home whose branch has an open PR while its record carries
+# no pr=) and how its two sides are read; this function owns only the cadence,
+# the per-task re-surface window, and the wake. It lives in this watcher for the
+# reason bin/fm-idle-fleet-lib.sh gives: the watcher runs attended and as the
+# away daemon's child, and the daemon escalates every `check` wake, so one
+# implementation covers the away window where an unwatched PR once went red.
+#
+# The episode is one marker per task, `.unrecorded-pr-<task>`, holding the PR
+# URL and the epoch of its last wake. A still-queued wake for the task is never
+# repeated; a handled one that is still true re-surfaces once per
+# UNRECORDED_PR_RESURFACE_SECS, and at once when the PR itself changed. A task
+# whose condition stopped holding - its PR recorded, closed, or merged, or the
+# task gone - loses its marker.
+#
+# Detection only. Nothing here records pr= or arms a merge poll: the wake names
+# the task and the PR so firstmate verifies it and records it through
+# bin/fm-pr-check.sh.
+unrecorded_pr_tick() {
+  local now findings status task url branch marker alerted_url alerted_at key reason queued seen="" f first=""
+  [ "$(age_of "$STATE/.last-unrecorded-pr-scan")" -ge "$UNRECORDED_PR_SCAN_SECS" ] || return 0
+  touch "$STATE/.last-unrecorded-pr-scan" || return 1
+  now=$(date +%s)
+  findings=$(fm_unrecorded_pr_scan "$STATE")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    # An unreachable forge is not "no open PRs": keep every open episode as it
+    # was and say so in the triage log rather than waking anyone.
+    triage_log "unrecorded-PR detection skipped: the forge could not be queried"
+    return 0
+  fi
+  queued=$(fm_wake_queued_keys check)
+  while IFS="$(printf '\t')" read -r task url branch; do
+    [ -n "$task" ] && [ -n "$url" ] || continue
+    seen="$seen $task "
+    key="unrecorded-pr:$task"
+    marker="$STATE/.unrecorded-pr-$task"
+    if printf '%s\n' "$queued" | grep -Fx "$key" >/dev/null 2>&1; then
+      continue
+    fi
+    alerted_url=$(cut -f1 "$marker" 2>/dev/null || true)
+    alerted_at=$(cut -f2 "$marker" 2>/dev/null || true)
+    case "$alerted_at" in ''|*[!0-9]*) alerted_at= ;; esac
+    if [ "$alerted_url" = "$url" ] && [ -n "$alerted_at" ] && [ "$alerted_at" -le "$now" ] \
+      && [ "$((now - alerted_at))" -lt "$UNRECORDED_PR_RESURFACE_SECS" ]; then
+      continue
+    fi
+    reason="check: open PR not recorded: $task $url (branch $branch); verify it is this task's work, then record it with bin/fm-pr-check.sh"
+    fm_wake_append check "$key" "$reason" || return 1
+    printf '%s\t%s\n' "$url" "$now" > "$marker" || return 1
+    [ -n "$first" ] || first=$reason
+  done <<EOF_FINDINGS
+$findings
+EOF_FINDINGS
+  for f in "$STATE"/.unrecorded-pr-*; do
+    [ -f "$f" ] || continue
+    task=${f##*/.unrecorded-pr-}
+    case "$seen" in *" $task "*) ;; *) rm -f "$f" ;; esac
+  done
+  # Every finding is already durable, so one wake presents them all; wake()
+  # ends the cycle, which is why it comes after the prune.
+  [ -z "$first" ] || wake "$first"
+  return 0
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -2191,6 +2270,13 @@ while :; do
   # it wakes at most once per FM_IDLE_FLEET_RESURFACE_SECS.
   idle_fleet_tick || {
     echo "watcher: idle-fleet detection failed" >&2
+    exit 1
+  }
+
+  # Unrecorded-PR detection on its own bounded cadence; it queries the forge
+  # only when some task of this home has a branch and no recorded PR.
+  unrecorded_pr_tick || {
+    echo "watcher: unrecorded-PR detection failed" >&2
     exit 1
   }
 
