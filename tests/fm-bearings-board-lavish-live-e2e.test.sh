@@ -72,8 +72,19 @@ cat > "$LAB/payload.json" <<'JSON'
 }
 JSON
 
+# Observable for "no browser window": every opener a launcher could reach is a
+# stub on PATH that records the call, and the guard fails if any was invoked.
+OPENER_LOG="$LAB/opener-calls"
+mkdir -p "$LAB/openers"
+for opener in open xdg-open sensible-browser; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 0\n' "$opener" "$OPENER_LOG" > "$LAB/openers/$opener"
+  chmod +x "$LAB/openers/$opener"
+done
+export PATH="$LAB/openers:$PATH"
+export BROWSER="$LAB/openers/xdg-open"
+
 run_board() {
-  FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
+  FM_BEARINGS_LAVISH_NO_OPEN=1 FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
     FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
     "$ROOT/bin/fm-bearings-board.sh" "$@"
 }
@@ -82,7 +93,7 @@ BOARD="$LAB/.lavish/bearings-board.html"
 run_board build "$LAB/payload.json" >/dev/null 2>&1 || fail "the guard board did not build"
 [ -f "$BOARD" ] || fail "the guard board was not published"
 
-url=$(lavish-axi "$BOARD" | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
+url=$(lavish-axi "$BOARD" --no-open | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
 case "$url" in
   http://*/session/*) ;;
   *) fail "could not read the guard board session url: $url" ;;
@@ -96,7 +107,7 @@ curl -fsS -X POST "$base/api/$key/end" >/dev/null 2>&1 \
 
 # ASSUMPTION UNDER GUARD: this exits 0 while reporting the session is not live.
 set +e
-ended_out=$(lavish-axi "$BOARD" 2>&1)
+ended_out=$(lavish-axi "$BOARD" --no-open 2>&1)
 ended_rc=$?
 set -e
 [ "$ended_rc" -eq 0 ] \
@@ -118,3 +129,7 @@ esac
 lavish-axi 2>/dev/null | grep -F "$BOARD," | grep -q ',open,' \
   || fail "the board build reported success while the session was still not live"
 pass "the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one"
+
+[ ! -s "$OPENER_LOG" ] \
+  || fail "the guard opened a browser window: $(cat "$OPENER_LOG")"
+pass "the guard established, ended, and reopened real sessions without invoking any browser opener"
