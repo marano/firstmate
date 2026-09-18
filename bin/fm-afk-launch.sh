@@ -63,10 +63,10 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
-#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
-#                              cleanup flushes WHILE state/.afk is still present,
-#                              wait for it, close the recorded terminal by exact
-#                              id, clear state/.afk, then archive the record last.
+#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon WHILE
+#                              state/.afk is still present, wait for it, close the
+#                              recorded terminal by exact id, clear state/.afk,
+#                              then archive the record last.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -682,9 +682,10 @@ fm_afk_launch_stop() {
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
     return 1
   fi
-  # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
-  # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
-  # first would make that flush a no-op via inject_msg's presence gate).
+  # (1) SIGTERM the daemon WHILE state/.afk is still present, so the away engine
+  # stops before the posture it serves ends. Its shutdown retains buffered
+  # escalations for the return brief and types nothing into the captain's pane
+  # (escalate_retain_at_shutdown in bin/fm-supervise-daemon.sh).
   pid=""
   pid_identity=""
   if daemon_lock_held_by_live_daemon; then

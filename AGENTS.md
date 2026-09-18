@@ -465,6 +465,7 @@ Each skill owns its own daemon procedure, which is otherwise identical; these sa
 - While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record.
 - A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
+- An unmarked message that ends with the `away-supervisor` trailing sentinel is a digest cut from the front, never captain input; it does not exit away mode, and the `/afk` skill owns its report.
 - A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.
 - Any other unmarked message means the captain returned in away mode (load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears), or, in quiet mode, is simply answered as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
 - Away and quiet mode never expand approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.

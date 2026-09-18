@@ -395,7 +395,8 @@ unit_mode_garbage_and_legacy_content_reads_away() {
 
 # ---------------------------------------------------------------------------
 # UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
-# still present (so its flush is not a no-op), and clears .afk last.
+# still present (the away engine stops before its posture ends), and clears
+# .afk last.
 # ---------------------------------------------------------------------------
 unit_stop_ordering() {
   local st lock marker daemon_pid
@@ -419,7 +420,7 @@ unit_stop_ordering() {
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   # shellcheck disable=SC2031 # The background daemon writes this shared file; no shell variable is reassigned.
   if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
-    pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
+    pass "stop-ordering: daemon SIGTERM'd while .afk still present"
   else
     fail "stop-ordering: .afk was already cleared when the daemon got SIGTERM"
   fi

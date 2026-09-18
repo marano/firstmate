@@ -14,11 +14,22 @@
 # marker remains a current compatibility carrier because already-running
 # secondmates have its leading label in their charter context.
 #
+# Tailed kinds (FM_OPERATIONAL_TAILED_KINDS) are typed into a composer a human
+# also uses, so their input can be cut from the front and submitted later. They
+# also END with a trailing sentinel after one space:
+#   U+2063 /FIRSTMATE_OP: v1 <kind>
+# A leading header proves machine origin; so does the trailing sentinel alone,
+# which survives a front truncation that destroyed the header. `provenance`
+# names that case `truncated`: machine text that lost its header, never
+# ordinary input. Only a sentinel that ends the input counts; one followed by
+# more text is ordinary input that quotes or continues it.
+#
 # CLI:
 #   fm-operational-input.sh encode <kind>  # body on stdin, encoded input stdout
 #   fm-operational-input.sh kind           # current input on stdin, kind stdout
 #   fm-operational-input.sh classify       # current or legacy input on stdin
 #   fm-operational-input.sh body           # current generic input on stdin
+#   fm-operational-input.sh provenance     # any input on stdin: operational|truncated
 #   fm-operational-input.sh --help
 #
 # All successful data commands print exactly one value and no diagnostics.
@@ -29,6 +40,8 @@ FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "
 FM_OPERATIONAL_VERSION=v1
 FM_OPERATIONAL_HEADER_PREFIX="${FM_OPERATIONAL_PREFIX}${FM_OPERATIONAL_VERSION} "
 FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome'
+FM_OPERATIONAL_TAILED_KINDS='away-supervisor'
+FM_OPERATIONAL_TAIL_PREFIX="${FM_OPERATIONAL_MARK}/FIRSTMATE_OP: ${FM_OPERATIONAL_VERSION} "
 
 # Compatibility name retained for the away-mode owner and its tests.
 # shellcheck disable=SC2034 # Public source-library variable used by callers.
@@ -47,12 +60,60 @@ fm_operational_kind_is_current() {  # <kind>
   return 1
 }
 
+fm_operational_kind_is_tailed() {  # <kind>
+  case " $FM_OPERATIONAL_TAILED_KINDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_operational_input_encode() {  # <generic-kind> <body> <result-var>
-  local kind=${1-} body=${2-} result_var=${3-}
+  local kind=${1-} body=${2-} result_var=${3-} tail=""
   [ -n "$result_var" ] || return 2
   fm_operational_kind_is_current "$kind" || return 2
   [ -n "$body" ] || return 2
-  printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
+  fm_operational_kind_is_tailed "$kind" && tail=" ${FM_OPERATIONAL_TAIL_PREFIX}${kind}"
+  printf -v "$result_var" '%s%s: %s%s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body" "$tail"
+}
+
+# The tailed kind whose trailing sentinel ends <message>, ignoring trailing
+# whitespace a composer or transport may add; 1 when none does.
+fm_operational_input_tail_kind() {  # <message> <result-var>
+  local message=${1-} result_var=${2-} trimmed kind
+  [ -n "$result_var" ] || return 2
+  trimmed=${message%"${message##*[![:space:]]}"}
+  for kind in $FM_OPERATIONAL_TAILED_KINDS; do
+    case "$trimmed" in
+      *"${FM_OPERATIONAL_TAIL_PREFIX}${kind}")
+        printf -v "$result_var" '%s' "$kind"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Machine provenance of any input: `operational` when it opens with a current
+# or legacy operational header, `truncated` when it has no header but ends with
+# a tailed kind's trailing sentinel (a front-truncated operational input), and
+# 1 for ordinary input. Header first, so a back-truncated input that kept its
+# header stays operational. A header anywhere later in the input is ordinary
+# text quoting a whole operational input, never a truncation, which removes it.
+fm_operational_input_provenance() {  # <message> <result-var>
+  local message=${1-} result_var=${2-} parsed
+  [ -n "$result_var" ] || return 2
+  if fm_operational_input_classify "$message" parsed && [ -n "$parsed" ]; then
+    printf -v "$result_var" '%s' operational
+    return 0
+  fi
+  case "$message" in
+    *"$FM_OPERATIONAL_PREFIX"*) return 1 ;;
+  esac
+  if fm_operational_input_tail_kind "$message" parsed && [ -n "$parsed" ]; then
+    printf -v "$result_var" '%s' truncated
+    return 0
+  fi
+  return 1
 }
 
 fm_operational_input_construct() {  # <kind> <body> <result-var>
@@ -101,6 +162,9 @@ fm_operational_input_body() {  # <current-message> <result-var>
   [ -n "$result_var" ] || return 2
   if fm_operational_generic_kind "$message" current_kind; then
     parsed_body=${message#"${FM_OPERATIONAL_HEADER_PREFIX}${current_kind}: "}
+    if fm_operational_kind_is_tailed "$current_kind"; then
+      parsed_body=${parsed_body%" ${FM_OPERATIONAL_TAIL_PREFIX}${current_kind}"}
+    fi
     printf -v "$result_var" '%s' "$parsed_body"
     return 0
   fi
@@ -201,12 +265,15 @@ Usage:
   bin/fm-operational-input.sh kind           # current input on stdin
   bin/fm-operational-input.sh classify       # current or legacy input on stdin
   bin/fm-operational-input.sh body           # current input on stdin
+  bin/fm-operational-input.sh provenance     # any input on stdin
 
 Current construction kinds:
   session-start watcher turn-end-guard away-supervisor from-firstmate launch-brief
   branch-outcome
 
 The from-firstmate kind uses its established live-charter-compatible carrier.
+Tailed kinds (away-supervisor) also end with a trailing sentinel; provenance
+prints operational for a header, truncated for a trailing sentinel alone.
 EOF
 }
 
@@ -239,6 +306,12 @@ fm_operational_main() {
       fm_operational_read_stdin input || return 2
       fm_operational_input_body "$input" output || return 1
       printf '%s' "$output"
+      ;;
+    provenance)
+      [ "$#" -eq 1 ] || return 2
+      fm_operational_read_stdin input || return 2
+      fm_operational_input_provenance "$input" output || return 1
+      printf '%s\n' "$output"
       ;;
     *)
       fm_operational_usage >&2

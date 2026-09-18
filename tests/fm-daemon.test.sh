@@ -1751,6 +1751,65 @@ test_afk_turn_exemption() {
   pass "/afk invocation is exempt from afk exit (no self-cancel)"
 }
 
+# 2026-09-17: a digest left as composer ghost text surfaced hours later with its
+# front - marker included - cut off, and was read as the captain returning. A
+# message with no marker that ENDS with the away digest's trailing sentinel is
+# a truncated machine message: corrupt provenance, which stays away.
+test_front_truncated_digest_is_corrupt_provenance_not_a_return() {
+  local dir state encoded fragment verdict
+  dir=$(make_supercase corrupt-provenance)
+  state="$dir/state"
+  afk_enter "$state"
+  fm_operational_input_encode away-supervisor \
+    "Supervisor escalate (2 event(s)): fm-main-green.status: working: nothing outside the five files touched | done: PR 7 (pre-read; re-arm not needed)" encoded \
+    || fail "could not encode the fixture digest"
+  [ "$(afk_message_verdict "$state" "$encoded")" = internal ] \
+    || fail "a whole digest is not an internal escalation"
+  # The incident fragment: cut mid-word, well past the marker.
+  fragment=${encoded#*nothing out}
+  verdict=$(afk_message_verdict "$state" "$fragment")
+  [ "$verdict" = corrupt-provenance ] \
+    || fail "a front-truncated digest read as $verdict, not corrupt-provenance: $fragment"
+  should_exit_afk "$state" "$fragment" \
+    && fail "a front-truncated digest took the captain-returned path"
+  # Cut just past the marker, and with a composer's trailing newline.
+  verdict=$(afk_message_verdict "$state" "${encoded#"$FM_INJECT_MARK"}"$'\n')
+  [ "$verdict" = corrupt-provenance ] \
+    || fail "a digest missing only its marker read as $verdict"
+  pass "a front-truncated digest is corrupt provenance and never exits away mode"
+}
+
+# Refusal: the bias toward exit stands. A genuine captain message with no
+# marker still exits away mode, including one that mentions the protocol,
+# quotes a whole digest, or keeps typing past ghost text that ends in the
+# sentinel - the captain is present in every one of those.
+test_genuine_captain_message_still_exits_away_mode() {
+  local dir state encoded tail fixture verdict
+  dir=$(make_supercase captain-still-exits)
+  state="$dir/state"
+  afk_enter "$state"
+  fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): done" encoded \
+    || fail "could not encode the fixture digest"
+  tail="${FM_INJECT_MARK}/FIRSTMATE_OP: v1 away-supervisor"
+  for fixture in \
+    "I'm back" \
+    "status update please" \
+    "k" \
+    "/no-mistakes" \
+    "what does FIRSTMATE_OP: v1 away-supervisor mean?" \
+    "Captain quote: $encoded" \
+    "fragment of ghost text ${tail} and now I'm back" \
+    "I typed the ASCII look-alike /FIRSTMATE_OP: v1 away-supervisor"
+  do
+    verdict=$(afk_message_verdict "$state" "$fixture")
+    [ "$verdict" = captain-returned ] \
+      || fail "a genuine captain message read as $verdict: $fixture"
+    should_exit_afk "$state" "$fixture" \
+      || fail "a genuine captain message did not exit away mode: $fixture"
+  done
+  pass "a genuine unmarked captain message still exits away mode"
+}
+
 test_should_exit_afk_when_afk_inactive() {
   local dir state
   dir=$(make_supercase no-afk)
@@ -2926,6 +2985,8 @@ test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
 test_marker_detection
 test_afk_turn_exemption
+test_front_truncated_digest_is_corrupt_provenance_not_a_return
+test_genuine_captain_message_still_exits_away_mode
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
 test_pane_input_pending_detects_partial_input

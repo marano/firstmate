@@ -270,7 +270,7 @@ A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
 
-The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
+The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `, and an away digest also ends with a U+2063 trailing sentinel so a front-truncated digest is still recognized as machine text.
 The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
 U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control separator that could erase the visible routing label.
 `bin/fm-operational-input.sh` owns current operational construction and parsing, and the AFK skill owns legacy away-input compatibility.
@@ -327,7 +327,8 @@ For another harness without native tracked background execution, `bin/fm-afk-lau
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
-On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
+On stop, the daemon receives termination while `state/.afk` still exists, the recorded terminal is closed, and the AFK flag is removed last.
+The daemon's shutdown types nothing into the captain's pane; it retains buffered escalations for the return brief.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
 ## Destructive lab safety
