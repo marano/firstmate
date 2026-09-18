@@ -1,7 +1,7 @@
 # Stock macOS Bash 3.2 lane coverage
 
 `bin/fm-test-run.sh` owns which tests the `stock-bash` lane selects, the exclusion table with one reason per excluded test, and the `STOCK_BASH_MAX_SCRIPT_MS` bound a `cost:` reason must clear.
-`.github/workflows/ci.yml` owns the `macos-stock-bash` job that runs it and its wall-clock budget.
+`bin/fm-stock-bash-lane.sh` owns everything the lane runs, so CI's `macos-stock-bash` job and a local run before push execute the same checks; `.github/workflows/ci.yml` owns that job's tool installs and wall-clock budget.
 This record holds the measurement those reasons are justified against, and states what the lane still cannot cover.
 
 ## Why the lane exists

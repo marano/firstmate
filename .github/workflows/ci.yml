@@ -45,7 +45,13 @@ jobs:
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
-      - run: bin/fm-lint.sh
+      - id: lint
+        run: bin/fm-lint.sh
+      # Only when the lint itself failed: this job's log tail is what a
+      # CI-repair agent reads, so tell it how to verify a repair cheaply.
+      - name: How to verify a Lint repair locally
+        if: failure() && steps.lint.outcome == 'failure'
+        run: bin/fm-lint-repair-note.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
@@ -491,75 +497,22 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install tasks-axi
+        run: |
+          set -eu
+          command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
+          npm install -g tasks-axi@0.2.5 >/dev/null
+          echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
+      # bin/fm-stock-bash-lane.sh owns everything this lane runs - the stock
+      # Bash pin and its guards, the parse sweep, the selected tests with their
+      # pinned case counts, and the retained public-followup regression - so a
+      # local run before push executes exactly what this job executes.
       - name: Run the stock-bash lane under stock Bash
         shell: /bin/bash {0}
         run: |
           set -eu
-          case "$BASH_VERSION" in
-            3.2.57*) ;;
-            *) echo "::error::expected stock macOS Bash 3.2.57, got $BASH_VERSION"; exit 1 ;;
-          esac
-          /bin/bash --version | head -1
-          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-
-          # bin/fm-test-run.sh runs every selected script with a bare `bash`, so
-          # this is a stock-Bash lane only while `bash` resolves to stock Bash. A
-          # runner image change or a later tool install could put Bash 5 in
-          # front, and the job would keep its name while testing the wrong
-          # shell - the exact failure this lane was widened to stop. Refuse.
-          child_version=$(bash -c 'printf %s "$BASH_VERSION"')
-          case "$child_version" in
-            3.2.57*) ;;
-            *) echo "::error::selected tests would run under Bash $child_version, not stock 3.2.57"; exit 1 ;;
-          esac
-
-          shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
-          bin/fm-lint.sh --list-files > "$shell_inventory"
-          parse_fail=0
-          while IFS= read -r f; do
-            /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
-          done < "$shell_inventory"
-          [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
-
-          command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
-          npm install -g tasks-axi@0.2.5 >/dev/null
-          PATH="$(npm prefix -g)/bin:$PATH"
-          export PATH
-          command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
-          # Prepending the npm prefix could itself shadow the shim, so re-check.
-          child_version=$(bash -c 'printf %s "$BASH_VERSION"')
-          case "$child_version" in
-            3.2.57*) ;;
-            *) echo "::error::npm prefix displaced stock Bash: selected tests would run under $child_version"; exit 1 ;;
-          esac
-
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # --require-ok-count keeps the exact case counts this job pinned while
-          # it ran only three files by hand. Exit status alone cannot see a
-          # script that stops printing cases while still exiting 0, and widening
-          # the lane must not drop an assertion it already made.
-          # A per-script bound well clear of the slowest member turns a HUNG
-          # script into a named failure instead of an unattributed job
-          # cancellation at the cap.
-          bin/fm-test-run.sh --lane stock-bash \
-            --per-script-timeout-secs 600 \
-            --require-ok-count tests/fm-fleet-snapshot-view.test.sh=21 \
-            --require-ok-count tests/fm-bearings-snapshot.test.sh=59 \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-stock-bash.json"
-
-          # tests/fm-public-followup.test.sh is cost-excluded from the lane: the
-          # whole suite measures 92.6s here. This job already covered ONE test
-          # inside it, so that single regression is retained by name rather than
-          # dropped with the file. Losing it would be a coverage regression, not
-          # a cost saving.
-          pf_output=$(FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32 \
-            bash tests/fm-public-followup.test.sh)
-          printf '%s\n' "$pf_output"
-          pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
-          [ "$pf_count" -eq 1 ] || {
-            echo "::error::expected 1 public-followup bash 3.2 register regression, got $pf_count"
-            exit 1
-          }
+          bin/fm-stock-bash-lane.sh --json "$RUNNER_TEMP/fm-test/fm-test-timing-stock-bash.json"
       - name: Upload stock-bash timing artifact
         if: always()
         uses: actions/upload-artifact@v4
