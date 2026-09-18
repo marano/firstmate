@@ -1362,6 +1362,48 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# Shards are balanced by what ShellCheck reads for each root, not by the root's
+# own size: a tiny root that sources a large library is the expensive one.
+# Own-file bytes would pair the tiny root with a mid-size one and leave the
+# heavy library's cost stacked on one worker.
+test_shards_balance_by_source_closure_not_own_bytes() {
+  local tmp fakebin log lib tiny mid_a mid_b out heavy_shard
+  tmp=$(fm_test_tmproot fm-lint-shard-weight)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/invocations.log"
+  : > "$log"
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do shift; done
+shift
+printf '%s\n' "\$*" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+  lib="$tmp/big-lib.sh"
+  tiny="$tmp/tiny.sh"
+  mid_a="$tmp/mid-a.sh"
+  mid_b="$tmp/mid-b.sh"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "big_%d() { printf %%s\\n %d; }\n", i, i }' > "$lib"
+  # shellcheck disable=SC2016 # The fixture's own $DIR must stay literal.
+  printf '#!/usr/bin/env bash\n# shellcheck source=%s\n. "$DIR/big-lib.sh"\n' "$lib" > "$tiny"
+  awk 'BEGIN { for (i = 0; i < 90; i++) printf "printf %%s\\n mid_a_%d\n", i }' > "$mid_a"
+  awk 'BEGIN { for (i = 0; i < 88; i++) printf "printf %%s\\n mid_b_%d\n", i }' > "$mid_b"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    "$LINT" "$tiny" "$mid_a" "$mid_b" 2>&1) || fail "shard weight lint failed"$'\n'"$out"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] || fail "expected two shard invocations, got:"$'\n'"$(cat "$log")"
+  heavy_shard=$(grep -F "$tiny" "$log") || fail "the tiny root was never linted"
+  [ "$heavy_shard" = "$tiny" ] \
+    || fail "the root that sources the large library shares a shard: $heavy_shard"
+  grep -Fqx -- "$mid_a $mid_b" "$log" || fail "the two mid-size roots were not paired in the other shard"
+  pass "lint shards balance by source-closure size rather than each root's own bytes"
+}
+
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
@@ -1400,3 +1442,4 @@ test_explicit_path_keeps_external_sources
 test_fast_mode_on_a_local_branch_keeps_source_following
 test_changed_mode_hides_cross_file_codes_that_ci_still_sees
 test_local_exclusion_list_covers_every_no_external_sources_code
+test_shards_balance_by_source_closure_not_own_bytes

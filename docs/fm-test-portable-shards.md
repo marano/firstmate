@@ -27,7 +27,7 @@ The CI cap and its rationale are owned by [`.github/workflows/ci.yml`](../.githu
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the widest lane sum to differ from the narrowest by no more than five percent of the widest.
 Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
 These checks do not detect a script outgrowing an existing hint or establish measured job headroom.
-Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
+Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts, under "When hints are refreshed" below.
 Reorder the stored memberships to match when the hints change, because the coverage regressions require each lane's stored order to equal its `--list-scheduled` order.
 
 The lane was split from two to three on 2026-09-17 by captain decision (raising the cap and accepting the existing headroom were both rejected as not cutting wall-clock merge wait), after the two-lane packing measured 8.34 and 8.27 minutes of packed weight against the 10-minute cap with about 0.04 minutes left to gain from repacking - no rebalance left to spend.
@@ -67,7 +67,7 @@ The 2026-09-01 table predicted all five shards at an identical 16.4 minutes whil
 `bin/fm-test-run.sh --check-coverage` reports the unmeasured share as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, but an unmeasured script is only one way the balance rots, and it was not this one: that bound was satisfied throughout, at 22 of 170.
 The guard therefore also reports the heaviest shard's packed weight as `serial_max_ms=` and refuses past `PORTABLE_SERIAL_MAX_SHARD_MS`, reported alongside it as `serial_shard_budget_ms=`.
 A stale hint that pushes a shard toward its job cap now reds the seconds-long coverage guard, which names the offending shard, instead of surfacing half an hour later as a verdictless cancellation.
-Refresh the hints whenever the serial lane gains scripts, rather than waiting for either bound to trip.
+Refresh the hints under "When hints are refreshed" below rather than waiting for either bound to trip.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size, shard composition, and balance rather than a copied table.
 The refreshed hints pack all five shards at 1256037 ms, about 20.9 minutes, against the 1440000 ms per-shard budget.
@@ -91,6 +91,13 @@ bin/fm-test-run.sh --check-coverage
 
 A timed-out shard uploads no artifact, so pick runs where every serial shard is green or the lane's slowest scripts go unmeasured in exactly the shard that needs them most.
 Measure native-Windows-only scripts through the focused Git Bash runner and retain that `duration_ms` separately, because the portable CI shards skip them.
+
+## When hints are refreshed
+
+A hint can only come from green CI runs that include the script at its new size, and those runs happen after the change that grew it, so no change can refresh the hints for its own growth.
+A refresh is therefore its own follow-up change, made from the timing artifacts of several green runs on `main`, rather than an obligation on the change that caused the growth.
+File it when a change adds scripts to a lane or grows a member materially, and whenever `--check-coverage` reports `serial_unhinted=` or `serial_max_ms=` approaching its bound; the guard's refusals remain the enforced backstop.
+Lint shard weights need no refresh: [`bin/fm-lint.sh`](../bin/fm-lint.sh) derives them from the source graph at run time.
 
 ## Coverage guard
 

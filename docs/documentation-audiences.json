@@ -449,6 +449,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/build-lock-contention.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },

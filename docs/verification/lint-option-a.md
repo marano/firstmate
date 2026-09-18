@@ -20,7 +20,26 @@ Both variants were measured in the same quiet-host window:
 | Variant | User + system CPU | Reduction | Worst-process RSS | Reduction |
 | --- | ---: | ---: | ---: | ---: |
 | source-aware baseline | 140.1 s | n/a | 8.30 GB | n/a |
-| option A, per-root processes | 9.8 s | 93.0% | 0.56 GB | 93.3% |
+| option A, no `--external-sources`, per-root processes | 9.8 s | 93.0% | 0.56 GB | 93.3% |
+
+## Which variable produced the saving
+
+Option A changed two variables at once, and all of the saving came from omitting `--external-sources`.
+Per-root processes do not cap memory: ShellCheck releases per-root state, so one invocation's peak is its single most expensive root.
+The 2026-09-17 lint-cost investigation separated the two variables on 22 cheap `bin/*.sh` roots with the pinned 0.11.0 Darwin arm64 build, both runs keeping `--norc --external-sources`:
+
+| Variant | Peak RSS | Summed CPU |
+| --- | ---: | ---: |
+| one invocation, 22 roots | 240 MB | 5.35 s |
+| 22 invocations, one root each | 239 MB worst process | 5.59 s |
+
+On single expensive roots, omitting `--external-sources` alone cut peak RSS 9.1x to 26.7x, for example `bin/fm-merge-outcome-lib.sh` from 826 MB to 31 MB.
+That flag stays on in CI, which is the only place SC1091, SC2034, SC2153, and SC2329 are evaluated; only local changed-file mode omits it.
+
+```bash
+shellcheck --norc --external-sources -- bin/fm-merge-outcome-lib.sh   # 826 MB peak
+shellcheck --norc -- bin/fm-merge-outcome-lib.sh                      # 31 MB peak
+```
 
 ## Reproduction
 
@@ -69,3 +88,11 @@ awk '
 
 CPU and RSS vary with host load, so percentage claims must compare runs from one measurement window.
 When results must be compared across windows, use the reported `bytes_allocated` totals as the stable work proxy rather than quoting a CPU or RSS ratio.
+
+## What the shard weight tracks
+
+`bin/fm-lint.sh` balances its two shards by each root's source-closure bytes: the root plus every file it transitively sources.
+On 2026-09-18, with the pinned 0.11.0 Darwin arm64 build, 40 canonical roots were each linted alone with `shellcheck --norc --external-sources`, sampled every fourteenth root by closure size plus the five largest files and the five smallest relative to their closures.
+Each probe was killed past 2.5 GB RSS or 90 seconds; three roots crossed the RSS cap and were left out of the correlation as censored, and all three have the three largest closures.
+Over the 37 completed roots, the Spearman rank correlation with CPU seconds was 0.96 for closure bytes and 0.35 for own-file bytes, and with peak RSS it was 0.96 against 0.37.
+`bin/fm-secondmate-report.sh`, a 3,250-byte root with a 427,927-byte closure, took 27.6 CPU seconds and 2.5 GB, while the 265,196-byte `tests/fm-pi-branch-extension.test.sh`, whose closure adds little, took 1.0 second and 186 MB.

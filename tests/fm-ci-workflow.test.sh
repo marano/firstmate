@@ -152,9 +152,55 @@ CAPS
   pass "the already-measured lane bounds are unchanged"
 }
 
+# The stock-bash job must run the shared lane owner rather than a second copy of
+# its body, or a local run before push stops mirroring what CI executes.
+test_stock_bash_job_runs_the_shared_lane_owner() {
+  local reported
+  reported=$(ruby -ryaml -e '
+steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash").fetch("steps")
+runs = steps.map { |step| step["run"].to_s }
+owner = runs.select { |run| run.lines.any? { |line| line.strip.start_with?("bin/fm-stock-bash-lane.sh") } }
+puts "the job runs bin/fm-stock-bash-lane.sh #{owner.size} times, want 1" unless owner.size == 1
+runs.each do |run|
+  run.lines.each do |line|
+    command = line.strip
+    next if command.start_with?("#")
+    puts "a step runs lane work outside the owner: #{command}" if command =~ /fm-test-run\.sh|bash -n|FM_TEST_ONLY=/
+  end
+end
+' "$CI_WORKFLOW") || fail "could not read the macos-stock-bash job from ci.yml"
+  [ -z "$reported" ] || fail "the stock-bash job does not run the shared lane owner:"$'\n'"$reported"
+  pass "the stock-bash CI job runs the shared lane owner and nothing else of the lane"
+}
+
+# A failed Lint job must end its log with the repair note, because that tail is
+# what a CI-repair agent reads; it must not print when an install step failed.
+test_failed_lint_ends_with_the_repair_note() {
+  local reported
+  reported=$(ruby -ryaml -e '
+steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("lint").fetch("steps")
+lint = steps.index { |step| step["run"].to_s.strip == "bin/fm-lint.sh" }
+note = steps.index { |step| step["run"].to_s.strip == "bin/fm-lint-repair-note.sh" }
+if lint.nil? || note.nil?
+  puts "lint step #{lint.inspect}, note step #{note.inspect}"
+  exit
+end
+id = steps[lint]["id"].to_s
+condition = steps[note]["if"].to_s.gsub(/\s+/, " ")
+puts "note must be the last step after the lint step" unless note == steps.size - 1 && note > lint
+puts "lint step needs an id the note can test" if id.empty?
+puts "note must print only when the lint step failed, got if: #{condition}" unless
+  condition.include?("failure()") && condition.include?("steps.#{id}.outcome == \x27failure\x27")
+' "$CI_WORKFLOW") || fail "could not read the lint job from ci.yml"
+  [ -z "$reported" ] || fail "a failed Lint job does not end with the repair note:"$'\n'"$reported"
+  pass "a failed Lint job ends its log with the repair note, and only when the lint failed"
+}
+
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
 test_every_job_has_a_finite_timeout
 test_previously_unbounded_jobs_keep_their_caps
 test_measured_lanes_keep_their_existing_bounds
+test_stock_bash_job_runs_the_shared_lane_owner
+test_failed_lint_ends_with_the_repair_note

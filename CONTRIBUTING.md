@@ -72,6 +72,8 @@ Firstmate's wrapper still matters: crewmates route every `ask-user` finding to f
 [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) owns the tracked `.no-mistakes.yaml` gate defaults.
 The `firstmate-coding-guidelines` skill owns the rule that local no-mistakes Test stays intent-targeted rather than configuring `commands.test`.
 Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
+Before pushing a shell change, run `mutex bin/fm-stock-bash-lane.sh` and treat a failure as a stop: it runs exactly what CI's stock macOS Bash 3.2 lane runs, which is where CI-only failures have landed, and its header owns what that is.
+It shortens the feedback loop and does not replace the CI lane.
 The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
 
 Check and test the toolbelt before pushing:
@@ -89,6 +91,7 @@ bin/fm-test-run.sh --proven-isolated --jobs 4   # explicit local parallel of the
 bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher/AFK/tmux/stateful)
 bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards
 bin/fm-test-run.sh --check-coverage   # prove portable shards + serial + serial shards + Herdr equal the full inventory
+mutex bin/fm-stock-bash-lane.sh   # the stock macOS Bash 3.2 CI lane, locally on macOS; stop on failure before pushing
 bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
 bin/fm-test-isolation-proof.sh --list   # proven portable parallel candidate set
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # re-run the portable candidate proof

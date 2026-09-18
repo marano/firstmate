@@ -1,7 +1,7 @@
 # Stock macOS Bash 3.2 lane coverage
 
 `bin/fm-test-run.sh` owns which tests the `stock-bash` lane selects, the exclusion table with one reason per excluded test, and the `STOCK_BASH_MAX_SCRIPT_MS` bound a `cost:` reason must clear.
-`.github/workflows/ci.yml` owns the `macos-stock-bash` job that runs it and its wall-clock budget.
+`bin/fm-stock-bash-lane.sh` owns everything the lane runs, so CI's `macos-stock-bash` job and a local run before push execute the same checks; `.github/workflows/ci.yml` owns that job's tool installs and wall-clock budget.
 This record holds the measurement those reasons are justified against, and states what the lane still cannot cover.
 
 ## Why the lane exists
@@ -150,3 +150,15 @@ Both were left IN the lane deliberately: excluding a test on unproven local evid
 Several early failures were the measurement rig rather than the code, recorded here so they are not re-reported as findings.
 `tests/fm-lint-workflows.test.sh` failed until the pinned `actionlint` was on PATH, `tests/fm-kimi-harness.test.sh` failed until `python3` had `tomllib`, and `tests/fm-remote-herdr-guard.test.sh` failed while `jq` was the macOS platform binary.
 All three pass under the environment above.
+
+## Local cost before push
+
+`bin/fm-stock-bash-lane.sh` lets a worker run this lane before pushing, which is where the CI-only failures landed.
+On 2026-09-18 under `mutex` on the fleet laptop, the lane selected 139 scripts, failed none, gate-skipped 48, and took 1,167,538 ms of test time, about 19.5 minutes, all under the machine-wide lock; another worker queued behind it for over nine minutes.
+CI's own lane runs took 18.6 to 20.3 minutes, so a local run saves no wall time; it moves the failure before the push instead of after a CI round trip and a repair cycle.
+
+That puts this lane in tension with [build-lock-contention.md](build-lock-contention.md): running the lane before every push makes it one of the longest holds on the machine for every firstmate change.
+It is a single run, so it obeys the per-run wrap rule, but the two goals pull against each other.
+The intended resolution is to keep the local run as the one pre-push lane hold, replacing ad-hoc local reruns of the same suites rather than adding to them, and to cut the hold by selecting only the lane scripts a change can affect once `bin/fm-test-run.sh` can intersect a lane with its changed-file selection; that would stay a runner selection, not a second list.
+Until then the trade is about twenty minutes of lock per firstmate change against a CI round trip per missed failure.
+
