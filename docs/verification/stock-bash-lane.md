@@ -142,9 +142,10 @@ muse
 So this is an artifact of the tests' process-faking technique under a system-shell pin, not a defect in `bin/fm-harness.sh`.
 It does mean the ancestry contract those three assert is unreachable in this lane, which is why they are excluded by name rather than left to fail.
 
-Two tests failed for reasons this host cannot attribute: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
-Neither shows the Bash 3.2 signature and neither copies the interpreter.
-Both are left IN the lane deliberately: excluding a test on unproven local evidence loses coverage, and the `macos-stock-bash` job is the authority on whether they fail on a runner.
+Two tests failed for reasons this host could not attribute at measurement time: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
+Neither showed the Bash 3.2 signature and neither copies the interpreter.
+`tests/fm-extension-binding.test.sh`'s failure was later diagnosed as macOS 26.3 enforcing POSIX's write-permission requirement on `rename()`'s source directory, which made every bind fail EACCES against a staging root already sealed to 0555; `bin/fm-extension.mjs` now reorders `installPackage` to rename before sealing (see its comment at the rename site) so the source directory is still owner-writable when the rename runs. `tests/fm-afk-return.test.sh` remains unattributed.
+Both were left IN the lane deliberately: excluding a test on unproven local evidence loses coverage, and the `macos-stock-bash` job is the authority on whether they fail on a runner.
 
 Several early failures were the measurement rig rather than the code, recorded here so they are not re-reported as findings.
 `tests/fm-lint-workflows.test.sh` failed until the pinned `actionlint` was on PATH, `tests/fm-kimi-harness.test.sh` failed until `python3` had `tomllib`, and `tests/fm-remote-herdr-guard.test.sh` failed while `jq` was the macOS platform binary.
