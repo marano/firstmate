@@ -50,7 +50,11 @@
 #      the ledger has been asked whether a live sibling run exists.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed/checks-passed -> done, failed/cancelled -> failed. A passed run
+#      claims its PR merged or closed only on the ci step log's own terminal
+#      marker (nm_ci_pr_final_state): passed alone also covers a skipped ci
+#      step or one that ended without observing the PR's fate, with the PR
+#      still open (2026-09-18 fm-main-green incident). EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -540,8 +544,8 @@ nm_effective_ci_step_status() {
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
+# reports every check green - a MONITORED ci step ends only once the PR is
+# actually merged or closed. `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
@@ -552,11 +556,16 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
-nm_ci_checks_state() {
-  local run_id log_tail marker
+nm_ci_log_tail() {
+  local run_id
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$run_id" ] || return 0
+  nm_run axi logs --step ci --run "$run_id" || true
+}
+
+nm_ci_checks_state() {
+  local log_tail marker
+  log_tail=$(nm_ci_log_tail)
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
@@ -567,6 +576,51 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+
+# The PR's fate as the ci step itself observed it: `merged` or `closed` from
+# the log's terminal "PR has been merged"/"PR has been closed" marker (the ci
+# step's only two terminal PR markers in no-mistakes v1.75.2), else empty.
+# Only this marker proves a passed run's PR left review: outcome=passed also
+# covers a skipped ci step, which has no log at all, and a ci step that
+# completed without observing the PR's end (a CI fixer concluding no change
+# was needed, an unreadable-checks park resolved by approval), each with the
+# PR still open.
+nm_ci_pr_final_state() {
+  local marker
+  marker=$(nm_ci_log_tail | grep -E 'PR has been (merged|closed)' | tail -1)
+  case "$marker" in
+    *"PR has been merged"*) printf 'merged' ;;
+    *"PR has been closed"*) printf 'closed' ;;
+  esac
+}
+
+# A step's status from the run's steps[] table, empty when the table has no row
+# for it.
+nm_step_status() {  # <step>
+  local row rest
+  row=$(nm_steps_rows | grep -E "^[[:space:]]*$1," | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
+}
+
+# Detail for a passed run: the PR's fate only as nm_ci_pr_final_state proves
+# it. Without that proof the run still passed, so the state stays done, but
+# the detail never claims the PR merged or closed.
+nm_passed_run_detail() {
+  local fate ci_status pr_url
+  fate=$(nm_ci_pr_final_state)
+  case "$fate" in
+    merged) printf 'run passed: PR merged'; return ;;
+    closed) printf 'run passed: PR closed'; return ;;
+  esac
+  ci_status=$(nm_step_status ci)
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  printf 'run passed%s: PR%s not observed merged or closed' \
+    "${ci_status:+ (ci step $ci_status)}" "${pr_url:+ $pr_url}"
+}
+
 # Coarse fallback when the bare `axi status` answer is not this branch's own
 # matching run: either it names another branch (routine once several crews
 # validate the same underlying repo concurrently - a worktree with its own
@@ -703,7 +757,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL=$(nm_passed_run_detail) ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else

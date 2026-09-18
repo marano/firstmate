@@ -18,6 +18,10 @@
 #       superseded reading
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
+#   (d3) a passed run claims "PR merged" or "PR closed" only on the ci step
+#       log's own terminal marker: a skipped ci step, or one that ended
+#       without the marker, reports done with the PR not observed merged or
+#       closed; a real merge marker still reports done, PR merged
 #   (d2) terminal failed run whose only failure is an orphaned ci monitor
 #       after checks read green                                   -> done
 #   (e) cross-branch attribution: this branch's own run found via list lookup
@@ -25,6 +29,8 @@
 #        (an unclassifiable status word keeps the ledger's newest-first order)
 #   (e3) the live sibling's head was never fetched into the task copy: it still
 #        outranks a terminal row sitting at the worktree's exact commit
+#   (e4) a superseded run's passed record never speaks for the newest run
+#        still in progress on the same worktree
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -378,6 +384,32 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/1"
   findings: none
+outcome: passed
+EOF
+}
+
+# A passed run with its full steps[] table and a PR, the ci step's own status
+# given. The 2026-09-18 fm-main-green shape is ci=skipped: the run passed while
+# its PR stayed open with checks still pending.
+run_passed_ci() {  # <branch> <ci-step-status>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/24"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,4
+    rebase,completed,0,3599
+    review,completed,0,53271
+    test,completed,0,1400721
+    document,completed,0,54748
+    lint,completed,0,5527
+    push,completed,0,9796
+    pr,completed,0,26914
+    ci,$2,0,0
 outcome: passed
 EOF
 }
@@ -959,6 +991,104 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+# (d3) A passed run claims its PR merged or closed only on the ci step log's
+# own terminal marker. The 2026-09-18 fm-main-green incident: the NEWEST run
+# passed with its ci step skipped, the PR open and seven checks pending, and
+# crew-state reported "run passed: PR merged/closed" - the line that
+# authorises cleanup.
+test_passed_with_skipped_ci_is_not_reported_merged() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-ci-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-skipci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/skipci.meta" "window=fm:fm-skipci" "worktree=$d/wt" "kind=ship"
+  printf 'paused: re-running validation on the reverted head with the CI step skipped\n' > "$d/state/skipci.status"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci fm/feat-skipci skipped)"
+  # What the real CLI answers for a skipped step's log.
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+step: ci
+run: "01RUN"
+log: "no log recorded for step \"ci\" in this run"
+EOF
+)
+  out=$(run_crew_state "$d" skipci)
+  assert_contains "$out" "state: done" "a passed run is still a terminal done run"
+  assert_contains "$out" "source: run-step" "the passed run stays the attributed run-step verdict"
+  assert_not_contains "$out" "merged/closed" "a skipped ci step never observed the PR's fate"
+  assert_not_contains "$out" "PR merged" "no merge marker, no merge claim"
+  assert_not_contains "$out" "PR closed" "no close marker, no close claim"
+  assert_contains "$out" "(ci step skipped): PR https://github.com/o/r/pull/24 not observed merged or closed" \
+    "the detail names the skipped ci step and the PR left open"
+  pass "a passed run with a skipped ci step is not reported as PR merged or closed"
+}
+
+# The same for a ci step that COMPLETED without observing the PR's end: a CI
+# fixer that concluded no change was needed ends the step while the PR stays
+# open (five such completed runs were recorded open on the incident host).
+test_passed_ci_ended_without_merge_marker_is_not_reported_merged() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-ci-no-marker)
+  make_repo_on_branch "$d/wt" fm/feat-nomarker
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nomarker.meta" "window=fm:fm-nomarker" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci fm/feat-nomarker completed)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+  claude exited pid=6319 status=success
+  no changes to commit
+  "CI fixer concluded no code change is needed: the failing shards are unrelated to this PR"
+EOF
+)
+  out=$(run_crew_state "$d" nomarker)
+  assert_contains "$out" "state: done" "a passed run is still a terminal done run"
+  assert_not_contains "$out" "merged/closed" "an unobserved PR fate is never claimed"
+  assert_not_contains "$out" "PR merged" "no merge marker, no merge claim"
+  assert_contains "$out" "(ci step completed): PR https://github.com/o/r/pull/24 not observed merged or closed" \
+    "the detail says the ci step ended without seeing the PR's fate"
+  pass "a passed run whose ci step ended without a merge marker is not reported merged"
+}
+
+# Refusal test: the fix must not simply stop reporting terminal states. A run
+# whose ci step observed the merge still reports done with the PR merged.
+test_passed_with_merge_marker_reports_merged() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-merged)
+  make_repo_on_branch "$d/wt" fm/feat-merged
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/merged.meta" "window=fm:fm-merged" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci fm/feat-merged completed)"
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+  all CI checks passed - still monitoring until merged or closed
+  "base branch advanced (1a6b8a06d85f..6d6ab74f84c9), re-arming CI monitor timeout"
+  ""
+  PR has been merged!
+EOF
+)
+  out=$(run_crew_state "$d" merged)
+  assert_contains "$out" "state: done" "a genuinely merged PR still reports done"
+  assert_contains "$out" "source: run-step" "merged stays an attributed run-step verdict"
+  assert_contains "$out" "run passed: PR merged" "the ci step's own merge marker is reported"
+  pass "a passed run whose ci step observed the merge reports done, PR merged"
+}
+
+test_passed_with_closed_marker_reports_closed() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-closed)
+  make_repo_on_branch "$d/wt" fm/feat-closed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/closed.meta" "window=fm:fm-closed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci fm/feat-closed completed)"
+  FM_FAKE_CI_LOGS="PR has been closed; clearing stale CI approval gate"
+  out=$(run_crew_state "$d" closed)
+  assert_contains "$out" "state: done" "a closed PR still reports done"
+  assert_contains "$out" "run passed: PR closed" "the ci step's own close marker is reported"
+  assert_not_contains "$out" "merged" "a closed PR is never reported merged"
+  pass "a passed run whose ci step observed the close reports done, PR closed"
+}
+
 test_terminal_failed() {
   reset_fakes
   local d; d=$(new_case failed)
@@ -1186,6 +1316,40 @@ EOF
   assert_contains "$out" "source: run-step" "the live run is still an attributed run-step verdict"
   assert_not_contains "$out" "state: failed" "a dead run at the worktree commit must not report a healthy task as failed"
   pass "a live run outranks a terminal run bound to the same worktree"
+}
+
+# The superseded-run shape first suspected for the 2026-09-18 fm-main-green
+# report: an OLDER run's record reads passed with its ci step completed (its PR
+# monitor concluded), while the NEWER run on the same worktree is still
+# validating. The newest run is in progress, so the task must read as working
+# and never report the older record's terminal verdict or its PR.
+test_superseded_passed_record_loses_to_newest_running_run() {
+  reset_fakes
+  local d base_head live_head short_base short_live out
+  d=$(new_case superseded-passed)
+  make_repo_on_branch "$d/wt" fm/feat-superseded
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'newest run validates the next head'
+  live_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
+  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
+  [ "$short_base" != "$short_live" ] || fail "newest run head did not advance past the worktree"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/superseded.meta" "window=fm:fm-superseded" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$base_head"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci fm/feat-superseded completed)"
+  FM_FAKE_CI_LOGS="PR has been merged!"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-superseded ${short_base}  2026-09-18 07:20  https://github.com/o/r/pull/24
+  running    fm/feat-superseded ${short_live}  2026-09-18 07:31  https://github.com/o/r/pull/24
+EOF
+)"
+  out=$(run_crew_state "$d" superseded)
+  assert_contains "$out" "state: working" "the newest run in progress decides the task's state"
+  assert_not_contains "$out" "state: done" "the superseded record's terminal verdict is not reported"
+  assert_not_contains "$out" "PR merged" "the superseded record's PR claim is not reported"
+  pass "a superseded passed record never speaks for the newest run in progress"
 }
 
 # The same preference on the runs-list path itself: `axi status` answers for
@@ -2608,6 +2772,10 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_passed_with_skipped_ci_is_not_reported_merged
+test_passed_ci_ended_without_merge_marker_is_not_reported_merged
+test_passed_with_merge_marker_reports_merged
+test_passed_with_closed_marker_reports_closed
 test_terminal_failed
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
@@ -2618,6 +2786,7 @@ test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown
 test_cross_branch_attribution_picks_most_recent_row
 test_terminal_corpse_loses_to_live_run_on_same_branch
+test_superseded_passed_record_loses_to_newest_running_run
 test_runs_list_live_row_outranks_newer_terminal_row
 test_unfetched_live_sibling_outranks_terminal_row_at_exact_head
 test_only_terminal_rows_keep_newest_first_precedence
