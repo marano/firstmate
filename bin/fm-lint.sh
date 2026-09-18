@@ -128,6 +128,88 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
   return "$rc"
 }
 
+# fm_lint_root_weights <follow-sources> <roots-file>: print
+# "<weight><TAB><index><TAB><path>" for each "<index><TAB><path>" root line.
+# The weight approximates what ShellCheck reads for that root. With source
+# following it is the bytes of the root plus every file it transitively
+# sources, which is what cost tracks: a 5,852-byte test that sources
+# bin/fm-watch.sh was measured at 6.4 GB, while own-file bytes alone are
+# uncorrelated with cost. Without source following it is the root's own bytes.
+# An edge follows ShellCheck's own resolution closely enough to balance by: a
+# `# shellcheck source=<path>` directive names the next sourced file and
+# source=/dev/null cuts it; otherwise a literal `. path` or `source path` with
+# any leading $VAR/ stripped, tried from the repository root and then from the
+# sourcing file's directory. A missing root weighs 1.
+fm_lint_root_weights() {
+  awk -F '\t' -v follow="$1" '
+    function readable(p,   line, rc) {
+      if (p == "") return 0
+      if (p in READABLE) return READABLE[p]
+      rc = (getline line < p)
+      close(p)
+      READABLE[p] = (rc >= 0)
+      return READABLE[p]
+    }
+    function resolve(from, p,   dir) {
+      if (p == "" || p ~ /\/$/) return ""
+      if (p ~ /^\//) return readable(p) ? p : ""
+      if (readable(p)) return p
+      dir = from
+      if (sub(/\/[^\/]*$/, "", dir) == 0) return ""
+      return readable(dir "/" p) ? dir "/" p : ""
+    }
+    function load(p,   line, pending, target, bytes, rc) {
+      if (p in BYTES) return
+      bytes = 0
+      pending = ""
+      EDGES[p] = ""
+      while ((rc = (getline line < p)) > 0) {
+        bytes += length(line) + 1
+        if (!follow) continue
+        if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]+source=/) {
+          target = line
+          sub(/^[ \t]*#[ \t]*shellcheck[ \t]+source=/, "", target)
+          sub(/[ \t].*$/, "", target)
+          pending = target
+          continue
+        }
+        if (line ~ /^[ \t]*#/) continue
+        if (!match(line, /(^|[;&|(][ \t]*|^[ \t]*)(\.|source)[ \t]+[^ \t;&|)]+/)) continue
+        target = substr(line, RSTART, RLENGTH)
+        sub(/^.*(\.|source)[ \t]+/, "", target)
+        if (pending != "") {
+          target = pending
+          pending = ""
+        } else {
+          gsub(/["\047]/, "", target)
+          sub(/^\$[{]?[A-Za-z_][A-Za-z0-9_]*[}]?\//, "", target)
+          if (target ~ /[$`]/) continue
+        }
+        if (target == "/dev/null") continue
+        target = resolve(p, target)
+        if (target != "") EDGES[p] = EDGES[p] " " target
+      }
+      close(p)
+      BYTES[p] = (rc < 0) ? -1 : bytes
+    }
+    function visit(p,   n, i, next_paths) {
+      if (p in SEEN) return
+      SEEN[p] = 1
+      load(p)
+      if (BYTES[p] > 0) TOTAL += BYTES[p]
+      n = split(EDGES[p], next_paths, " ")
+      for (i = 1; i <= n; i++) visit(next_paths[i])
+    }
+    {
+      for (seen_path in SEEN) delete SEEN[seen_path]
+      TOTAL = 0
+      visit($2)
+      if (TOTAL < 1) TOTAL = 1
+      printf "%d\t%s\t%s\n", TOTAL, $1, $2
+    }
+  ' "$2"
+}
+
 # Private subprocess mode used only by the bounded parent above.
 if [ "${1:-}" = "--internal-worker" ]; then
   [ "${FM_LINT_INTERNAL:-}" = 1 ] || {
@@ -609,7 +691,7 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
 done
 
 index=1
-: > "$WEIGHTS"
+: > "$TMP_ROOT/roots"
 for path in "${ROOTS[@]}"; do
   case "$path" in
     *"$TAB"*|*$'\n'*)
@@ -617,19 +699,14 @@ for path in "${ROOTS[@]}"; do
       exit 2
       ;;
   esac
-  if [ -f "$path" ]; then
-    weight=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
-  else
-    weight=1
-  fi
-  case "$weight" in ''|*[!0-9]*) weight=1 ;; esac
-  printf '%s\t%s\t%s\n' "$weight" "$index" "$path" >> "$WEIGHTS"
+  printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/roots"
   index=$((index + 1))
 done
+fm_lint_root_weights "$FOLLOW_SOURCES" "$TMP_ROOT/roots" > "$WEIGHTS"
 
 # Largest-first deterministic greedy assignment keeps the two bounded workers
-# balanced without affecting replay order. Direct bytes are a stable portable
-# proxy after the expensive dynamic adapter source fan-out is cut.
+# balanced without affecting replay order. The weight is what ShellCheck reads
+# for a root (fm_lint_root_weights), not the root's own size.
 WORKER_LOADS=(0 0)
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
 while IFS="$TAB" read -r weight index path; do
