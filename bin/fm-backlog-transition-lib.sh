@@ -493,6 +493,13 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
       FM_BACKLOG_ROW_RESULT=not_found
+      # An entry still in the file but invisible to tasks-axi is not absent.
+      out=$(fm_backlog_file "$data" 2>/dev/null) \
+        && out=$(fm_backlog_markdown_misplaced "$out" | grep -F ": $id " | head -1) \
+        && [ -n "$out" ] && {
+          FM_BACKLOG_ROW_RESULT=error
+          FM_BACKLOG_ROW_ERROR="backlog entry for $id is misplaced ($out)"
+        }
     else
       FM_BACKLOG_ROW_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
       if [ -z "$FM_BACKLOG_ROW_ERROR" ]; then
@@ -520,6 +527,129 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     *) FM_BACKLOG_ROW_HOLD_KIND=$hold_kind ;;
   esac
   return 0
+}
+
+# A markdown entry tasks-axi cannot see. The markdown grammar recognises a task
+# bullet only in its own section's form - `- [x] <id> - ` in Done, `- [ ] <id> - `
+# in Queued, and `- [ ] <id> - ` or `- **<id>** - ` in In flight - and reads any
+# other bullet as free-form prose, so a hand edit that flips a checkbox without
+# moving the entry makes the task report NOT_FOUND while it is still in the file.
+# Dispatch reads absence as "nothing to do", so that silence is worse than a
+# refusal. Prints one `line <n>: <id> ...` diagnostic per misplaced entry and
+# returns 1 when there is any; an absent file has none.
+fm_backlog_markdown_misplaced() {  # <backlog-file>
+  [ -f "$1" ] || return 0
+  LC_ALL=C awk '
+    function section(line,   text) {
+      text = tolower(line)
+      sub(/^##[ \t]+/, "", text)
+      sub(/[ \t]+$/, "", text)
+      if (text == "in flight") return "in_flight"
+      if (text == "queued") return "queued"
+      if (text ~ /^done/) return "done"
+      return ""
+    }
+    {
+      sub(/\r$/, "")
+      if ($0 ~ /^##[ \t]/) { state = section($0); next }
+      if (state == "") next
+      form = ""
+      if ($0 ~ /^- \[ \] [A-Za-z0-9][A-Za-z0-9._-]* - /) form = "open"
+      else if ($0 ~ /^- \[x\] [A-Za-z0-9][A-Za-z0-9._-]* - /) form = "closed"
+      else if ($0 ~ /^- \[X\] [A-Za-z0-9][A-Za-z0-9._-]* - /) form = "upper"
+      else if ($0 ~ /^- \*\*[A-Za-z0-9][A-Za-z0-9._-]*\*\* - /) form = "bold"
+      if (form == "") next
+      id = $0
+      sub(/^- (\[.\]|\*\*) /, "", id)
+      sub(/(\*\*)? - .*$/, "", id)
+      sub(/\*\*$/, "", id)
+      if (form == "upper") {
+        printf "line %d: %s is checked with an upper-case [X], which tasks-axi does not read as a task\n", NR, id
+        bad = 1
+      } else if (state == "done" && form != "closed") {
+        printf "line %d: %s sits under ## Done without a [x] checkbox, so tasks-axi cannot see it - move it under ## Queued (or check it)\n", NR, id
+        bad = 1
+      } else if (state == "queued" && form != "open") {
+        printf "line %d: %s sits under ## Queued with a %s bullet, so tasks-axi cannot see it - make it `- [ ] %s - ` or move it to its own section\n", NR, id, (form == "closed" ? "checked" : "bold"), id
+        bad = 1
+      } else if (state == "in_flight" && form == "closed") {
+        printf "line %d: %s sits under ## In flight with a [x] checkbox, so tasks-axi cannot see it - move it under ## Done (or uncheck it)\n", NR, id
+        bad = 1
+      }
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$1"
+}
+
+# DATA-MODE ROW READ. tasks-axi's `show` has no data mode (its --json covers
+# mutations only), so `show --full` output is a rendered TOON surface. This is
+# the single owner of reading one of a row's fields back as exact bytes, which
+# a read-then-rewrite round trip (a body rewritten through --body-file) needs;
+# never recover a value by unescaping rendered output by hand anywhere else.
+# The decode is exact rather than best-effort: every detail field is one line,
+# a quoted value uses TOON's string escapes (\\ \" \n \r \t \uXXXX, a strict
+# subset of JSON, so a JSON decoder is an exact inverse), and an unquoted value
+# is a literal string, because TOON quotes anything that could read otherwise.
+# A value that does not decode refuses rather than yielding approximate bytes.
+# A public-followup row refuses too, because its rendered title and body are
+# substitutes for the typed record, not the stored text.
+# Call it in the current shell, not a command substitution: the value lands in
+# FM_BACKLOG_ROW_FIELD_VALUE with every trailing newline intact, and the read
+# latch and FM_BACKLOG_TRANSITION_ERROR survive. Returns 3 for a missing row.
+FM_BACKLOG_ROW_FIELD_VALUE=
+fm_backlog_row_field() {  # <data-dir> <id> <field>
+  local data authorized_data=$1 id=$2 field=$3 out command_status source_status shown kind value
+  FM_BACKLOG_TRANSITION_ERROR=
+  FM_BACKLOG_ROW_FIELD_VALUE=
+  case "$field" in
+    ''|*[!a-z_]*) FM_BACKLOG_TRANSITION_ERROR="invalid backlog field name $field"; return 2 ;;
+  esac
+  if ! data=$(fm_backlog_data_absolute "$1"); then
+    FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
+    return 1
+  fi
+  fm_backlog_source_present "$data" "$authorized_data"
+  source_status=$?
+  [ "$source_status" -eq 0 ] || return "$source_status"
+  out=$(fm_backlog_row_show "$data" "$id" --full)
+  command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
+  if [ "$command_status" -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
+      || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
+    printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$' && return 3
+    return "$command_status"
+  fi
+  kind=$(printf '%s\n' "$out" | sed -n 's/^  kind: //p' | head -1)
+  if [ "$kind" = public-followup ] || [ "$kind" = '"public-followup"' ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$id is a public-followup record; its rendered fields are not its stored text"
+    return 1
+  fi
+  if [ "$(printf '%s\n' "$out" | grep -c "^  $field: ")" != 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id did not print exactly one $field field"
+    return 1
+  fi
+  shown=$(printf '%s\n' "$out" | sed -n "s/^  $field: //p")
+  # The decoder writes bytes, because printing decoded characters to a stream
+  # with no :raw layer emits a codepoint at or below U+00FF as one latin-1 byte.
+  # allow_nonref is requested because an older JSON::PP rejects a bare string.
+  value=$(printf '%s' "$shown" | LC_ALL=C perl -MJSON::PP -e '
+    local $/;
+    my $shown = <STDIN>;
+    my $value = $shown;
+    if ($shown =~ /\A"/) {
+      $value = eval { JSON::PP->new->utf8->allow_nonref->decode($shown) };
+      exit 1 if !defined $value || ref $value;
+    }
+    binmode STDOUT, ":raw";
+    utf8::encode($value) if utf8::is_utf8($value);
+    print $value, "x";
+  ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not decode the $field of $id"
+    return 1
+  }
+  FM_BACKLOG_ROW_FIELD_VALUE=${value%x}
 }
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
@@ -585,7 +715,7 @@ fm_backlog_row_artifact_supported() {
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
+  local data authorized_data=$1 id=$2 previous_arg=''
   local arg deliverable='' line body new_body tmp
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
@@ -611,36 +741,8 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     previous_arg=$arg
   done
   if [ -n "$deliverable" ]; then
-    out=$(fm_backlog_row_show "$data" "$id" --full)
-    command_status=$?
-    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
-    if [ "$command_status" -ne 0 ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-      return "$command_status"
-    fi
-    # The leading quote selects a JSON-encoded bare string, which is exactly the
-    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
-    # decoder below requests it rather than inheriting the local default. It then
-    # writes bytes, because printing the decoded characters to a stream with no
-    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
-    # silently corrupts the body this rewrites.
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/
-          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value unless $value eq "-";
-      ') || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
+    fm_backlog_row_field "$authorized_data" "$id" body || return $?
+    body=$FM_BACKLOG_ROW_FIELD_VALUE
     line="Deliverable of the finished work: $deliverable"
     case $'\n'"$body"$'\n' in
       *$'\n'"$line"$'\n'*) ;;

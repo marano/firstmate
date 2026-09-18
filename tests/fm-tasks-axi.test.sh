@@ -216,6 +216,88 @@ test_wrapper_single_home() {
   pass "fm-tasks-axi.sh keeps the single-home layout addressing its own code-root backlog"
 }
 
+# The data-mode read: a body carrying every byte class the rendered surface
+# escapes (quotes, backslashes, a literal backslash-n, tabs, indentation, and a
+# non-ASCII character) comes back byte-for-byte, so a read-then-rewrite round
+# trip through `update --body-file` leaves the stored body unchanged.
+test_body_read_round_trips_exact_bytes() {
+  local dir body out rc
+  dir=$(make_split body-read)
+  body="$dir/body.txt"
+  printf 'first line\n  "quoted" \\n back\\slash \303\251\n\tindented tab\n-\ntrue' > "$body"
+  wrapper_from_code "$dir" add body-1 "body read" --body-file "$body" >/dev/null || fail "add body-1 failed"
+  wrapper_from_code "$dir" body body-1 > "$dir/read.txt" || fail "body read failed"
+  cmp -s "$body" "$dir/read.txt" || fail "the body read did not return the stored bytes exactly"
+  wrapper_from_code "$dir" update body-1 --body-file "$dir/read.txt" >/dev/null || fail "rewrite failed"
+  wrapper_from_code "$dir" body body-1 > "$dir/reread.txt" || fail "second body read failed"
+  cmp -s "$body" "$dir/reread.txt" || fail "a read-then-rewrite round trip changed the body"
+
+  out=$(wrapper_from_code "$dir" body missing-1 2>&1)
+  rc=$?
+  expect_code 3 "$rc" "body of a missing task"
+  assert_contains "$out" "not found" "a missing task's body read did not say so"
+  pass "fm-tasks-axi.sh body returns a task body's exact bytes and survives a rewrite round trip"
+}
+
+# The reverse edge: a closed task returns to Queued with no close date and no
+# completion link left in its title, and requeue refuses to move a row a live
+# worker record still owns.
+test_requeue_reverses_a_close() {
+  local dir out rc
+  dir=$(make_split requeue)
+  wrapper_from_code "$dir" add rq-1 "requeue me" --body "keep this body" >/dev/null || fail "add rq-1 failed"
+  wrapper_from_code "$dir" "done" rq-1 --pr https://github.com/o/r/pull/41 >/dev/null || fail "done rq-1 failed"
+  wrapper_from_code "$dir" requeue rq-1 >/dev/null || fail "requeue rq-1 failed"
+  out=$(wrapper_from_code "$dir" show rq-1 --full)
+  assert_contains "$out" "state: queued" "requeue did not return the task to Queued"
+  assert_contains "$out" 'closed: "-"' "requeue kept the close date"
+  assert_contains "$out" "links: none" "requeue kept the completion link"
+  assert_contains "$out" "title: requeue me" "requeue changed the title beyond the link"
+  assert_equals "keep this body" "$(wrapper_from_code "$dir" body rq-1)" "requeue changed the body"
+
+  wrapper_from_code "$dir" start rq-1 >/dev/null || fail "start rq-1 failed"
+  : > "$dir/home/state/rq-1.meta"
+  out=$(wrapper_from_code "$dir" requeue rq-1 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "requeue under a worker record"
+  assert_contains "$out" "worker record" "the worker-record refusal did not explain itself"
+  assert_contains "$(wrapper_from_code "$dir" show rq-1)" "state: in_flight" "a refused requeue moved the row"
+  pass "fm-tasks-axi.sh requeue reverses a close and refuses under a live worker record"
+}
+
+# A hand edit that flips a checkbox in place leaves the entry in a section whose
+# grammar does not read it; the command must refuse naming it rather than let
+# the task read as NOT_FOUND, and the lifecycle probe must call it an error,
+# not absence.
+test_misplaced_entry_is_loud() {
+  local dir out rc
+  dir=$(make_split misplaced)
+  wrapper_from_code "$dir" add mp-1 "misplaced" >/dev/null || fail "add mp-1 failed"
+  wrapper_from_code "$dir" "done" mp-1 >/dev/null || fail "done mp-1 failed"
+  sed 's/^- \[x\] mp-1 /- [ ] mp-1 /' "$dir/home/data/backlog.md" > "$dir/edited.md"
+  cat "$dir/edited.md" > "$dir/home/data/backlog.md"
+  out=$(wrapper_from_code "$dir" show mp-1 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "a misplaced entry"
+  assert_contains "$out" "mp-1 sits under ## Done without a [x] checkbox" "the misplaced entry was not named"
+  assert_not_contains "$out" "code: NOT_FOUND" "the misplaced entry still read as NOT_FOUND"
+  out=$(
+    FM_HOME="$dir/home"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_row_probe "$dir/home/data" mp-1
+    printf '%s|%s\n' "$FM_BACKLOG_ROW_RESULT" "$FM_BACKLOG_ROW_ERROR"
+  )
+  assert_contains "$out" "error|backlog entry for mp-1 is misplaced" "the lifecycle probe read a misplaced entry as absent"
+
+  sed 's/^- \[ \] mp-1 /- [x] mp-1 /' "$dir/home/data/backlog.md" > "$dir/fixed.md"
+  cat "$dir/fixed.md" > "$dir/home/data/backlog.md"
+  wrapper_from_code "$dir" show mp-1 >/dev/null || fail "a correctly placed entry still refused"
+  pass "a misplaced backlog entry refuses loudly instead of reading as NOT_FOUND"
+}
+
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
@@ -225,6 +307,9 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_overrides_ambient_file
   test_wrapper_refusals
   test_wrapper_single_home
+  test_body_read_round_trips_exact_bytes
+  test_requeue_reverses_a_close
+  test_misplaced_entry_is_loud
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi

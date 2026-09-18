@@ -19,6 +19,26 @@
 # whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
 # owns that rationale.
 #
+# Two verbs belong to this command rather than tasks-axi:
+#   body <id>     print the task body's exact bytes, with no added newline. This
+#                 is the data-mode read for a read-then-rewrite round trip
+#                 (`body <id> > f`, edit f, `update <id> --body-file f`), because
+#                 `show --full` is rendered text that must never be unescaped by
+#                 hand; bin/fm-backlog-transition-lib.sh's fm_backlog_row_field
+#                 owns the exact decode and its refusals.
+#   requeue <id>  the supported reverse edge: return a Done or In flight task to
+#                 Queued with its close date cleared (`tasks-axi reopen`) and the
+#                 completion links a close appended to its title removed, so the
+#                 row no longer reads as shipped. It refuses while this home
+#                 holds a worker record for <id>, because that worker owns the
+#                 In flight row until its own cleanup.
+#
+# A markdown backlog is checked before every command for entries tasks-axi
+# cannot see - a checkbox flipped by hand without moving the entry to its
+# section (fm_backlog_markdown_misplaced owns the rule) - and the command
+# refuses naming each one, instead of letting tasks-axi report a task that is
+# still in the file as NOT_FOUND.
+#
 # Addressing is bin/fm-backlog-transition-lib.sh's fm_backlog_tasks_axi_addressing,
 # the same resolution the lifecycle transitions use: tasks-axi runs from the
 # configured data directory's parent, so that home's own `.tasks.toml` (or
@@ -40,8 +60,10 @@
 #     cannot be read (bin/fm-tasks-axi-lib.sh owns that diagnostic);
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
-#     this command exists to prevent. Lifecycle transitions refuse the same file.
-# Otherwise the exit status is tasks-axi's own.
+#     this command exists to prevent. Lifecycle transitions refuse the same file;
+#   - a markdown backlog carrying a misplaced entry (above).
+# `body` and `requeue` exit 1 on a refusal of their own and 3 for a missing
+# task; otherwise the exit status is tasks-axi's own.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,5 +145,83 @@ else
   unset TASKS_AXI_FILE
 fi
 
+if [ -n "$FM_BACKLOG_AXI_FILE" ] \
+   && ! MISPLACED=$(fm_backlog_markdown_misplaced "$FM_BACKLOG_AXI_FILE"); then
+  fail "$FM_BACKLOG_AXI_FILE has entries tasks-axi cannot see, which it would report as NOT_FOUND:
+$MISPLACED"
+fi
+
+verb_fail() {  # <status> <message>
+  printf 'fm-tasks-axi: %s\n' "$2" >&2
+  exit "$1"
+}
+
+verb_id() {  # <verb> <args...>; prints the one id
+  local verb=$1
+  shift
+  if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+    fail "usage: fm-tasks-axi.sh $verb <id>"
+  fi
+  case "$1" in -*) fail "usage: fm-tasks-axi.sh $verb <id>" ;; esac
+  printf '%s\n' "$1"
+}
+
+field_or_fail() {  # <id> <field>
+  local status
+  fm_backlog_row_field "$DATA" "$1" "$2"
+  status=$?
+  [ "$status" -eq 0 ] || verb_fail "$([ "$status" -eq 3 ] && echo 3 || echo 1)" \
+    "${FM_BACKLOG_TRANSITION_ERROR:-cannot read the $2 of $1}"
+}
+
+requeue() {  # <id>
+  local id=$1 state_dir title links link url stripped changed=1 out
+  local -a link_list=()
+  state_dir="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  if [ -e "$state_dir/$id.meta" ] || [ -L "$state_dir/$id.meta" ]; then
+    verb_fail 1 "$id still has a worker record at $state_dir/$id.meta; its own cleanup moves the row, so tear that task down instead of requeueing it underneath the worker"
+  fi
+  out=$(cd "$FM_BACKLOG_AXI_ROOT" && tasks-axi reopen "$id" 2>&1) || {
+    printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$' && verb_fail 3 "$(printf '%s\n' "$out" | sed -n 1p)"
+    verb_fail 1 "$(printf '%s\n' "$out" | sed -n 1p)"
+  }
+  field_or_fail "$id" title
+  title=$FM_BACKLOG_ROW_FIELD_VALUE
+  field_or_fail "$id" links
+  links=$FM_BACKLOG_ROW_FIELD_VALUE
+  stripped=$title
+  [ "$links" = none ] || IFS=, read -r -a link_list <<< "$links"
+  while [ "$changed" = 1 ]; do
+    changed=0
+    for link in ${link_list[@]+"${link_list[@]}"}; do
+      url=${link#*:}
+      case "$stripped" in
+        *" $url")
+          stripped=${stripped% "$url"}
+          changed=1
+          ;;
+      esac
+    done
+  done
+  if [ "$stripped" != "$title" ]; then
+    out=$(cd "$FM_BACKLOG_AXI_ROOT" && tasks-axi update "$id" --title "$stripped" 2>&1) \
+      || verb_fail 1 "$id is back in Queued, but its completion links could not be cleared from its title: $(printf '%s\n' "$out" | sed -n 1p)"
+  fi
+  printf 'ok: requeue %s -> Queued\n' "$id"
+}
+
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
+case "${ARGS[0]:-}" in
+  body)
+    BODY_ID=$(verb_id body "${ARGS[@]:1}") || exit 2
+    field_or_fail "$BODY_ID" body
+    printf '%s' "$FM_BACKLOG_ROW_FIELD_VALUE"
+    exit 0
+    ;;
+  requeue)
+    REQUEUE_ID=$(verb_id requeue "${ARGS[@]:1}") || exit 2
+    requeue "$REQUEUE_ID"
+    exit 0
+    ;;
+esac
 exec tasks-axi ${ARGS[@]+"${ARGS[@]}"}

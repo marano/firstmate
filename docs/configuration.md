@@ -116,6 +116,7 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+An entry's section, not its checkbox alone, is what tasks-axi reads: a checkbox flipped in place without moving the entry makes the task invisible, so [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) refuses naming any such entry, and its `requeue` verb is the supported way to return a closed task to Queued rather than a hand edit.
 
 The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
 tasks-axi writes by renaming a temp file over its target, which replaces a symlink with a regular file, so linking the code-root copy into the home forks the queue on the first such write rather than keeping the two in step.
