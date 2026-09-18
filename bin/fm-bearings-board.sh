@@ -35,6 +35,12 @@
 #            shrinking Captain's Call.
 # path       Print the stable board path for this home.
 #
+# FM_BEARINGS_LAVISH_NO_OPEN=1 adds `--no-open` to both of build's lavish-axi
+# opens, so the session is established and proved live without opening a
+# browser window. Unset (the default) a real /bearings lavish opens the board
+# for the captain. Automated runs set it; tests/fm-bearings-board-lavish-live-e2e.test.sh
+# does, so a suite run never opens tabs on the captain's screen.
+#
 # A LIVE SESSION IS PROVED, NEVER ASSUMED. `lavish-axi <file>` exits 0 even
 # when it refuses to reopen a session the captain ended from the browser,
 # reporting `status: user-ended` with the same session id, so exit status alone
@@ -248,14 +254,16 @@ lavish_board_live() {  # <establish output> <canonical-board-path>
 establish_board_session() {  # <board>
   local board=$1 real out status version
   BOARD_SESSION_REOPENED=0
+  local -a noopen=()
+  [ "${FM_BEARINGS_LAVISH_NO_OPEN:-}" != 1 ] || noopen=(--no-open)
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
-  out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
+  out=$(lavish-axi "$board" ${noopen[@]+"${noopen[@]}"}) || fail "cannot establish the board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
     printf 'session: live\n'
     return 0
   fi
-  out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the ended board Lavish session"
+  out=$(lavish-axi "$board" --reopen ${noopen[@]+"${noopen[@]}"}) || fail "cannot reopen the ended board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
     BOARD_SESSION_REOPENED=1

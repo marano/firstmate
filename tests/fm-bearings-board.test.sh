@@ -76,6 +76,7 @@ case "${1-}" in
     ;;
   end) : > "$state/open"; printf 'session:\n  status: ended\n'; exit 0 ;;
 esac
+printf '%s\n' "$*" >> "$state/open-calls"
 file=$1
 shift
 reopen=0
@@ -562,6 +563,37 @@ test_build_reopens_a_session_the_captain_ended() {
   pass "a board build reopens a session the captain ended instead of arming a dead one"
 }
 
+test_build_opens_a_browser_unless_told_not_to() {
+  local home data board
+  home=$(make_home browser-open)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the default build failed"
+  [ -s "$home/lavish-state/open-calls" ] || fail "the default build recorded no lavish-axi open"
+  ! grep -q -- '--no-open' "$home/lavish-state/open-calls" \
+    || fail "the default build suppressed the browser open, so a real /bearings lavish would not show the board"
+  pass "a default build lets lavish-axi open the browser for the captain"
+}
+
+test_no_open_reaches_every_lavish_open_including_the_reopen() {
+  local home data out
+  home=$(make_home no-open)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  FM_BEARINGS_LAVISH_NO_OPEN=1 run_board "$home" build "$data" >/dev/null || fail "the no-open build failed"
+  end_session_as_captain "$home"
+  out=$(FM_BEARINGS_LAVISH_NO_OPEN=1 run_board "$home" build "$data") || fail "the no-open rebuild failed"
+  assert_contains "$out" "session: reopened" "the no-open rebuild did not take the reopen path: $out"
+  [ "$(grep -c -- '--reopen' "$home/lavish-state/open-calls")" -ge 1 ] \
+    || fail "the reopen path was never exercised"
+  [ "$(grep -vc -- '--no-open' "$home/lavish-state/open-calls")" -eq 0 ] \
+    || fail "a lavish-axi open ran without --no-open: $(grep -v -- '--no-open' "$home/lavish-state/open-calls")"
+  grep -- '--reopen' "$home/lavish-state/open-calls" | grep -q -- '--no-open' \
+    || fail "the reopen open dropped --no-open"
+  pass "FM_BEARINGS_LAVISH_NO_OPEN=1 adds --no-open to the initial open and to the reopen"
+}
+
 test_build_reopens_when_an_opened_session_ends_before_listing() {
   local home data out board sid
   home=$(make_home establish-list-race)
@@ -787,6 +819,8 @@ test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
 test_build_reopens_when_an_opened_session_ends_before_listing
+test_build_opens_a_browser_unless_told_not_to
+test_no_open_reaches_every_lavish_open_including_the_reopen
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
 test_build_drops_decision_cards_whose_subject_already_landed
