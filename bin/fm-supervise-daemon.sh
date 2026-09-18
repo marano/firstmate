@@ -14,8 +14,9 @@
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
+# the /afk skill sets that flag and starts this daemon; a genuine captain
+# message (afk_message_verdict) clears it and firstmate resumes full
+# responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
@@ -26,9 +27,11 @@
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
 # Firstmate's contract: a message that starts with the current prefix, or a
-# legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
-# message means the captain is back (exit afk, flush catch-up, resume per-wake
-# responsiveness). The prefix and busy-guard solve the same problem - the
+# legacy bare-marker daemon escalation, is internal (stay afk); a digest whose
+# front was cut off but whose trailing sentinel survives is corrupt provenance
+# (stay afk, report it); any other unmarked message means the captain is back
+# (exit afk, flush catch-up, resume per-wake responsiveness). afk_message_verdict
+# owns the mapping. The prefix and busy-guard solve the same problem - the
 # daemon and the human share one input channel - so they live together under
 # /afk.
 #
@@ -64,8 +67,9 @@
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
-# backoff, pane-gone guard, and a signal-trapped shutdown that flushes buffered
-# escalations before exit.
+# backoff, pane-gone guard, and a signal-trapped shutdown. The shutdown RETAINS
+# buffered escalations for the next supervisor and types nothing
+# (escalate_retain_at_shutdown owns why).
 #
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
@@ -282,22 +286,45 @@ afk_exit() {  # <state>
   rm -f "$1/$AFK_FLAG_NAME"
 }
 
-# should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
-#   away posture inactive   -> 1 (nothing to exit; the posture is the record
-#                              bin/fm-afk-contract.sh owns, or the legacy flag)
-#   message has marker      -> 1 (internal escalation; stay afk)
-#   message is /afk command -> 1 (re-entering/extending afk; stay afk)
-#   anything else           -> 0 (captain is back; exit afk)
-# Bias toward exit: only the marker and an explicit /afk invocation keep afk
-# alive. A false exit is self-correcting (the captain re-runs /afk).
-should_exit_afk() {  # <state> <message-text>
-  local state=$1 msg=$2
-  afk_active "$state" || fm_afk_contract_present "$state" || return 1
-  message_is_injection "$msg" && return 1
+# afk_message_verdict: encodes firstmate's afk-exit contract as a testable
+# function, printing one verdict for an incoming message:
+#   inactive           the away posture is off (the posture is the record
+#                      bin/fm-afk-contract.sh owns, or the legacy flag)
+#   internal           the message has the marker: an escalation; stay afk
+#   refresh            the message is an /afk command; stay afk
+#   corrupt-provenance no marker, but the message ENDS with a tailed kind's
+#                      trailing sentinel (bin/fm-operational-input.sh
+#                      provenance=truncated): a daemon digest whose front,
+#                      marker included, was cut off. Neither internal nor the
+#                      captain: stay afk, report it, keep supervising.
+#   captain-returned   anything else; exit afk
+# Bias toward exit: only positive machine evidence and an explicit /afk keep
+# afk alive, and a false exit is self-correcting (the captain re-runs /afk). A
+# sentinel with anything after it - the captain typing past ghost text, or
+# quoting a digest - is not that evidence, so it still reads as the captain.
+afk_message_verdict() {  # <state> <message-text>
+  local state=$1 msg=$2 provenance
+  if ! afk_active "$state" && ! fm_afk_contract_present "$state"; then
+    printf 'inactive\n'
+    return 0
+  fi
+  if message_is_injection "$msg"; then
+    printf 'internal\n'
+    return 0
+  fi
   case "$msg" in
-    /afk*) return 1 ;;
+    /afk*) printf 'refresh\n'; return 0 ;;
   esac
-  return 0
+  if fm_operational_input_provenance "$msg" provenance && [ "$provenance" = truncated ]; then
+    printf 'corrupt-provenance\n'
+    return 0
+  fi
+  printf 'captain-returned\n'
+}
+
+# should_exit_afk: 0 only for afk_message_verdict's captain-returned.
+should_exit_afk() {  # <state> <message-text>
+  [ "$(afk_message_verdict "$1" "$2")" = captain-returned ]
 }
 
 # message_is_injection: 0 if the given message text starts with the sentinel
@@ -717,6 +744,23 @@ escalate_flush() {  # <state>
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
+}
+
+# Shutdown never flushes: it RETAINS the buffer for the next supervisor and
+# types nothing. A flush may only type what it can go on to confirm, and a
+# stopping daemon has no retry, no wedge alarm, and no later tick left, so a
+# submit it could not confirm would stay as text in the supervisor composer
+# where a later keystroke submits it out of context (2026-09-17: a digest
+# flushed at shutdown surfaced hours later, front-truncated past its header,
+# and was read as the captain returning). The buffer and its .since sidecar
+# stay durable; the return brief (bin/fm-afk-return.sh) reads them at the
+# captain's return, and a restarted daemon's housekeeping flushes them.
+escalate_retain_at_shutdown() {  # <state>
+  local state=$1 buf n
+  buf="$state/.subsuper-escalations"
+  [ -s "$buf" ] || return 0
+  n=$(wc -l < "$buf" 2>/dev/null | tr -d ' ')
+  log "shutdown: retained ${n:-?} buffered escalation(s) in $buf for the next supervisor; typed nothing"
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -1669,12 +1713,12 @@ fm_super_main() {
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
-  # --- shutdown: flush buffered escalations, reap child, release lock -------
+  # --- shutdown: retain buffered escalations, reap child, release lock ------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
-    escalate_flush "$STATE" 2>/dev/null || true
+    escalate_retain_at_shutdown "$STATE"
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true
       wait "$WATCHER_PID" 2>/dev/null || true

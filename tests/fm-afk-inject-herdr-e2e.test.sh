@@ -318,6 +318,15 @@ reset_state() {
   : > "$LOG_FILE"
 }
 
+# Submitted operational headers (U+2063 FIRSTMATE_OP: ) across the log. Each
+# digest also carries a U+2063 trailing sentinel, so counting bare U+2063 bytes
+# would count every digest twice.
+HEADER_HEX=$(printf '%s' "$FM_OPERATIONAL_PREFIX" | od -An -tx1 | tr -d ' \n')
+TAIL_HEX=$(printf '%s' " ${FM_OPERATIONAL_TAIL_PREFIX}away-supervisor" | od -An -tx1 | tr -d ' \n')
+header_count() {
+  awk -F '\t' -v h="$HEADER_HEX" '{ hex=$1; count += gsub(h, "", hex) } END { print count + 0 }' "$LOG_FILE"
+}
+
 # --- pane_input_pending environment self-check ------------------------------
 # Verify pane_input_pending (dispatched through fm_backend_composer_state for
 # backend=herdr) can detect typed text in THIS real herdr environment before
@@ -410,9 +419,9 @@ test_scenario_b() {
   sleep 10
 
   local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  marker_count=$(header_count)
   [ "$marker_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
+    || fail "Scenario B: expected exactly 1 operational header, got $marker_count (duplicate or lost)"
 
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
@@ -442,9 +451,9 @@ test_scenario_c() {
   sleep 8
 
   local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  marker_count=$(header_count)
   [ "$marker_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
+    || fail "Scenario C: expected exactly 1 operational header, got $marker_count"
 
   local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
@@ -456,6 +465,12 @@ test_scenario_c() {
   case "$digest_hex" in
     e281a3*) ;;
     *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
+  esac
+  # The digest ENDS with the trailing sentinel, so a front truncation that
+  # destroys the leading marker still leaves proof of machine origin.
+  case "$digest_hex" in
+    *"$TAIL_HEX") ;;
+    *) fail "Scenario C: digest does not end with the trailing sentinel (hex: $digest_hex)" ;;
   esac
 
   local user_count

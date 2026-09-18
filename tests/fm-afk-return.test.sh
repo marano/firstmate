@@ -31,6 +31,7 @@ install_runner() {  # <case-dir>
   # The return brief's durable sources: the posture-record owner, the outcome
   # store owner, and the backlog reader with its tasks-axi probe.
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-branch-outcome.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-tasks-axi-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
@@ -695,6 +696,48 @@ test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   pass "the return brief does not report an already-acked watcher-down marker as an open gap"
 }
 
+# A daemon digest cut from the front and then submitted is not the captain
+# returning. The recorder keeps away mode on and leaves a durable record the
+# return brief's health section reports for this window only; it refuses a
+# genuine captain message, so it can never absorb a real return.
+test_truncated_input_is_recorded_without_a_return_and_reported_at_return() {
+  local dir out rc digest fragment
+  dir="$TMP_ROOT/truncated-input"
+  install_runner "$dir"
+  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
+  # A record left by an earlier window must not be reported for this one.
+  printf '1000\tstale fragment from an earlier window\n' > "$dir/home/state/.subsuper-truncated-input"
+  digest=$(printf 'Supervisor escalate (1 event(s)): fm-main-green.status: working: nothing outside the five files touched' \
+    | "$dir/bin/fm-operational-input.sh" encode away-supervisor) || fail "could not encode the fixture digest"
+  fragment=${digest#*nothing out}
+
+  out=$(printf '%s' "$fragment" | FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" truncated-input 2>&1) || fail "a truncated digest was not recorded: $out"
+  assert_contains "$out" 'away mode stays on' "the recorder did not say away mode stays on"
+  [ -f "$dir/home/state/.afk-contract" ] || fail "recording a truncated digest ended the away posture"
+  [ ! -e "$dir/home/stop.log" ] || fail "recording a truncated digest ran the return"
+
+  set +e
+  out=$(printf "I'm back, what happened?" | FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" truncated-input 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 4 ] || fail "the recorder absorbed a genuine captain message (rc=$rc): $out"
+  assert_contains "$out" 'the captain returning' "the refusal did not send a genuine message to the return"
+  [ "$(grep -c . "$dir/home/state/.subsuper-truncated-input")" -eq 2 ] \
+    || fail "the refused captain message was recorded"
+
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a clean return with a truncated-input record should clear: $out"
+  assert_contains "$out" 'delivery fault: 1 front-truncated supervisor digest(s) arrived as input and were not read as your return' \
+    "the return brief did not report this window's truncated digest"
+  assert_contains "$out" 'side the five files touched' "the report did not carry the fragment's excerpt"
+  assert_not_contains "$out" 'stale fragment from an earlier window' "an earlier window's record was reported"
+  [ ! -e "$dir/home/state/.subsuper-truncated-input" ] || fail "a clear return left the truncated-input record behind"
+  pass "a truncated digest is recorded without a return and reported in the next return brief"
+}
+
 test_return_brief_without_a_record_reports_the_legacy_flag() {
   local dir out
   dir="$TMP_ROOT/brief-legacy"
@@ -804,3 +847,4 @@ test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
+test_truncated_input_is_recorded_without_a_return_and_reported_at_return

@@ -9,6 +9,9 @@
 #   fm-afk-return.sh guard    Read-only consult: exit 3 while away mode is still
 #                            active, exit 4 while return catch-up is pending.
 #   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
+#   fm-afk-return.sh truncated-input  Record the message on stdin as a front-truncated
+#                            supervisor digest while away: exit 0 recorded (stay away),
+#                            3 not away, 4 it reads as the captain (run begin instead).
 #
 # THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
 # records, never from conversation memory: the archived away-posture record
@@ -56,15 +59,28 @@ GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 RETURN_GRACE=${FM_GUARD_GRACE:-300}
 
+# THE TRUNCATED-INPUT RECORD. A message with no operational header that ENDS
+# with a tailed kind's trailing sentinel is a daemon digest whose front was cut
+# off (bin/fm-operational-input.sh owns that `truncated` provenance, and
+# bin/fm-supervise-daemon.sh's afk_message_verdict names it corrupt-provenance).
+# It is not the captain returning, so away mode stays on; `truncated-input`
+# records it in state/.subsuper-truncated-input, a delivery artifact the return
+# brief's health section reports for the away window and a clear return
+# removes. The recorder refuses any message that does not carry that
+# provenance, so it can never absorb a genuine captain message.
+TRUNCATED_INPUT="$STATE/.subsuper-truncated-input"
+
 # The posture-record owner: path helpers only; every read goes through its
 # subcommands. It sources fm-classify-lib.sh, which has no side effects, so the
 # advertised read-only guard stays literal.
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 
 usage() {
-  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -250,7 +266,25 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$TRUNCATED_INPUT"
+}
+
+# Record one front-truncated supervisor digest that arrived as input while away.
+record_truncated_input() {
+  local message provenance excerpt
+  if [ ! -e "$STATE/.afk" ] && ! fm_afk_contract_present "$STATE"; then
+    printf 'fm-afk-return: away mode is not active; nothing to record\n' >&2
+    return 3
+  fi
+  fm_operational_read_stdin message || return 2
+  if ! fm_operational_input_provenance "$message" provenance || [ "$provenance" != truncated ]; then
+    printf 'fm-afk-return: this message is not a truncated supervisor digest; if it has no operational header it is the captain returning - run bin/fm-afk-return.sh\n' >&2
+    return 4
+  fi
+  excerpt=$(printf '%s' "$message" | clean_field | cut -c1-120)
+  printf '%s\t%s\n' "$(date +%s)" "$excerpt" >> "$TRUNCATED_INPUT" || return 1
+  printf 'fm-afk-return: truncated supervisor digest recorded; away mode stays on and the return brief will report it\n'
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -311,8 +345,8 @@ return_guard() {
 
 # --- supervisor health, snapshotted before anything is shut down ------------
 
-health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+health_snapshot() {  # <evidence-file> [<since-epoch>]
+  local evidence=$1 since=${2:-} beat_age lines="" truncated
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
@@ -339,6 +373,15 @@ GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
+  fi
+  if [ -s "$TRUNCATED_INPUT" ]; then
+    truncated=$(awk -F '\t' -v since="${since:-0}" '
+      $1 ~ /^[0-9]+$/ && $1 + 0 >= since + 0 { n++; if (n == 1) { first = $1; text = $2 } }
+      END { if (n) printf "%d\t%s\t%s\n", n, first, text }' "$TRUNCATED_INPUT" 2>/dev/null || true)
+    if [ -n "$truncated" ]; then
+      lines="$lines
+delivery fault: $(printf '%s' "$truncated" | cut -f1) front-truncated supervisor digest(s) arrived as input and were not read as your return (first at $(epoch_to_iso "$(printf '%s' "$truncated" | cut -f2)"): $(printf '%s' "$truncated" | cut -f3-))"
+    fi
   fi
   if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
     lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
@@ -543,7 +586,7 @@ return_reconcile() {
 
   # Health is read before the shutdown below so the shutdown cannot read as a gap;
   # a repeated begin/check keeps the first snapshot.
-  grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null || health_snapshot "$evidence"
+  grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null || health_snapshot "$evidence" "$since"
 
   while IFS="$(printf '\t')" read -r tag kind text; do
     [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue
@@ -721,6 +764,7 @@ main() {
     begin|check) ;;
     guard) return_guard; return ;;
     catchup-summary) catchup_summary; return ;;
+    truncated-input) record_truncated_input; return ;;
     -h|--help|help) usage; return 0 ;;
     *) usage >&2; return 2 ;;
   esac

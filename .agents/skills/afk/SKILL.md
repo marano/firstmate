@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the captain's first genuine message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -66,7 +66,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
+- A message **without** the current operational prefix or a legacy bare marker, **not** starting with `/afk`, and **not** ending with the `away-supervisor` trailing sentinel -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns the correct-ordered daemon shutdown where a daemon ran, the archive of the posture record, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, the return brief, and the return-catch-up gate.
   Relay the return brief in section 9 language and in its own order: supervisor health across the away window first (any gap leads), then every clause and that it was recorded only, then what is waiting on the captain, then what was tried and failed or could not be fixed, then what was handled, then cost.
@@ -76,6 +76,11 @@ No `/back` is needed. The first genuine message is the return signal:
   A Bearings request may be answered while the gate is open, and the digest surfaces the catch-up state as a Charted Next `(return-catchup)` warning row naming what still holds it.
   Acting on the fleet - dispatching, steering, merging, or any other ordinary captain work - still waits until the check exits successfully.
 - A message **with** the current operational prefix (`FM_OPERATIONAL_PREFIX`, U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), or a legacy bare `FM_INJECT_MARK` daemon escalation -> stay away and process it.
+- A message **without** the prefix that **ends** with the `away-supervisor` trailing sentinel (U+2063 followed by `/FIRSTMATE_OP: v1 away-supervisor`) -> corrupt provenance: a daemon digest whose front, prefix included, was cut off before it was submitted, such as composer ghost text a stray keystroke sent.
+  It is not the captain: stay away and do not run the return.
+  Record it with `bin/fm-afk-return.sh truncated-input`, the exact message on stdin, so the return brief's health section reports it; the recorder refuses any message without that provenance, and a refusal means the message is the captain back.
+  Treat the surviving text as a partial escalation: re-read current state for whatever it names rather than trusting the fragment, then keep supervising.
+  A sentinel followed by any other text is the captain typing past or quoting a digest, and is the captain back.
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
 Bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
@@ -104,6 +109,7 @@ The daemon constructs every current injection as the `away-supervisor` kind owne
 The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
 U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
+Every current digest also ends with the `away-supervisor` trailing sentinel, so a digest cut from the front still carries positive proof of machine origin; `bin/fm-operational-input.sh` owns the sentinel and its `truncated` provenance, and `afk_message_verdict` in `bin/fm-supervise-daemon.sh` owns the resulting exit verdict.
 The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, grok, and kimi.
 
 ### Busy-guard and composer guard
@@ -241,7 +247,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
-Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it, and archives the posture record last.
+Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown, clears it, and archives the posture record last.
+The shutdown never types: it retains the buffer for the return brief or a restarted daemon, because a stopping daemon cannot confirm a submit and unconfirmed text left in the captain's composer is how a digest surfaces later as a false return.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
 ### Reliability properties
@@ -254,8 +261,8 @@ These properties must hold:
 - Declared external waits are rechecked on a separate, bounded, condition-aware cadence rather than being mislabeled as wedges; items held for the captain are not rechecked while the posture record exists.
 - The catch-all scan backs up the keyword classifier.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
-  a pane-gone guard, and a signal-trapped shutdown that flushes buffered
-  escalations before exit.
+  a pane-gone guard, and a signal-trapped shutdown that retains buffered
+  escalations for the next supervisor and types nothing.
 
 `FM_INJECT_SKIP` (default `heartbeat`) force-self-handles matching kinds,
 overriding classification.

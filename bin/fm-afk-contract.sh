@@ -5,8 +5,9 @@
 #
 # POSTURE. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While the record exists the
-# home is afk; the captain's first unmarked message archives it (the return path
-# in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
+# home is afk; the captain's first genuine message (afk_message_verdict in
+# bin/fm-supervise-daemon.sh) archives it (the return path in
+# bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
 # Being away changes how the captain is informed and what happens at a
 # captain-owned decision point, never the authority set. Hold-for-return is the
 # only reach profile this release records: there is no phone channel, and the

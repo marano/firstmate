@@ -13,7 +13,14 @@
 #
 #   Scenario C (normal digest): no human input and no swallowed Enter.
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
-#     single-line digest with no duplicate or spurious user submission.
+#     single-line digest with no duplicate or spurious user submission, and it
+#     must END with the trailing sentinel.
+#
+#   Scenario D (shutdown cannot confirm): escalations are buffered and every
+#     Enter is swallowed, so no submit can be confirmed, when the daemon is
+#     stopped with away mode still on. The shutdown must type NOTHING into the
+#     supervisor composer and leave the buffer intact for the next supervisor
+#     (the 2026-09-17 ghost-text incident).
 #
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
@@ -102,6 +109,8 @@ _buf=
 # enters the buffer, so submitted-content assertions are unchanged.
 redraw() {
   printf '\r\033[K\xe2\x9d\xaf %s' "$_buf"
+  # The composer's pending text, exactly: what a later keystroke would submit.
+  printf '%s' "$_buf" > "$LOG.composer"
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -138,10 +147,21 @@ chmod +x "$LOOP_SCRIPT"
 sleep 1  # let the loop start and settle
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
-# the first Enter (file-based flag) for Scenario B.
+# the first Enter (file-based flag) for Scenario B, or every Enter for
+# Scenario D.
 TMUX_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-shim.XXXXXX")
 cat > "$TMUX_SHIM_DIR/tmux" <<SHIM
 #!/usr/bin/env bash
+if [ "\${1:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-all-enter" ]; then
+  shift
+  _args=()
+  for _arg in "\$@"; do
+    [ "\$_arg" = "Enter" ] && continue
+    _args+=("\$_arg")
+  done
+  [ "\${#_args[@]}" -gt 0 ] || exit 0
+  exec "$REAL_TMUX" -L "$SOCKET" send-keys "\${_args[@]}"
+fi
 if [ "\${1:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
   shift
   _args=()
@@ -167,7 +187,7 @@ start_daemon() {
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
   FM_SUPERVISOR_BACKEND=tmux \
-  FM_ESCALATE_BATCH_SECS=0 \
+  FM_ESCALATE_BATCH_SECS="${E2E_ESCALATE_BATCH_SECS:-0}" \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
   FM_SIGNAL_GRACE=1 \
@@ -214,8 +234,19 @@ reset_state() {
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
          "$STATE_DIR"/.swallow-enter \
+         "$STATE_DIR"/.swallow-all-enter \
+         "$STATE_DIR"/.supervise-daemon.log \
          2>/dev/null || true
   : > "$LOG_FILE"
+}
+
+# Submitted operational headers (U+2063 FIRSTMATE_OP: ) across the log. Each
+# digest also carries a U+2063 trailing sentinel, so counting bare U+2063 bytes
+# would count every digest twice.
+HEADER_HEX=$(printf '%s' "$FM_OPERATIONAL_PREFIX" | od -An -tx1 | tr -d ' \n')
+TAIL_HEX=$(printf '%s' " ${FM_OPERATIONAL_TAIL_PREFIX}away-supervisor" | od -An -tx1 | tr -d ' \n')
+header_count() {
+  awk -F '\t' -v h="$HEADER_HEX" '{ hex=$1; count += gsub(h, "", hex) } END { print count + 0 }' "$LOG_FILE"
 }
 
 # --- pane_input_pending environment self-check ------------------------------
@@ -349,11 +380,11 @@ test_scenario_b() {
   # swallowed Enter, the retry path fires).
   sleep 8
 
-  # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
+  # Assert: exactly ONE operational header in the log (no duplicate, no loss).
   local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  marker_count=$(header_count)
   [ "$marker_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
+    || fail "Scenario B: expected exactly 1 operational header, got $marker_count (duplicate or lost)"
 
   # Assert: the digest line is classified as "injection" and starts with the
   # terminal-safe sentinel marker (hex starts with e281a3).
@@ -391,11 +422,11 @@ test_scenario_c() {
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 6
 
-  # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
+  # Exactly one operational header in the submitted log (no duplicate, no loss).
   local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  marker_count=$(header_count)
   [ "$marker_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
+    || fail "Scenario C: expected exactly 1 operational header, got $marker_count"
 
   # The digest is classified as an injection and starts with the sentinel byte.
   local digest_line digest_hex
@@ -417,12 +448,64 @@ test_scenario_c() {
   [ "$user_count" -eq 0 ] \
     || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
 
+  # The digest ENDS with the trailing sentinel, so a front truncation that
+  # destroys the leading marker still leaves proof of machine origin.
+  case "$digest_hex" in
+    *"$TAIL_HEX") ;;
+    *) fail "Scenario C: digest does not end with the trailing sentinel (hex: $digest_hex)" ;;
+  esac
+
   stop_daemon
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+}
+
+# --- Scenario D: shutdown with an unconfirmable submit ----------------------
+# The 2026-09-17 incident: the daemon deferred a digest while the captain's
+# pane was busy, was stopped, and its shutdown flush typed the digest into a
+# composer it could no longer confirm. The text sat there as ghost text until a
+# later keystroke submitted it, front-truncated past its marker, and firstmate
+# read it as the captain returning. Every Enter is swallowed here, so any typed
+# digest could only be left unconfirmed in the composer.
+
+test_scenario_d() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  E2E_ESCALATE_BATCH_SECS=999999 start_daemon
+
+  # Buffered escalations the live loop will not flush before the stop.
+  printf '%s\n' "fm-main-green.status: working: nothing outside the five files touched" \
+    "done: PR https://example.test/pr/400" > "$STATE_DIR/.subsuper-escalations"
+  date +%s > "$STATE_DIR/.subsuper-escalations.since"
+  cp "$STATE_DIR/.subsuper-escalations" "$STATE_DIR/escalations.before"
+  touch "$STATE_DIR/.swallow-all-enter"
+  sleep 2
+
+  # The correct-ordered stop: SIGTERM while away mode is still on.
+  kill -TERM "$DAEMON_PID" 2>/dev/null || true
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+  sleep 1
+
+  # The fixture composer records its pending text on every keystroke, so this
+  # is exactly what a later keystroke would submit (the pane's scrollback still
+  # shows earlier scenarios' wrapped digests and cannot answer that).
+  [ ! -s "$LOG_FILE.composer" ] \
+    || fail "Scenario D: the shutdown left text in the supervisor composer: $(cat "$LOG_FILE.composer")"
+  [ ! -s "$LOG_FILE" ] || fail "Scenario D: the shutdown submitted input: $(cat "$LOG_FILE")"
+  cmp -s "$STATE_DIR/escalations.before" "$STATE_DIR/.subsuper-escalations" \
+    || fail "Scenario D: the shutdown did not leave the escalation buffer intact"
+  [ -s "$STATE_DIR/.subsuper-escalations.since" ] \
+    || fail "Scenario D: the shutdown dropped the buffer's age sidecar"
+  grep -F "shutdown: retained 2 buffered escalation(s)" "$STATE_DIR/.supervise-daemon.log" >/dev/null \
+    || fail "Scenario D: the daemon log does not record the retained buffer"
+  rm -f "$STATE_DIR/.swallow-all-enter"
+  afk_exit "$STATE_DIR"
+  pass "Scenario D: a shutdown that cannot confirm a submit types nothing and retains the buffer"
 }
 
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

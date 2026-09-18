@@ -151,7 +151,90 @@ test_invalid_current_encodings_are_rejected() {
   pass "operational input: current construction rejects legacy kinds and empty bodies"
 }
 
+# A digest typed into a composer a human also uses can be cut from the front
+# and submitted later. The tailed kind ends with a trailing sentinel so the
+# surviving fragment still proves machine origin; every other kind keeps its
+# exact landed bytes.
+test_tailed_kind_ends_with_trailing_sentinel() {
+  local kind encoded tail
+  tail=" ${FM_OPERATIONAL_MARK}/FIRSTMATE_OP: v1 away-supervisor"
+  fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): done" encoded \
+    || fail "could not encode an away-supervisor digest"
+  case "$encoded" in
+    *"$tail") ;;
+    *) fail "an away-supervisor digest lacks the trailing sentinel: $encoded" ;;
+  esac
+  [ "$(printf '%s' "$encoded" | "$OWNER" body)" = "Supervisor escalate (1 event(s)): done" ] \
+    || fail "the CLI body read kept the trailing sentinel"
+  for kind in session-start watcher turn-end-guard launch-brief branch-outcome; do
+    fm_operational_input_encode "$kind" "BODY" encoded || fail "could not encode $kind"
+    [ "$encoded" = "${FM_OPERATIONAL_HEADER_PREFIX}${kind}: BODY" ] \
+      || fail "untailed kind $kind changed its landed bytes: $encoded"
+  done
+  pass "operational input: the away digest ends with a trailing sentinel and untailed kinds keep their bytes"
+}
+
+provenance_cli() {
+  printf '%s' "$1" | "$OWNER" provenance 2>/dev/null
+}
+
+# A front truncation removes the header, and with it the only proof the input
+# was machine text. The trailing sentinel alone is that proof: a digest cut
+# anywhere in front of its sentinel reads truncated, while a whole digest,
+# legacy input, and a header-bearing but back-truncated digest stay operational.
+test_front_truncated_digest_reads_truncated() {
+  local encoded cut fragment
+  fm_operational_input_encode away-supervisor \
+    "Supervisor escalate (1 event(s)): fm-main-green.status: working: nothing outside the five files touched (pre-read; re-arm not needed)" encoded \
+    || fail "could not encode the fixture digest"
+  [ "$(provenance_cli "$encoded")" = operational ] || fail "a whole digest is not operational"
+  [ "$(provenance_cli "${encoded% *}")" = operational ] \
+    || fail "a back-truncated digest lost the provenance its header still proves"
+  [ "$(provenance_cli "${FM_LEGACY_AWAY_PREFIX}1 event(s)): done")" = operational ] \
+    || fail "a legacy away digest is not operational"
+  for cut in 1 3 17 40 90; do
+    fragment=${encoded:$cut}
+    [ "$(provenance_cli "$fragment")" = truncated ] \
+      || fail "a digest cut $cut characters from the front is not truncated: $fragment"
+  done
+  # The incident shape: cut mid-word, and a composer or transport may leave
+  # trailing whitespace behind the sentinel.
+  fragment="side the five files touched (pre-read; re-arm not needed) ${FM_OPERATIONAL_MARK}/FIRSTMATE_OP: v1 away-supervisor"
+  [ "$(provenance_cli "$fragment")" = truncated ] || fail "the mid-word incident fragment is not truncated"
+  [ "$(provenance_cli "$fragment"$'\n')" = truncated ] || fail "a trailing newline hid the sentinel"
+  [ "$(provenance_cli "$fragment  ")" = truncated ] || fail "trailing spaces hid the sentinel"
+  pass "operational input: a digest cut from the front reads truncated on its trailing sentinel alone"
+}
+
+# Refusal: ordinary input must never read as machine text. Only a sentinel that
+# ENDS a header-less input counts; the sentinel followed by more text, a whole
+# digest quoted after ordinary text, and ASCII look-alikes without U+2063 stay
+# ordinary.
+test_ordinary_input_never_reads_truncated() {
+  local encoded tail fixture parsed
+  fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): done" encoded \
+    || fail "could not encode the fixture digest"
+  tail="${FM_OPERATIONAL_MARK}/FIRSTMATE_OP: v1 away-supervisor"
+  for fixture in \
+    "I'm back, what happened overnight?" \
+    "status update please" \
+    "cut digest text ${tail} and then the captain kept typing" \
+    "Captain quote: $encoded" \
+    "what does /FIRSTMATE_OP: v1 away-supervisor mean" \
+    "ends with the ASCII look-alike /FIRSTMATE_OP: v1 away-supervisor" \
+    "unknown kind ${FM_OPERATIONAL_MARK}/FIRSTMATE_OP: v1 watcher"
+  do
+    fm_operational_input_provenance "$fixture" parsed \
+      && fail "ordinary input read as $parsed: $fixture"
+    [ -z "$(provenance_cli "$fixture" || true)" ] || fail "the CLI gave ordinary input a provenance: $fixture"
+  done
+  pass "operational input: ordinary, quoting, continued, and look-alike input never reads as machine text"
+}
+
 test_current_generic_matrix
+test_tailed_kind_ends_with_trailing_sentinel
+test_front_truncated_digest_reads_truncated
+test_ordinary_input_never_reads_truncated
 test_current_from_firstmate_carrier
 test_landed_untyped_prefix_is_explicitly_legacy
 test_isolated_legacy_matrix
