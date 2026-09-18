@@ -577,9 +577,18 @@ SH
   chmod +x "$case_dir/fakebin/mv"
 }
 
+# A worker that started leaves a status line from its first phase; completion
+# closes only work something shows was started (bin/fm-teardown.sh
+# teardown_work_was_started). The fixture records stand in for such workers,
+# and the unstarted cases remove this line to model a worker that never ran.
+mark_worker_started() {  # <case-dir> <id>
+  printf 'working: fixture worker started\n' >> "$(home_of "$1")/state/$2.status"
+}
+
 write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
   local case_dir=$1 id=$2 kind=$3 mode=$4
   shift 4
+  mark_worker_started "$case_dir" "$id"
   fm_write_meta "$(home_of "$case_dir")/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
@@ -603,7 +612,8 @@ run_spawn() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" 2>&1 || return $?
+  mark_worker_started "$case_dir" "$1"
 }
 
 run_ship_spawn() {  # <case-dir> <id>
@@ -3012,10 +3022,9 @@ row_links() {  # <case-dir> <id>
 
 idle_fleet_ready_count() {  # <case-dir>
   (
-    PATH="$1/fakebin:$PATH"
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-idle-fleet-lib.sh"
-    fm_idle_fleet_ready_count "$(home_of "$1")"
+    PATH="$1/fakebin:$PATH" fm_idle_fleet_ready_count "$(home_of "$1")"
   )
 }
 
@@ -3051,7 +3060,7 @@ test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
     --delivers group-a-g1,group-b-g1) || fail "grouped spawn failed: $out"
   meta="$(home_of "$case_dir")/state/$unit.meta"
-  assert_exact_line "delivers=group-a-g1,group-b-g1" "$meta" \
+  assert_exact_line "$meta" "delivers=group-a-g1,group-b-g1" \
     "the grouped dispatch did not record its membership in the unit's record"
   for id in "$unit" group-a-g1 group-b-g1; do
     [ "$(row_state "$case_dir" "$id")" = in_flight ] \
@@ -3094,16 +3103,16 @@ test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
 }
 
 grouped_unit_in_flight() {  # <case-dir> <unit> <members-csv> [extra-meta-line...]
-  local case_dir=$1 unit=$2 members=$3 m
+  local case_dir=$1 unit=$2 member_csv=$3 m
   shift 3
   add_item "$case_dir" "$unit"
   start_item "$case_dir" "$unit"
-  for m in ${members//,/ }; do
+  for m in ${member_csv//,/ }; do
     add_item "$case_dir" "$m"
     start_item "$case_dir" "$m"
   done
   write_task_meta "$case_dir" "$unit" ship no-mistakes "spawn_gen=spawn-$unit" \
-    "delivers=$members" "$@"
+    "delivers=$member_csv" "$@"
   printf 'done: PR https://github.com/example/repo/pull/42 checks green run=r1\n' \
     > "$(home_of "$case_dir")/state/$unit.status"
 }
@@ -3138,7 +3147,7 @@ test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason() {
     "$ROOT/bin/fm-tasks-axi.sh" handback "$unit" group-c-g4 \
     --reason "investigation answered; its recommendation was deliberately not built") \
     || fail "handback failed: $out"
-  assert_exact_line "delivers=group-a-g4,group-b-g4" "$(home_of "$case_dir")/state/$unit.meta" \
+  assert_exact_line "$(home_of "$case_dir")/state/$unit.meta" "delivers=group-a-g4,group-b-g4" \
     "handback did not drop the member from the unit's membership"
   [ "$(row_state "$case_dir" group-c-g4)" = queued ] \
     || fail "handback left the member $(row_state "$case_dir" group-c-g4)"
@@ -3169,7 +3178,7 @@ test_handback_refuses_an_item_the_unit_does_not_deliver() {
     "$ROOT/bin/fm-tasks-axi.sh" handback "$unit" stranger-g5 --reason "not ours" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "handback accepted an item outside the unit's membership"
   assert_contains "$out" "does not deliver stranger-g5" "the refusal did not name the membership"
-  assert_exact_line "delivers=group-a-g5" "$(home_of "$case_dir")/state/$unit.meta" \
+  assert_exact_line "$(home_of "$case_dir")/state/$unit.meta" "delivers=group-a-g5" \
     "a refused handback changed the unit's membership"
   pass "handback refuses an item the unit does not deliver"
 }
@@ -3271,6 +3280,7 @@ test_cleanup_of_an_unstarted_task_requeues_it_instead_of_closing() {
   # A worker that died at launch: a record, but no status line, no PR, and no
   # local copy holding a commit.
   write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-unstarted"
+  rm -f "$(home_of "$case_dir")/state/$id.status"
 
   out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = queued ] \

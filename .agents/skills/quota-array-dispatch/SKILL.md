@@ -81,7 +81,8 @@ Uncertainty and ineligibility are different findings:
 - No model-level window, no matching auth source, an unmeasurable or `unknown` scope, or a surface quota-axi does not model at all is disclosed uncertainty.
   Keep the candidate eligible, state the unknown, and prefer known viable evidence when otherwise comparable.
 - An expired credential is a short-lived session token the owning vendor renews on next use, not a sign-out.
-- Only concrete contradictory evidence blocks: an authoritative catalog proving the model unsupported, or proof that the credential the candidate actually selects is unusable.
+- Only concrete contradictory evidence blocks: an authoritative catalog proving the model unsupported, proof that the credential the candidate actually selects is unusable, or a harness CLI absent from this host's `PATH`.
+- Quota headroom is a fact about the account, never about this host: a candidate at full headroom whose CLI is not installed is still unavailable, and `bin/fm-spawn.sh` refuses its launch.
 - Reserve login wording for that proven-unusable case, and name the harness, model, surface, and evidence.
 
 When a credential's local classification is the only thing standing between a candidate and a block, get ground truth before blocking.
