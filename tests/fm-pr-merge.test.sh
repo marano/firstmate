@@ -1265,6 +1265,25 @@ test_github_without_gh_failed_read_keeps_bookkeeping() {
   pass "fm-pr-merge refuses a GitHub merge when gh is missing rather than merging blind"
 }
 
+test_a_hanging_mock_turns_the_case_red_not_hung() {
+  local case_dir rc started PR_MERGE_TIMEOUT=3
+  case_dir=$(make_case hanging-mock)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$case_dir/fakebin/gh"
+  started=$(date +%s)
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/128 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 124 "$rc" "hanging-mock: a stuck forge mock must end the run on the watchdog"
+  [ $(( $(date +%s) - started )) -lt 60 ] || fail "hanging-mock: the watchdog did not bound the run"
+  assert_grep 'watchdog: killed the merge after 3s' "$case_dir/stderr" \
+    "hanging-mock: the watchdog did not say why the run ended"
+  pass "a stuck mock turns a merge case red instead of hanging the suite"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
   local case_dir rc
   case_dir=$(make_case github-zero-exit-queue-required)
@@ -3726,3 +3745,4 @@ test_unvalidated_waiver_is_explicit_and_attended_only
 test_direct_pr_merges_only_on_an_explicit_instruction
 test_task_without_a_mode_needs_the_validation_proof
 test_gitlab_merge_request_needs_the_validation_proof
+test_a_hanging_mock_turns_the_case_red_not_hung
