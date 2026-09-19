@@ -124,10 +124,28 @@ case "${1:-} ${2:-}" in
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac
 SH
-  chmod +x "$home/fakebin/gh" "$home/fakebin/gh-axi"
+  # fm-pr-merge.sh merges only a head a no-mistakes run validated, so the
+  # pipeline answers every run lookup - by id or from a task's local copy - with
+  # a passing run at the fixture head for the pull request being merged.
+  cat > "$home/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = "axi status" ] || exit 0
+printf 'run:\n  id: "%s"\n  branch: fm/example-branch\n  status: running\n' "${4:-$FM_TEST_MERGE_RUN}"
+printf '  head_sha: 1111111111111111111111111111111111111111\n  pr: "%s"\n' "$FM_TEST_MERGE_PR"
+printf '  steps[9]{step,status,findings,duration_ms}:\n'
+for step in intent rebase review test document lint push pr; do
+  printf '    %s,completed,0,1\n' "$step"
+done
+printf '    ci,running,0,0\n'
+SH
+  chmod +x "$home/fakebin/gh" "$home/fakebin/gh-axi" "$home/fakebin/no-mistakes"
   : > "$home/gh.log"
   : > "$home/gh-axi.log"
 }
+
+# The run the fixture pipeline reports; a task with no local copy on disk names
+# it in its status log instead.
+MERGE_RUN=01TESTMERGERUN
 
 run_pr_merge() {  # <home> <id> <url>
   local home=$1
@@ -135,7 +153,8 @@ run_pr_merge() {  # <home> <id> <url>
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
-    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
+    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" FM_TEST_MERGE_PR="${2:-}" \
+    FM_TEST_MERGE_RUN="$MERGE_RUN" "$ROOT/bin/fm-pr-merge.sh" "$@"
 }
 
 wait_for_test_file() {  # <path> <pid>
@@ -3267,6 +3286,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   id=sample-missing-pr-authority
   pr=https://github.com/sample/sample/pull/43
   write_origin_meta "$home" "$id" ship
+  printf 'done: merge ready run=%s\n' "$MERGE_RUN" > "$home/state/$id.status"
 
   # A backlog that exists but cannot be read may hide a live captain hold, so
   # the merge must refuse without reaching the forge.
