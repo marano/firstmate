@@ -75,8 +75,9 @@
 # run=<id> in the task's status log and the run `no-mistakes axi status`
 # reports from the task's local copy. One proves the head when its record names
 # this pull request and its head branch, its head_sha equals the verified live
-# head exactly, and its steps table lists review and test with every step other
-# than ci completed; ci is covered by the live green check above. A task that
+# head exactly, and its steps table lists review and test both completed with no
+# other step failed; ci is ignored, covered by the live green check above, and
+# any other step that was skipped, configured off, or not yet run does not refuse. A task that
 # records mode direct-PR or local-only has no run behind it by definition, and
 # every other recorded mode, or none, is held to the no-mistakes proof. An unproven head is refused, naming the missing evidence
 # per candidate, unless --unvalidated is passed for an explicit captain
@@ -1338,7 +1339,7 @@ local_copy_run_id() {
 FM_PR_VALIDATION_REASON=
 validation_run_proves_head() {  # <run-id> <head-branch>
   local run=$1 branch=$2 out rc=0 pr canon run_branch run_head row step rest status
-  local saw_review=0 saw_test=0 incomplete=''
+  local saw_review=0 saw_test=0 incomplete='' failed=''
   out=$(fm_nm_run_bounded "$STATE" "$FM_PR_NM_TIMEOUT" axi status --run "$run" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
     out=$(printf '%s\n' "$out" | head -1)
@@ -1373,10 +1374,14 @@ validation_run_proves_head() {  # <run-id> <head-branch>
     status=$(fm_nm_strip_quotes "${rest%%,*}")
     case "$step" in
       ci) continue ;;
-      review) saw_review=1 ;;
-      test) saw_test=1 ;;
+      review|test)
+        [ "$step" = review ] && saw_review=1 || saw_test=1
+        [ "$status" = completed ] || incomplete="${incomplete:+$incomplete, }$step (${status:-no status})"
+        ;;
+      *)
+        [ "$status" != failed ] || failed="${failed:+$failed, }$step (failed)"
+        ;;
     esac
-    [ "$status" = completed ] || incomplete="${incomplete:+$incomplete, }$step (${status:-no status})"
   done <<ROWS
 $(fm_nm_steps_rows "$out")
 ROWS
@@ -1385,7 +1390,11 @@ ROWS
     return 1
   fi
   if [ -n "$incomplete" ]; then
-    FM_PR_VALIDATION_REASON="run $run did not complete every step before ci: $incomplete"
+    FM_PR_VALIDATION_REASON="run $run did not complete its review and test steps: $incomplete"
+    return 1
+  fi
+  if [ -n "$failed" ]; then
+    FM_PR_VALIDATION_REASON="run $run has failed steps: $failed"
     return 1
   fi
 }

@@ -2396,6 +2396,19 @@ test_green_pr_without_a_validation_run_is_refused() {
   pass "fm-pr-merge refuses a green PR when no validation run exists for its head"
 }
 
+test_run_with_other_steps_skipped_still_merges() {
+  local case_dir head=9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e
+  case_dir=$(make_case lint-document-skipped-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/128 lint=skipped document=skipped
+  run_validation_case "$case_dir" 128
+  expect_code 0 "$(cat "$case_dir/rc")" "lint-document-skipped-run: skipped lint and document must not refuse"
+  assert_grep 'pr merge' "$case_dir/gh.log" "lint-document-skipped-run: gh pr merge did not run"
+  pass "fm-pr-merge accepts a run whose lint and document steps were skipped"
+}
+
 test_run_at_an_older_head_is_refused() {
   local case_dir head=9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c old=1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d
   case_dir=$(make_case older-head-run)
@@ -2420,9 +2433,20 @@ test_run_that_skipped_a_step_or_names_another_pr_is_refused() {
     https://github.com/example/repo/pull/123 review=skipped
   run_validation_case "$case_dir" 123
   expect_code 1 "$(cat "$case_dir/rc")" "skipped-review-run: a run that skipped review must be refused"
-  assert_grep "run $NM_DEFAULT_RUN did not complete every step before ci: review (skipped)" \
+  assert_grep "run $NM_DEFAULT_RUN did not complete its review and test steps: review (skipped)" \
     "$case_dir/stderr" "skipped-review-run: the skipped step was not named"
   assert_no_grep 'pr merge' "$case_dir/gh.log" "skipped-review-run: gh pr merge ran without a review"
+
+  case_dir=$(make_case skipped-test-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 test=skipped
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "skipped-test-run: a run that skipped test must be refused"
+  assert_grep "run $NM_DEFAULT_RUN did not complete its review and test steps: test (skipped)" \
+    "$case_dir/stderr" "skipped-test-run: the skipped test step was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "skipped-test-run: gh pr merge ran without a test"
 
   case_dir=$(make_case run-without-test-step)
   mkdir -p "$case_dir/wt"
@@ -3752,6 +3776,7 @@ test_gitlab_unconfirmed_merge_leaves_branch_alone
 test_validated_merge_names_the_proving_run
 test_green_pr_without_a_validation_run_is_refused
 test_run_at_an_older_head_is_refused
+test_run_with_other_steps_skipped_still_merges
 test_run_that_skipped_a_step_or_names_another_pr_is_refused
 test_local_copy_run_proves_the_head_without_a_recorded_id
 test_unvalidated_waiver_is_explicit_and_attended_only
