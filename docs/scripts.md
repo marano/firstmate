@@ -40,9 +40,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
 | `fm-stock-bash-lane.sh`  | Run the stock macOS Bash 3.2 lane exactly as CI does, so it can run locally before push |
-| `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
+| `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; takes the machine-wide build lock once per script; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
-| `fm-build-lock.sh`       | Machine-wide build/test mutex: run one local build or test at a time in arrival order, stand down on CI, and report a hold that overruns; `bin/mutex` is its bare-word entry point |
+| `fm-build-lock.sh`       | Machine-wide build/test mutex: run one local build or test at a time in arrival order, stand down on CI, pass a nested invocation through inside an existing hold, and report a hold that overruns; `bin/mutex` is its bare-word entry point |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` `@AGENTS.md` pointer, and self-governance guidance (explicit project mark documented in the helper's header and help) |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |

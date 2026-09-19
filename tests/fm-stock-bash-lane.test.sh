@@ -43,6 +43,15 @@ printf '%s\n' "${CI:-}" >"$log/lint-ci"
 printf 'bin/good.sh\n'
 [ -z "${FAKE_BAD_PARSE:-}" ] || printf 'bin/bad.sh\n'
 EOF
+  # The retained regression takes its own build-lock hold; record that it did.
+  cat >"$fx/bin/fm-build-lock.sh" <<'EOF'
+#!/bin/bash
+log="$(cd "$(dirname "$0")/.." && pwd)/log"
+[ "$1" = -- ] && shift
+printf '%s\n' "$*" >"$log/locked"
+exec "$@"
+EOF
+  chmod +x "$fx/bin/fm-build-lock.sh"
   printf 'echo ok\n' >"$fx/bin/good.sh"
   printf 'if then fi (\n' >"$fx/bin/bad.sh"
   cat >"$fx/tests/fm-public-followup.test.sh" <<'EOF'
@@ -116,6 +125,9 @@ $fx/log/timing.json" "$args" "lane did not run the runner's stock-bash selection
     "parse sweep did not list the CI-context canonical set"
   assert_equals test_first_register_succeeds_with_empty_lock_list_under_bash32 "$(cat "$fx/log/pf-only")" \
     "lane did not run the retained public-followup regression by name"
+  # Mutant: run the retained regression with a bare `bash` again.
+  assert_contains "$(cat "$fx/log/locked" 2>/dev/null)" "tests/fm-public-followup.test.sh" \
+    "the retained regression did not run under its own build-lock hold"
   pass "the lane runs the runner's selection and pins under stock Bash despite a newer bash on PATH"
 }
 

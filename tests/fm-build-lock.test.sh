@@ -31,6 +31,9 @@ export FM_BUILD_LOCK_DIR="$LOCK_ROOT"
 export FM_BUILD_LOCK_CI=0
 export FM_BUILD_LOCK_POLL=0.1
 export FM_BUILD_LOCK_NOTICE_INTERVAL=1
+# A hold inherited from whatever runs this suite names another lock; drop it so
+# every case starts outside any hold.
+unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
 
 # Count the lock's own artifacts in a root. Zero means the lock was never taken
 # or was fully released, including the owner directory the lockdir mutex links.
@@ -617,6 +620,49 @@ FM_BUILD_LOCK_WAIT_WARN=nonsense "$SCRIPT" true >/dev/null 2>&1
 expect_code 2 $? "a malformed ceiling must be refused rather than silently ignored"
 assert_equals "$LOCK_ROOT/fm-build-lock" "$("$SCRIPT" --lock-path)" "--lock-path must print the resolved lock"
 pass "argument and environment handling refuses bad input instead of guessing"
+
+# --- a nested invocation inside a hold runs straight through ----------------
+# `mutex` around a command that itself takes the lock - bin/fm-test-run.sh
+# takes it per script - must not wait on its own ancestor forever.
+# Mutant: drop the "nested inside a hold" passthrough; the inner invocation then
+# queues behind its own holder and the bounded wait below reds.
+
+# shellcheck disable=SC2016 # The child sh expands its own positional argument.
+"$SCRIPT" "$SCRIPT" sh -c 'printf "nested\n" >"$1"' _ "$TMP_ROOT/nested.out" \
+  >/dev/null 2>"$TMP_ROOT/nested.err" &
+NESTED=$!
+await_pid_exit "$NESTED" 100 || fail "a nested invocation inside a hold deadlocked on its own holder"
+wait "$NESTED" 2>/dev/null
+expect_code 0 $? "a nested invocation inside a hold must succeed"
+assert_equals 'nested' "$(cat "$TMP_ROOT/nested.out" 2>/dev/null)" "the nested command must run"
+
+# A hold variable naming a process that does NOT own the lock is foreign, not a
+# pass: it must queue behind the real holder like any other invocation.
+# Mutant: drop the check that the named pid is the lock's recorded owner; the
+# foreign invocation then runs at once, ahead of the holder finishing.
+FOREIGN_ORDER="$TMP_ROOT/foreign.order"
+FOREIGN_MARK="$TMP_ROOT/foreign-hold"
+: >"$FOREIGN_ORDER"
+"$SCRIPT" sh -c "touch '$FOREIGN_MARK'; sleep 1.5; echo holder-done >>'$FOREIGN_ORDER'" \
+  >/dev/null 2>&1 &
+FOREIGN_HOLDER=$!
+await_path "$FOREIGN_MARK" || fail "the foreign-hold fixture never started"
+FM_BUILD_LOCK_HELD_BY=$$ FM_BUILD_LOCK_HELD_LOCK="$LOCK_ROOT/fm-build-lock" \
+  "$SCRIPT" sh -c "echo foreign >>'$FOREIGN_ORDER'" >/dev/null 2>&1
+wait "$FOREIGN_HOLDER" 2>/dev/null || true
+assert_equals "holder-done
+foreign" "$(cat "$FOREIGN_ORDER")" "a hold variable naming a non-owner must not bypass the lock"
+pass "a nested invocation inside a hold runs straight through, and a foreign hold variable does not"
+
+# --- --help teaches one invocation per run ----------------------------------
+# Workers are pointed at --help as the contract, so it must carry the wrap rule.
+# Mutant: drop the "Never put one invocation around a loop" sentence.
+
+"$SCRIPT" --help >"$TMP_ROOT/help.out" 2>&1 || fail "--help failed"
+assert_grep 'ONE INVOCATION PER RUN' "$TMP_ROOT/help.out" "--help must state one invocation per run"
+assert_grep 'Never put one invocation around a' "$TMP_ROOT/help.out" \
+  "--help must forbid one invocation around a loop of separate runs"
+pass "--help states one invocation per run, never one around a loop of runs"
 
 assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "the suite must leave no lock behind"
 pass "fm-build-lock behaves"
