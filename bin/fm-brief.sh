@@ -393,10 +393,13 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    suite, a full CI script - prefixed with \`mutex\`, as in \`mutex pnpm run ci\`. Other workers
    share these cores and this memory, and an unwrapped build racing another worker's suite has
    produced false test failures on unmodified code. Leave obviously cheap commands unwrapped.
-   Wrap the WHOLE run in ONE invocation, never one per test, file or module: the lock is
-   machine-wide, so per-unit wrapping turns one hold into hundreds of handovers that other
-   workers have to queue behind.
+   ONE \`mutex\` PER RUN: a run is one build or suite command you would otherwise issue once.
+   Never split one run into per-test, per-file or per-module invocations just to wrap them.
+   Never put one \`mutex\` around a loop, script or \`&&\` chain of several runs, such as a
+   baseline plus mutants; wrap each run in the loop instead, so a queued worker's run can go
+   between two of yours rather than wait out the whole loop.
    A queued \`mutex\` hold is a wait like any other: declare it under rule 4 before you block on it.
+   However long it lasts, never run the command without \`mutex\` to get out of the line.
    \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
    If \`mutex\` is not on PATH, run \`$FM_ROOT/bin/fm-build-lock.sh\` directly; its \`--help\` owns
    the contract.

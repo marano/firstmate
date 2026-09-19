@@ -8,10 +8,15 @@
 #   fm-stock-bash-lane.sh --list            print the test scripts it runs
 #   fm-stock-bash-lane.sh --help
 #
-# Run it locally before pushing a change to firstmate's shell, under the
-# machine-wide build lock, and treat a failure as a stop:
+# Run it locally before pushing a change to firstmate's shell, and treat a
+# failure as a stop:
 #
-#   mutex bin/fm-stock-bash-lane.sh
+#   bin/fm-stock-bash-lane.sh
+#
+# Do not wrap it in `mutex`: bin/fm-test-run.sh already takes the machine-wide
+# build lock once per script, and the retained regression below takes its own
+# hold, so other workers' builds go between two tests instead of queueing behind
+# the whole ~20 minute lane.
 #
 # It is where the day's CI-only failures landed. The lane does not only vary
 # the shell: it runs 130-odd scripts a targeted local run never selects, and it
@@ -145,7 +150,7 @@ run_args=(--lane stock-bash
 # The public-followup file is cost-excluded from the lane, but this lane already
 # covered ONE test inside it, so that regression is retained by name rather than
 # dropped with the file.
-pf_output=$(FM_TEST_ONLY=$PF_ONLY bash "$PF_TEST")
+pf_output=$("$ROOT/bin/fm-build-lock.sh" -- env FM_TEST_ONLY="$PF_ONLY" bash "$PF_TEST")
 printf '%s\n' "$pf_output"
 pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
 [ "$pf_count" -eq 1 ] || {

@@ -1092,8 +1092,18 @@ test_ship_and_scout_teach_the_build_mutex() {
       "$kind brief did not name the commands the rule covers"
     assert_grep 'mutex pnpm run ci' "$brief" \
       "$kind brief did not show a concrete wrapped invocation"
-    assert_grep 'Wrap the WHOLE run in ONE invocation' "$brief" \
+    # Mutant: drop the "Never split one run" line.
+    assert_grep 'Never split one run into per-test, per-file or per-module invocations' "$brief" \
       "$kind brief did not say the mutex wraps a whole run rather than each unit inside it"
+    # Mutant: drop the "Never put one mutex around a loop" line - every measured
+    # hold over ten minutes was one mutex around a loop of separate runs.
+    assert_grep "Never put one \`mutex\` around a loop, script or \`&&\` chain of several runs" "$brief" \
+      "$kind brief did not forbid one mutex around a loop of separate runs"
+    assert_grep 'wrap each run in the loop instead' "$brief" \
+      "$kind brief did not say to wrap each run of a loop separately"
+    # Mutant: drop the "never run the command without mutex" line.
+    assert_grep "never run the command without \`mutex\` to get out of the line" "$brief" \
+      "$kind brief did not forbid leaving the line by running unlocked"
     assert_grep 'stands down by itself on CI' "$brief" \
       "$kind brief did not say the mutex stands down on CI without the worker reasoning about it"
     assert_grep 'bin/fm-build-lock.sh' "$brief" \

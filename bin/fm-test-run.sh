@@ -88,7 +88,8 @@
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
-#   --max-wall-ms N fail the run when its measured invocation wall clock exceeds
+#   --max-wall-ms N fail the run when its measured invocation wall clock, less
+#                   time spent waiting for the build lock, exceeds
 #                   N milliseconds, including an empty selection. It is
 #                   evaluated after selection and suite execution and cannot
 #                   interrupt a running script; per-script hangs are
@@ -104,7 +105,18 @@
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
-#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
+#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n> [lock_wait_ms=<n>]
+#                   (only with --max-wall-ms; duration_ms excludes lock_wait_ms,
+#                   the time spent in line for the build lock)
+#
+# Build lock:
+#   Every executing mode runs each script under bin/fm-build-lock.sh, one hold
+#   per serial script, or one hold for a whole concurrent phase. Other workers'
+#   builds can go between serial scripts and between concurrent phases, not
+#   inside a concurrent phase. Do not wrap this runner in `mutex`: that holds
+#   the lock around the whole loop, the pattern measured in
+#   docs/verification/build-lock-contention.md. Lock waits are excluded from
+#   script durations and per-script bounds; see build_lock_hold below.
 #
 # Placement refusal:
 #   A task worker is assigned an isolated worktree, and that placement is
@@ -2540,9 +2552,82 @@ declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
 
+# --- the machine-wide build lock, one hold per script ------------------------
+#
+# Every script this runner executes runs under bin/fm-build-lock.sh, one hold
+# per serial script (released between scripts), or one hold for a whole
+# concurrent phase (held from its first worker until its last finishes or the
+# next phase break, so its length is the phase's): never one hold around the whole
+# loop, which is what kept every other worker's build waiting 20-30 minutes
+# behind a single firstmate test run (docs/verification/build-lock-contention.md).
+# So a caller does not wrap this runner in `mutex`; one that still does keeps
+# the legacy whole-run hold, because a nested acquire inside a hold runs
+# straight through rather than deadlocking.
+#
+# The hold is taken by a small holder process started under the lock, which
+# signals once it is in and releases when told to or when this runner dies. That
+# keeps the lock's waiting notices on this runner's stderr, out of the script
+# output that gate-skip detection reads, and keeps the wait outside each
+# script's duration and its --per-script-timeout-secs bound: a healthy script
+# must never be timed out, or reported slow, for time it spent in line. The
+# holder's hold is handed to the script through the lock's own nested-hold
+# variables, so a script that itself runs this runner or `mutex` passes through.
+BUILD_LOCK="$ROOT/bin/fm-build-lock.sh"
+BUILD_LOCK_N=0
+BUILD_LOCK_PID=
+BUILD_LOCK_RELEASE=
+BUILD_LOCK_HELD_BY=
+BUILD_LOCK_HELD_LOCK=
+BUILD_LOCK_WAIT_MS=0
+
+build_lock_hold() {
+  local acquired begin rc=0 held
+  [ -z "$BUILD_LOCK_PID" ] || return 0
+  [ -x "$BUILD_LOCK" ] || die "build lock not found: $BUILD_LOCK"
+  BUILD_LOCK_N=$((BUILD_LOCK_N + 1))
+  acquired="$RUN_TMP/build-lock.$BUILD_LOCK_N.in"
+  BUILD_LOCK_RELEASE="$RUN_TMP/build-lock.$BUILD_LOCK_N.release"
+  begin=$(now_ms)
+  # Expansion is intentionally deferred to the child bash passed to -c.
+  # shellcheck disable=SC2016
+  FM_BUILD_LOCK_POLL=${FM_BUILD_LOCK_POLL:-0.2} "$BUILD_LOCK" -- bash -c '
+    printf "%s\t%s\n" "${FM_BUILD_LOCK_HELD_BY:-}" "${FM_BUILD_LOCK_HELD_LOCK:-}" >"$1.tmp" \
+      && mv -f "$1.tmp" "$1" || exit 1
+    while [ ! -e "$2" ] && kill -0 "$3" 2>/dev/null; do sleep 0.05; done
+  ' _ "$acquired" "$BUILD_LOCK_RELEASE" "$$" >/dev/null </dev/null &
+  BUILD_LOCK_PID=$!
+  while [ ! -e "$acquired" ]; do
+    if ! kill -0 "$BUILD_LOCK_PID" 2>/dev/null; then
+      set +e
+      wait "$BUILD_LOCK_PID"
+      rc=$?
+      set -e
+      BUILD_LOCK_PID=
+      die "could not take the machine-wide build lock (bin/fm-build-lock.sh exit $rc)"
+    fi
+    sleep 0.02
+  done
+  IFS=$'\t' read -r BUILD_LOCK_HELD_BY BUILD_LOCK_HELD_LOCK <"$acquired" || true
+  held=$(( $(now_ms) - begin ))
+  [ "$held" -ge 0 ] || held=0
+  BUILD_LOCK_WAIT_MS=$((BUILD_LOCK_WAIT_MS + held))
+}
+
+build_lock_release() {
+  [ -n "$BUILD_LOCK_PID" ] || return 0
+  : >"$BUILD_LOCK_RELEASE" 2>/dev/null || true
+  set +e
+  wait "$BUILD_LOCK_PID" 2>/dev/null
+  set -e
+  BUILD_LOCK_PID=
+  BUILD_LOCK_HELD_BY=
+  BUILD_LOCK_HELD_LOCK=
+}
+
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup_run() {
+  build_lock_release
   rm -rf "$RUN_TMP"
 }
 
@@ -2666,6 +2751,12 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
+  # The same scoping hands the script this runner's build-lock hold, so a
+  # nested acquire inside it passes straight through instead of deadlocking.
+  local FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
+  if [ -n "$BUILD_LOCK_HELD_BY" ]; then
+    export FM_BUILD_LOCK_HELD_BY="$BUILD_LOCK_HELD_BY" FM_BUILD_LOCK_HELD_LOCK="$BUILD_LOCK_HELD_LOCK"
+  fi
   local rc
   : "$id"
   set +e
@@ -2702,6 +2793,7 @@ run_one_serial() {
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
+  build_lock_hold
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
@@ -2717,6 +2809,7 @@ run_one_serial() {
 
   end_ms=$(now_ms)
   end_iso=$(now_iso)
+  build_lock_release
   duration=$((end_ms - begin_ms))
   if [ "$duration" -lt 0 ]; then
     duration=0
@@ -2809,11 +2902,15 @@ else
       while [ "$active_workers" -gt 0 ]; do
         wait_one_completed_job_worker
       done
+      build_lock_release
       continue
     fi
     while [ "$active_workers" -ge "$JOBS" ]; do
       wait_one_completed_job_worker
     done
+    # One hold spans the whole concurrent phase, not each script in it: its workers
+    # share the machine together, and it is released only at a phase break or drain.
+    build_lock_hold
     worker_n=$((worker_n + 1))
     work="$RUN_TMP/w$worker_n"
     mkdir -p "$work/tmp"
@@ -2854,6 +2951,7 @@ else
   while [ "$active_workers" -gt 0 ]; do
     wait_one_completed_job_worker
   done
+  build_lock_release
   # Unproven remainder, after every concurrent worker has finished.
   for script in "${SERIAL_TAIL_SCRIPTS[@]+"${SERIAL_TAIL_SCRIPTS[@]}"}"; do
     run_one_serial "$script"
@@ -2912,9 +3010,14 @@ if [ -n "$JSON_PATH" ]; then
 fi
 
 if [ -n "$MAX_WALL_MS" ]; then
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$RUN_DURATION"
-  if [ "$RUN_DURATION" -gt "$MAX_WALL_MS" ]; then
-    log "wall-clock budget exceeded: ${RUN_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
+  # Time spent waiting in line for the build lock is other workers' work, not
+  # this run's, so the budget measures the run without it.
+  BUDGET_DURATION=$((RUN_DURATION - BUILD_LOCK_WAIT_MS))
+  [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s lock_wait_ms=%s\n' \
+    "$MAX_WALL_MS" "$BUDGET_DURATION" "$BUILD_LOCK_WAIT_MS"
+  if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
+    log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
     AGG_RC=1
   fi
 fi

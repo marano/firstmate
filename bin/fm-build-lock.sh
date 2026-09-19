@@ -52,9 +52,31 @@
 # its luck in a race. An unordered retry loop is not merely theoretically
 # unfair: a worker that wrapped each individual test in its own invocation
 # released and re-acquired hundreds of times in a row and starved a fairly
-# waiting worker past its 600s ceiling. WRAP A WHOLE BUILD OR TEST RUN IN ONE
-# INVOCATION, never each unit inside it; ordering keeps that mistake from
-# starving anyone, but it cannot make hundreds of handovers cheap.
+# waiting worker past its 600s ceiling.
+#
+# ONE INVOCATION PER RUN. A run is one build or suite command a caller would
+# otherwise issue once: wrap exactly that. Never split one run into per-unit
+# invocations to wrap them - ordering keeps that from starving anyone, but it
+# cannot make hundreds of handovers cheap. Never put one invocation around a
+# loop, script or chain of several runs either, such as a baseline plus
+# mutants: wrap each run in the loop, so arrival order lets a queued caller's
+# run go between two of them. Every hold longer than ten minutes measured in
+# docs/verification/build-lock-contention.md was one invocation around such a
+# loop, the longest 107 minutes with five callers queued behind it. A long wait
+# is still a wait: running the command outside this lock to leave the line
+# silently breaks exclusion for every build on the machine.
+#
+# A NESTED INVOCATION INSIDE A HOLD RUNS STRAIGHT THROUGH. The lock is not
+# reentrant, so a wrapped command that itself calls this script - `mutex` around
+# bin/fm-test-run.sh, which takes the lock per script - would wait on its own
+# ancestor forever. A holder therefore exports FM_BUILD_LOCK_HELD_BY (its pid)
+# and FM_BUILD_LOCK_HELD_LOCK (the lock path) to the wrapped command, and an
+# invocation that finds both naming the lock it resolved, with that pid still
+# the lock's live owner, runs its command without queueing: it is already
+# inside that hold. So does an invocation whose lock owner (LOCK/pid) is a live
+# ANCESTOR process, which covers a hold taken by an older entry point that
+# exported no variables. A stale or foreign value, or a non-ancestor owner,
+# falls back to an ordinary acquire.
 #
 # Ordering never outranks getting builds run. A waiting line that cannot be
 # reached at all - a process STOPPED rather than killed still owns any lock it
@@ -70,7 +92,8 @@
 # ticket on every poll, and a ticket nobody is renewing is removed too, so a
 # waiter that stops polling - or a pid number an unrelated process has since
 # been given - cannot hold the head of the line. A renewal always restores the
-# waiter's own place, so no live waiter is ever sent to the back.
+# waiter's own place, so no live waiter is ever sent to the back. A ticket whose
+# age cannot be read is unknown, not old, so it is never reaped on staleness.
 #
 # Environment:
 #   FM_BUILD_LOCK_DIR              directory holding the lock (see LOCK PATH)
@@ -81,6 +104,8 @@
 #   FM_BUILD_LOCK_POLL             acquire poll interval in seconds (default 0.5)
 #   FM_BUILD_LOCK_TICKET_STALE     seconds an unrenewed waiting-line ticket
 #                                  survives, 0 off (default 30)
+#   FM_BUILD_LOCK_HELD_BY          set by a holder for its wrapped command;
+#   FM_BUILD_LOCK_HELD_LOCK        see A NESTED INVOCATION above
 #
 # The lock itself is bin/fm-wake-lib.sh's lockdir mutex, the same primitive the
 # wake queue, merges, captain holds and remote handoffs run on; the waiting line
@@ -368,7 +393,7 @@ fm_build_lock_abandon_order() {  # <why>
 # newest sequence numbers, how many waiters it holds, and how many of them are
 # ahead of <mine> when a sequence number is given.
 fm_build_lock_queue_scan() {  # [mine]
-  local mine=${1:-} entry seq pid age
+  local mine=${1:-} entry seq pid mtime age
   FM_BUILD_LOCK_QUEUE_MIN=
   FM_BUILD_LOCK_QUEUE_MAX=
   FM_BUILD_LOCK_QUEUE_COUNT=0
@@ -383,12 +408,17 @@ fm_build_lock_queue_scan() {  # [mine]
       rm -f -- "$entry" 2>/dev/null || true
       continue
     fi
-    age=$(fm_path_age "$entry")
-    case "$age" in ''|*[!0-9]*) age=0 ;; esac
-    if [ "$TICKET_STALE" -gt 0 ] && [ "$age" -gt "$TICKET_STALE" ]; then
-      rm -f -- "$entry" 2>/dev/null || true
-      continue
-    fi
+    mtime=$(fm_path_mtime "$entry" 2>/dev/null || true)
+    case "$mtime" in
+      ''|*[!0-9]*) ;;
+      *)
+        age=$(( $(date +%s) - mtime ))
+        if [ "$TICKET_STALE" -gt 0 ] && [ "$age" -gt "$TICKET_STALE" ]; then
+          rm -f -- "$entry" 2>/dev/null || true
+          continue
+        fi
+        ;;
+    esac
     FM_BUILD_LOCK_QUEUE_COUNT=$((FM_BUILD_LOCK_QUEUE_COUNT + 1))
     if [ -z "$FM_BUILD_LOCK_QUEUE_MIN" ] || [ "$seq" -lt "$FM_BUILD_LOCK_QUEUE_MIN" ]; then
       FM_BUILD_LOCK_QUEUE_MIN=$seq
@@ -681,6 +711,38 @@ if [ "$MODE" = status ]; then
   exit 0
 fi
 
+# --- nested inside a hold ---------------------------------------------------
+
+case "${FM_BUILD_LOCK_HELD_BY:-}" in
+  ''|*[!0-9]*) : ;;
+  *)
+    if [ "${FM_BUILD_LOCK_HELD_LOCK:-}" = "$LOCK" ] \
+      && [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$FM_BUILD_LOCK_HELD_BY" ] \
+      && fm_pid_alive "$FM_BUILD_LOCK_HELD_BY"; then
+      exec "$@"
+    fi
+    ;;
+esac
+
+# The lock's recorded owner being a live ancestor of this process also means we
+# are inside its hold, whichever entry point or version took it.
+fm_build_lock_owner_is_ancestor() {
+  local owner walk=$$ depth=0
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$owner" || return 1
+  while [ "$depth" -lt 64 ]; do
+    walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
+    case "$walk" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$walk" = "$owner" ] && return 0
+    depth=$((depth + 1))
+  done
+  return 1
+}
+if fm_build_lock_owner_is_ancestor; then
+  exec "$@"
+fi
+
 # --- acquire, run, release --------------------------------------------------
 
 trap fm_build_lock_on_exit EXIT
@@ -705,7 +767,7 @@ fm_build_lock_write_info "$INFO" "$$" "$STARTED" "$DISPLAY_LINE" || true
 # starve any wrapped command that reads input. Job control being off is also why
 # the child stays in this process group, so a terminal interrupt still reaches
 # it directly.
-"$@" <&0 &
+FM_BUILD_LOCK_HELD_BY=$$ FM_BUILD_LOCK_HELD_LOCK=$LOCK "$@" <&0 &
 FM_BUILD_LOCK_CHILD=$!
 
 # SECONDS is bash's own wall clock, so the ceiling costs no fork per tick.

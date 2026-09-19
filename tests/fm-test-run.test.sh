@@ -12,6 +12,27 @@ set -u
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
 
+# The runner takes the machine-wide build lock per script. Every case here uses
+# a private lock root, forced on even on CI, so the suite neither queues behind
+# this machine's real builds nor passes the lock cases vacuously on a runner.
+export FM_BUILD_LOCK_DIR
+FM_BUILD_LOCK_DIR=$(fm_test_tmproot fm-test-run-lock)
+export FM_BUILD_LOCK_CI=0
+export FM_BUILD_LOCK_POLL=0.1
+unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
+
+# Copy the runner into a fixture tree together with the build lock it runs
+# every script under.
+install_runner() {  # <destination-bin-dir-or-path>
+  local dest=$1 dir
+  case "$dest" in
+    */fm-test-run.sh) dir=$(dirname "$dest") ;;
+    *) dir=$dest; dest="$dir/fm-test-run.sh" ;;
+  esac
+  cp "$RUNNER" "$dest"
+  cp "$ROOT/bin/fm-build-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/"
+}
+
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
 
@@ -91,7 +112,7 @@ test_changed_file_selection_is_conservative() {
 init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  install_runner "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -186,7 +207,7 @@ init_primary_and_linked_worktree() {
   git -C "$repo" worktree add --quiet -b linked-probe "$linked"
   for tree in "$repo" "$linked"; do
     mkdir -p "$tree/bin" "$tree/tests"
-    cp "$RUNNER" "$tree/bin/fm-test-run.sh"
+    install_runner "$tree/bin/fm-test-run.sh"
     cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
@@ -511,7 +532,7 @@ PY
   timeout_repo="$tmp/timeout-repo"
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
-  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  install_runner "$timeout_repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
@@ -663,7 +684,7 @@ test_family_proofs_run_in_separate_concurrent_phases() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-family-phases.XXXXXX")
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  install_runner "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
@@ -1016,7 +1037,7 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   tmp=$(fm_test_tmproot fm-test-run-non-lane-schedule)
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  install_runner "$repo/bin/fm-test-run.sh"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
@@ -1322,7 +1343,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unmapped.XXXXXX")
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  install_runner "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
@@ -1440,7 +1461,7 @@ test_per_script_timeout_bounds_a_hang() {
   runner="$repo/bin/fm-test-run.sh"
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$runner"
+  install_runner "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
@@ -1498,13 +1519,13 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast rc summary_duration budget_duration
+  local tmp repo runner fast rc summary_duration budget_duration lock_wait holder
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$runner"
+  install_runner "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
@@ -1519,7 +1540,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "a run inside its budget must pass, got $rc: $(cat "$tmp/under.err")"
-  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+$' "$tmp/under" \
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+ lock_wait_ms=[0-9]+$' "$tmp/under" \
     || fail "an inside-budget run did not report the budget: $(cat "$tmp/under")"
 
   # Same green script, budget it cannot meet: the run must FAIL.
@@ -1534,12 +1555,34 @@ SH
     || fail "an over-budget run omitted its family summary: $(cat "$tmp/over")"
   grep -Eq '^FM_TEST_SLOWEST rank=1 .+$' "$tmp/over" \
     || fail "an over-budget run omitted its slowest result: $(cat "$tmp/over")"
-  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+$' "$tmp/over" \
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+ lock_wait_ms=[0-9]+$' "$tmp/over" \
     || fail "an over-budget run omitted its budget result: $(cat "$tmp/over")"
   summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
   budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
-  [ "$budget_duration" = "$summary_duration" ] \
-    || fail "budget verdict used a different duration than the summary: $(cat "$tmp/over")"
+  lock_wait=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^lock_wait_ms=/) { sub(/^lock_wait_ms=/, "", $i); print $i } }' "$tmp/over")
+  # The verdict is the summary's wall clock less only the time spent in line for
+  # the build lock, which is other workers' work rather than this run's.
+  [ "$((budget_duration + lock_wait))" = "$summary_duration" ] \
+    || fail "budget verdict used a different duration than the summary less its lock wait: $(cat "$tmp/over")"
+
+  # A healthy run that first waits in line behind another build must not fail
+  # its budget for that wait: this is how a fixed step cap once reported a
+  # healthy run as a failure of the change under test.
+  # Mutant: compare the budget against the whole wall clock, wait included.
+  # shellcheck disable=SC2016 # The child sh expands its own positional argument.
+  "$ROOT/bin/fm-build-lock.sh" sh -c ': >"$1"; sleep 5' _ "$tmp/held" >/dev/null 2>&1 &
+  holder=$!
+  rc=0
+  while [ ! -e "$tmp/held" ] && [ "$rc" -lt 300 ]; do sleep 0.1; rc=$((rc + 1)); done
+  [ -e "$tmp/held" ] || fail "the build-lock holder fixture never started"
+  set +e
+  "$runner" --max-wall-ms 4000 "$fast" >"$tmp/queued" 2>"$tmp/queued.err"
+  rc=$?
+  set -e
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "a run that met its budget after waiting for the build lock failed: $(cat "$tmp/queued" "$tmp/queued.err")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=4000 duration_ms=[0-9]+ lock_wait_ms=([4-9][0-9]{3}|[0-9]{5,})$' "$tmp/queued" \
+    || fail "the queued run did not report its lock wait apart from its duration: $(cat "$tmp/queued")"
 
   # A malformed budget is refused rather than silently ignored.
   set +e
@@ -1569,7 +1612,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
-  cp "$RUNNER" "$runner"
+  install_runner "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -1839,7 +1882,88 @@ SH
   pass "--require-ok-count: pins a script's case count against a silent green"
 }
 
+# A multi-script run takes the build lock once per script and gives it back
+# between scripts, so a worker that queues while one script runs goes before the
+# next one instead of waiting out the whole loop - every measured hold over ten
+# minutes was one lock around such a loop.
+# Mutants, each of which must red:
+#   - drop build_lock_hold from run_one_serial: nothing holds the lock while a
+#     script runs, so the status read inside the script says "free";
+#   - hold once around the whole serial loop instead: the queued worker then
+#     runs after the second script rather than between the two;
+#   - drop the hold hand-down in run_script_bounded: a script that takes the
+#     lock itself deadlocks on the runner's hold until its per-script bound.
+test_multi_script_run_releases_the_build_lock_between_scripts() {
+  local tmp first second nested order waiter rc runner_pid waited
+  tmp=$(fm_test_tmproot fm-test-run-build-lock)
+  first="$tmp/first.test.sh"
+  second="$tmp/second.test.sh"
+  nested="$tmp/nested.test.sh"
+  order="$tmp/order"
+  : >"$order"
+  cat >"$first" <<'SH'
+#!/usr/bin/env bash
+echo first >>"$ORDER"
+"$LOCK_SCRIPT" --status >"$STATUS_OUT"
+: >"$FIRST_IN"
+i=0
+while [ ! -e "$GO" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+echo "ok - first"
+SH
+  cat >"$second" <<'SH'
+#!/usr/bin/env bash
+echo second >>"$ORDER"
+echo "ok - second"
+SH
+  cat >"$nested" <<'SH'
+#!/usr/bin/env bash
+"$LOCK_SCRIPT" sh -c 'echo nested >>"$ORDER"'
+echo "ok - nested"
+SH
+
+  export ORDER="$order" LOCK_SCRIPT="$ROOT/bin/fm-build-lock.sh" STATUS_OUT="$tmp/status" \
+    FIRST_IN="$tmp/first-in" GO="$tmp/go"
+  "$RUNNER" --jobs 1 --per-script-timeout-secs 30 "$first" "$nested" "$second" \
+    >"$tmp/run.out" 2>"$tmp/run.err" &
+  runner_pid=$!
+  waited=0
+  while [ ! -e "$tmp/first-in" ] && [ "$waited" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$tmp/first-in" ] || fail "the first fixture script never started: $(cat "$tmp/run.err")"
+  case "$(cat "$tmp/status")" in
+    'held by pid '*) ;;
+    *) fail "the runner did not hold the build lock while a script ran: $(cat "$tmp/status")" ;;
+  esac
+
+  # Queue a worker behind the running script, then let the script finish.
+  # shellcheck disable=SC2016 # The child sh expands the exported ORDER.
+  "$LOCK_SCRIPT" sh -c 'echo waiter >>"$ORDER"' >/dev/null 2>"$tmp/waiter.err" &
+  waiter=$!
+  waited=0
+  until grep -q 'waiting for the machine-wide build lock' "$tmp/waiter.err" 2>/dev/null \
+    || ! kill -0 "$waiter" 2>/dev/null || [ "$waited" -ge 300 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  : >"$tmp/go"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  wait "$waiter"
+  set -e
+  unset ORDER LOCK_SCRIPT STATUS_OUT FIRST_IN GO
+  [ "$rc" -eq 0 ] || fail "the multi-script run failed ($rc): $(cat "$tmp/run.out" "$tmp/run.err")"
+  assert_equals "first
+waiter
+nested
+second" "$(cat "$order")" \
+    "the runner must release the build lock between scripts and hand its hold to a nested acquire"
+  "$ROOT/bin/fm-build-lock.sh" --status >"$tmp/after" 2>&1 || true
+  assert_equals free "$(cat "$tmp/after")" "the runner must leave the build lock free when it finishes"
+  pass "a multi-script run holds the build lock per script, lets a queued worker in between, and hands its hold to a nested acquire"
+}
+
 test_list_all_exact_suite_coverage
+test_multi_script_run_releases_the_build_lock_between_scripts
 test_stock_bash_lane_is_every_test_minus_named_exclusions
 test_stock_bash_exclusions_carry_a_checkable_reason
 test_require_ok_count_catches_a_shrinking_case_list
