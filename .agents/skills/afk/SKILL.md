@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the captain's first genuine message renders the return brief from durable records before ordinary work resumes.
+  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi or claude; the daemon still delivers batched digests on the other harnesses for now), and on the captain's first genuine message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -41,7 +41,12 @@ Hold-for-return is the default and the only reach profile this release records: 
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
-   - **Harness WITH a native in-pane tracked-background tool** (claude's background bash, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
+   - **Claude**: stop here too.
+     The Stop-hook supervision (`bin/fm-claude-stop-autoarm.sh`) keeps running with the record present and wakes firstmate for every actionable event without typing into its composer.
+     Typed delivery is unfit there: claude strips the digest's invisible operational markers and swallows the Enter that should submit it, which is how a digest once sat unsent in the composer all night.
+     A wake arrives as Stop hook feedback, which is supervision and never the captain's return; handle it as an ordinary wake under the away posture.
+     `bin/fm-afk-launch.sh start` and `start-native` refuse an away entry on claude; claude keeps the daemon only for `/quiet`.
+   - **Harness WITH a native in-pane tracked-background tool** (grok's background tool, and claude's background bash for `/quiet` only): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
@@ -52,7 +57,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    That shape is safe because the refusal leaves no `state/.afk`, so ordinary Stop-hook supervision keeps running instead of standing down for a daemon that was never delivering.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
-   On Pi nothing changes about arming: the supervision session's own cycle continues.
+   On Pi and on claude away nothing changes about arming: the supervision session's own cycle continues.
 
 ## While away
 
@@ -101,7 +106,7 @@ This release records clauses and does not execute them.
 
 ## The daemon, where it still runs
 
-On the harnesses that still launch the daemon (every verified harness except Pi and pi-signed), the mechanics below are unchanged.
+On the harnesses that still launch the daemon (every verified harness except Pi and pi-signed, plus claude in `/quiet` only), the mechanics below are unchanged.
 
 ### Operational prefix contract
 

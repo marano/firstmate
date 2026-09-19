@@ -23,10 +23,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
-# The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
-# every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
+# The away daemon paths refuse on a Pi or claude primary, so pin a
+# daemon-running harness for every unit below; those refusals have their own
+# units (unit_pi_never_launches_the_daemon, unit_claude_away_never_launches_the_daemon).
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
-export CLAUDECODE=1
+export FM_AFK_LAUNCH_PRIMARY_HARNESS=grok
 # Both daemon entries now require a resolvable supervisor pane, so every unit
 # that exercises LIFECYCLE rather than pane discovery pins one explicitly (the
 # `start` units already did). Discovery itself is owned by
@@ -119,6 +120,41 @@ unit_pi_never_launches_the_daemon() {
     fi
     rm -rf "$st"
   done
+}
+
+# Claude's away posture is the record plus the Stop-hook supervision, never
+# the typed-injection daemon: both daemon entries refuse an away entry and
+# write no daemon state, while /quiet (FM_AFK_MODE=quiet) still prepares one.
+unit_claude_away_never_launches_the_daemon() {
+  local st out rc entry
+  for entry in start start-native; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-claude.XXXXXX")
+    mkdir -p "$st/state"
+    confirm_posture "$st" || fail "claude $entry: could not confirm fixture posture"
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_PRIMARY_HARNESS=claude \
+      FM_SUPERVISOR_TARGET="$PINNED_PANE" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+      "$LAUNCH" "$entry" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'the away daemon is no longer launched on claude' >/dev/null \
+      && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ -f "$st/state/.afk-contract" ]; then
+      pass "claude $entry: an away entry launches no daemon, writes no flag, and keeps the posture record"
+    else
+      fail "claude $entry: away entry did not refuse cleanly (rc=$rc): $out"
+    fi
+    rm -rf "$st"
+  done
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-claude-quiet.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "claude quiet: could not confirm fixture posture"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_PRIMARY_HARNESS=claude FM_AFK_MODE=quiet \
+    FM_SUPERVISOR_TARGET="$PINNED_PANE" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(head -n 1 "$st/state/.afk")" = quiet ]; then
+    pass "claude quiet: /quiet still prepares the daemon lifecycle"
+  else
+    fail "claude quiet: /quiet could not prepare the daemon lifecycle"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
 }
 
 unit_daemon_entry_requires_confirmation() {
@@ -1278,6 +1314,7 @@ e2e_tmux() {
 unit_clear_stale
 unit_propose_confirm_records_the_posture_without_a_daemon
 unit_pi_never_launches_the_daemon
+unit_claude_away_never_launches_the_daemon
 unit_daemon_entry_requires_confirmation
 unit_failed_daemon_launch_preserves_confirmed_record
 unit_stop_archives_the_record_last
