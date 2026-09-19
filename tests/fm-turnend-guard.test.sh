@@ -1586,7 +1586,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm "$dir"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
-    [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
+    assert_not_contains "$out" "automatic supervision mechanism is broken" "failed epoch $i repeated the operator notice"
+    assert_contains "$out" "retry the automatic arm" "failed epoch $i forced a continuation without naming its reason"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "failed epoch $i must consume a bounded blind-stop block"
@@ -1602,8 +1603,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   expect_code 0 "$status" "the auto-arm must not re-trigger continuation after the final fail-open"
   [ -z "$out" ] || fail "post-fail-open auto-arm produced continuation output: $out"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
-  expect_code 2 "$guard_status" "a later unhealthy stop in the same episode must remain attended"
-  assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated in the same episode"
+  expect_code 0 "$guard_status" "a later unhealthy stop in the spent episode must not re-block past its budget"
+  [ -z "$guard_out" ] || fail "a later stop in the spent episode repeated output: $guard_out"
 
   sleep 60 &
   pid=$!
@@ -1686,8 +1687,8 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   done
 
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
-  expect_code 2 "$guard_status" "a later unhealthy stop after the frozen-epoch alarm must remain attended"
-  assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated against the frozen epoch"
+  expect_code 0 "$guard_status" "a later unhealthy stop after the frozen-epoch alarm must not re-block past the budget"
+  [ -z "$guard_out" ] || fail "a later stop after the frozen-epoch alarm repeated output: $guard_out"
 
   # The other direction: the bound must not outlive the failure. A verified
   # healthy watcher still lets the stop through and clears the whole episode.
@@ -1720,10 +1721,12 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   pass "fm-turnend-guard --claude: an inert auto-arm's frozen epoch reaches one bounded fail-open and resets on recovery"
 }
 
-# The same frozen ledger without a verified failure episode: the budget must
-# still provably run out, and the verified-failure gate - not a stuck counter -
-# is what keeps the stop blocking after that.
-test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking() {
+# The same frozen ledger without any auto-arm failure verdict: the episode's
+# budget must still run out, and running out must end the re-blocks. Waiting
+# for the auto-arm to verify its own failure is what let the 2026-09-18
+# episode, whose auto-arms hung mid-arm instead of failing, re-block until
+# Claude's own 8-block override.
+test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_then_alarms_once() {
   local dir out status i count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-unverified")
   : > "$dir/state/task1.meta"
@@ -1731,18 +1734,149 @@ test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_ke
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   for i in 1 2 3 4 5; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-    expect_code 2 "$status" "frozen unverified stop $i must keep blocking"
-    assert_not_contains "$out" 'systemMessage' "an unverified frozen epoch must never fail open"
+    if [ "$i" -le 3 ]; then
+      expect_code 2 "$status" "frozen unverified stop $i must re-block within the budget"
+      assert_contains "$out" "TURN WOULD END BLIND" "frozen unverified re-block $i lost its banner"
+      assert_not_contains "$out" 'systemMessage' "the alarm fired before the budget was spent"
+    elif [ "$i" -eq 4 ]; then
+      expect_code 0 "$status" "the first stop past the budget must raise the alarm instead of re-blocking"
+      assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the spent unverified episode never raised its alarm"
+    else
+      expect_code 0 "$status" "a later stop in the spent episode must not re-block"
+      [ -z "$out" ] || fail "a later stop in the spent episode repeated output: $out"
+    fi
     [ "$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")" = 'epoch=7 owner_pid=999 outcome=clean updated_at=1' ] \
       || fail "the guard rewrote the frozen ledger at stop $i"
   done
   count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
   [ "$count" -gt 3 ] 2>/dev/null || fail "the block budget must run out against a frozen epoch, but the recorded count is ${count:-absent}"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "an unverified frozen epoch recorded an attended alarm"
-  pass "fm-turnend-guard --claude: a frozen unverified epoch spends the budget yet still blocks"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the spent unverified episode did not record its one alarm"
+  pass "fm-turnend-guard --claude: a frozen unverified epoch spends the budget, alarms once, and stops re-blocking"
 }
 
-test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
+# The 2026-09-18 shape itself: the auto-arm claimed a generation and then hung
+# mid-arm (every git call stalled behind a pegged syspolicyd), so its claim is
+# alive and identity-matched but stuck, it never records a failure, and each
+# stop finds nothing owning recovery. The failure episode's budget must bound
+# those re-blocks with no auto-arm verdict at all.
+test_hook_claude_mode_stuck_autoarm_episode_reaches_one_alarm_and_stops_reblocking() {
+  local dir out status pid identity i blocks
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stuck-episode")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf 'epoch=600 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  blocks=0
+  for i in 1 2 3 4 5 6 7 8; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    case "$status" in
+      2)
+        blocks=$((blocks + 1))
+        assert_contains "$out" "TURN WOULD END BLIND" "stuck-episode re-block $i did not name its reason"
+        ;;
+      0) : ;;
+      *) kill "$pid" 2>/dev/null; fail "stuck-episode stop $i exited $status: $out" ;;
+    esac
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$blocks" -eq 3 ] || fail "a stuck auto-arm's failure episode re-blocked $blocks times, not its budget of 3"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the stuck episode never raised its one attended alarm"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "the guard invented an auto-arm failure notice"
+  pass "fm-turnend-guard --claude: a hung auto-arm's failure episode re-blocks only its budget, then alarms once"
+}
+
+# A persistently failing arm that holds each attempt open until the test
+# releases it, so every Stop can run the guard while that firing's generation
+# claim is still open - the ordering a real Stop produces, where both hooks
+# fire together and the guard's wait sees the auto-arm arming.
+write_integrated_gated_failed_arm() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
+printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
+exit 1
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+# The 2026-09-18 loop: with the arm failing on every attempt, each Stop's
+# guard saw that firing's open generation claim and allowed, while the
+# auto-arm answered every failure after its one notice with an EMPTY exit-2
+# rewake. The guard kept charging one budget count per epoch on that allow
+# path, but nothing ever acted on the count, so the rewake loop ran forever
+# with nothing for the model to act on. Every continuation must now name its
+# reason, and the failure episode's re-block budget must end the loop.
+test_hook_claude_mode_failing_autoarm_rewake_loop_is_bounded_and_never_empty() {
+  local dir stop auto_pid auto_status auto_out guard_out guard_status ran before i rewakes budget
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-rewake-loop")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_gated_failed_arm "$dir"
+  budget=3
+  rewakes=0
+  for stop in 1 2 3 4 5 6 7 8 9 10; do
+    rm -f "$dir/state/arm-release"
+    before=$(cat "$dir/state/arm-ran" 2>/dev/null | wc -l)
+    (run_integrated_autoarm "$dir" > "$dir/auto.out"; printf '%s\n' "$?" > "$dir/auto.status") &
+    auto_pid=$!
+    i=0
+    while :; do
+      ran=$(cat "$dir/state/arm-ran" 2>/dev/null | wc -l)
+      [ "$ran" -gt "$before" ] && break
+      # A firing that never reaches the arm is a silent one (the episode is
+      # already alarmed); it has nothing to gate.
+      if ! kill -0 "$auto_pid" 2>/dev/null; then break; fi
+      [ "$i" -lt 250 ] || { kill "$auto_pid" 2>/dev/null; fail "stop $stop: the auto-arm never reached its arm"; }
+      sleep 0.02
+      i=$((i + 1))
+    done
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=2000 run_hook_claude "$dir" true); guard_status=$?
+    : > "$dir/state/arm-release"
+    wait "$auto_pid"
+    auto_status=$(cat "$dir/auto.status")
+    auto_out=$(cat "$dir/auto.out")
+    expect_code 0 "$guard_status" "stop $stop: the guard must defer to the auto-arm's open claim"
+    [ -z "$guard_out" ] || fail "stop $stop: the deferring guard produced output: $guard_out"
+    case "$auto_status" in
+      0)
+        [ -z "$auto_out" ] || fail "stop $stop: a silent auto-arm exit produced output: $auto_out"
+        ;;
+      2)
+        rewakes=$((rewakes + 1))
+        [ -n "$(printf '%s' "$auto_out" | tr -d '[:space:]')" ] \
+          || fail "stop $stop: the auto-arm forced a continuation with an EMPTY message"
+        printf '%s\n' "$auto_out" >> "$dir/rewakes.log"
+        ;;
+      *) fail "stop $stop: unexpected auto-arm exit $auto_status: $auto_out" ;;
+    esac
+  done
+  # One failure notice, at most $budget budgeted retries, and the one attended
+  # alarm: the tenth Stop is far past that, so the loop must have ended.
+  [ "$rewakes" -le $((budget + 2)) ] \
+    || fail "a persistently failing auto-arm forced $rewakes continuations in one failure episode, past its $budget re-block budget"
+  expect_code 0 "$auto_status" "the auto-arm must stay silent once the episode's budget is spent"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the spent episode never recorded its one attended alarm"
+  [ "$(grep -c 'automatic supervision mechanism is broken' "$dir/rewakes.log")" -eq 1 ] \
+    || fail "the episode must deliver exactly one failure notice"$'\n'"$(cat "$dir/rewakes.log")"
+  [ "$(grep -c 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "$dir/rewakes.log")" -eq 1 ] \
+    || fail "the spent episode must deliver exactly one attended alarm"$'\n'"$(cat "$dir/rewakes.log")"
+  [ "$(grep -c 'retry the automatic arm' "$dir/rewakes.log")" -eq "$budget" ] \
+    || fail "each budgeted retry continuation must name why it exists"$'\n'"$(cat "$dir/rewakes.log")"
+  pass "fm-turnend-guard --claude: a failing auto-arm's rewake loop names every reason and ends at the episode budget"
+}
+
+# A healthy watcher allows the stop even when the episode reset cannot take its
+# lock: supervision is verifiably on, so a block would force a continuation
+# with nothing to act on - the empty "Stop hook blocking error" this used to
+# emit - and a holder that stayed busy would re-block every turn end.
+test_hook_claude_mode_recovery_contention_allows_and_retries() {
   local dir pid identity holder out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
   : > "$dir/state/task1.meta"
@@ -1759,7 +1893,7 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_hook_claude "$dir" false); status=$?
-  expect_code 2 "$status" "a healthy guard must continue when the episode reset lock is busy"
+  expect_code 0 "$status" "a healthy guard must allow even when the episode reset lock is busy"
   [ -z "$out" ] || fail "guard recovery contention produced output: $out"
   assert_present "$dir/state/.turnend-claude-blocks" "guard contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "guard contention partially cleared the failure notice"
@@ -1773,7 +1907,7 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   assert_absent "$dir/state/.turnend-claude-blocks" "successful guard reset left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful guard reset left the failure notice"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "successful guard reset left the attended alarm"
-  pass "fm-turnend-guard --claude: reset contention preserves all episode state until retry"
+  pass "fm-turnend-guard --claude: reset contention allows the healthy stop and preserves the episode for a retry"
 }
 
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
@@ -1800,10 +1934,12 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   wait "$pid" 2>/dev/null || true
   auto_status=$(cat "$dir/auto.status")
   guard_status=$(cat "$dir/guard.status")
-  case "$auto_status:$guard_status" in
-    0:0|0:2|2:0) : ;;
-    *) fail "concurrent reset callers returned unsafe statuses auto=$auto_status guard=$guard_status" ;;
-  esac
+  # Neither caller may force a continuation over a healthy watcher: the one
+  # that loses the reset race allows quietly instead of rewaking empty.
+  [ "$auto_status:$guard_status" = 0:0 ] \
+    || fail "concurrent reset callers forced a continuation over a healthy watcher: auto=$auto_status guard=$guard_status"
+  [ ! -s "$dir/auto.out" ] || fail "the concurrent auto-arm produced output: $(cat "$dir/auto.out")"
+  [ ! -s "$dir/guard.out" ] || fail "the concurrent guard produced output: $(cat "$dir/guard.out")"
   assert_absent "$dir/state/.turnend-claude-blocks" "concurrent recovery left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "concurrent recovery left the failure notice"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "concurrent recovery left the attended alarm"
@@ -1823,19 +1959,22 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
-  local dir out status i
+test_hook_claude_mode_budget_exhaustion_alone_raises_one_alarm() {
+  local dir out status i count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
   : > "$dir/state/task1.meta"
-  for i in 1 2 3 4; do
+  for i in 1 2 3; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
     expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+    assert_not_contains "$out" 'systemMessage' "the alarm fired before the budget was spent"
   done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
-  [ "$count" -gt 3 ] 2>/dev/null || fail "four consecutive blocks must spend the budget, but the recorded count is ${count:-absent}"
-  assert_not_contains "$out" 'systemMessage' "budget exhaustion without verified auto-arm failure must not fail open"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified budget exhaustion recorded an attended alarm"
-  pass "fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop"
+  [ "$count" -gt 3 ] 2>/dev/null || fail "four consecutive stops must spend the budget, but the recorded count is ${count:-absent}"
+  expect_code 0 "$status" "budget exhaustion must end the re-blocks with the attended alarm"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "budget exhaustion without an auto-arm verdict never raised the alarm"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "budget exhaustion did not record its one alarm"
+  pass "fm-turnend-guard --claude: budget exhaustion alone ends the re-blocks with one alarm"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1850,14 +1989,16 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   assert_contains "$out" 'Keep this session attended' "bounded fail-open alarm omitted the attended-session action"
   assert_contains "$out" 'diagnose the automatic Stop-hook and watcher startup' "bounded fail-open alarm omitted automatic-mechanism diagnosis"
   assert_not_contains "$out" 'fm-watch-arm.sh' "bounded fail-open alarm assigned a manual watcher launch"
+  printf '%s' "$out" | jq -e '.systemMessage | length > 0' >/dev/null \
+    || fail "the bounded fail-open alarm is not a valid Claude systemMessage: $out"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "bounded fail-open did not consume the episode alarm"
   out2=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status2=$?
-  expect_code 2 "$status2" "a consumed attended alarm must make later unhealthy stops block again"
-  assert_not_contains "$out2" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "attended failure alarm repeated in one episode"
+  expect_code 0 "$status2" "a consumed attended alarm must not restart re-blocks in the spent episode"
+  [ -z "$out2" ] || fail "attended failure alarm repeated in one episode: $out2"
   pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
 }
 
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
+test_hook_claude_mode_budget_alarm_needs_no_autoarm_verdict() {
   local no_notice notice_only out status
   no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
   : > "$no_notice/state/task1.meta"
@@ -1865,29 +2006,37 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
   touch -t 202001010000 "$no_notice/state/.claude-autoarm-epoch"
   seed_claude_budget "$no_notice" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$no_notice" true); status=$?
-  expect_code 2 "$status" "an exhausted failure epoch without the consumed notice must remain blocking"
+  expect_code 0 "$status" "a spent budget without the auto-arm's notice must still end the re-blocks"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "a spent budget without the notice did not alarm"
 
   notice_only=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-epoch")
   : > "$notice_only/state/task1.meta"
   : > "$notice_only/state/.claude-autoarm-failure-notified"
   seed_claude_budget "$notice_only" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$notice_only" true); status=$?
-  expect_code 2 "$status" "a consumed notice without an exhausted failure epoch must remain blocking"
-  pass "fm-turnend-guard --claude: fail-open requires both exhausted retries and consumed notice"
+  expect_code 0 "$status" "a spent budget without a failed auto-arm epoch must still end the re-blocks"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "a spent budget without a failed epoch did not alarm"
+  pass "fm-turnend-guard --claude: the spent budget alone is the alarm's proof, with or without an auto-arm verdict"
 }
 
-test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
+# Away and quiet mode hand supervision to the daemon, so a stop there blocks
+# on the daemon's absence rather than the auto-arm's. The same episode budget
+# bounds those re-blocks, and the alarm names the away-mode repair.
+test_hook_claude_mode_away_mode_budget_alarm_names_away_repair() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk")
   : > "$dir/state/task1.meta"
   : > "$dir/state/.afk"
-  seed_claude_failure "$dir"
-  seed_claude_budget "$dir" 3
+  seed_claude_budget "$dir" 2
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
-  expect_code 2 "$status" "away mode must not use a stale Stop-autoarm failure to fail open"
+  expect_code 2 "$status" "away mode must still re-block within the budget"
   assert_contains "$out" 'Away mode owns watcher supervision' "away-mode block lost its daemon ownership guidance"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "away mode consumed the Stop-autoarm attended alarm"
-  pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "away mode must end the re-blocks once the episode budget is spent"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "away-mode budget exhaustion did not alarm"
+  assert_contains "$out" 'Away mode owns watcher supervision' "the away-mode alarm lost its daemon ownership guidance"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "away-mode budget exhaustion did not record its one alarm"
+  pass "fm-turnend-guard --claude: away mode's re-blocks end at the episode budget with the away-mode repair"
 }
 
 test_hook_claude_mode_allow_resets_budget() {
@@ -2266,14 +2415,16 @@ test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
-test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
-test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_then_alarms_once
+test_hook_claude_mode_stuck_autoarm_episode_reaches_one_alarm_and_stops_reblocking
+test_hook_claude_mode_failing_autoarm_rewake_loop_is_bounded_and_never_empty
+test_hook_claude_mode_recovery_contention_allows_and_retries
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
+test_hook_claude_mode_budget_exhaustion_alone_raises_one_alarm
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
-test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
-test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
+test_hook_claude_mode_budget_alarm_needs_no_autoarm_verdict
+test_hook_claude_mode_away_mode_budget_alarm_names_away_repair
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

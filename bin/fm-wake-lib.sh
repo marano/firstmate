@@ -1393,6 +1393,27 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# The Claude Stop hooks' re-block budget: how many continuations one failure
+# episode may force before both hooks stop forcing them (default 3, safely
+# below Claude Code's own 8-consecutive-block override). The episode runs from
+# its first charged continuation until fm_failure_episode_reset below.
+fm_turnend_block_budget() {
+  local budget=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+  case "$budget" in ''|*[!0-9]*|0) budget=3 ;; esac
+  printf '%s\n' "$budget"
+}
+
+# Continuations charged to the current failure episode, 0 when none.
+# bin/fm-turnend-guard.sh's budget_account_current_epoch owns the charging and
+# the state/.turnend-claude-blocks format; this is the shared read, so the
+# Stop auto-arm stops its own retry continuations at the same bound.
+fm_turnend_block_count() {  # <state-dir>
+  local count
+  count=$(sed -n '2s/^count=//p' "$1/.turnend-claude-blocks" 2>/dev/null || true)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  printf '%s\n' "$count"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
@@ -1652,9 +1673,13 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
 # Write a new outcome for a generation this process still owns, re-verified
 # under the micro-mutex so a superseded owner can never clobber a newer claim.
 # With a fourth argument, create that marker after the ledger rename in the same
-# owned critical section (the once-per-episode failure notice). A marker failure
-# refuses the commit even though its terminal ledger entry remains; marker-first
-# ordering could permanently suppress a notice whose ledger write never won.
+# owned critical section (the once-per-episode failure notice or attended
+# alarm). The marker is created exclusively, so a marker another participant
+# already created - the guard raises the same alarm under this micro-mutex -
+# refuses the commit and the episode's one notice is never delivered twice. A
+# marker failure refuses the commit even though its terminal ledger entry
+# remains; marker-first ordering could permanently suppress a notice whose
+# ledger write never won.
 # Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
 # unable (bounded contention or ledger-write failure).
 fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation]
@@ -1687,7 +1712,7 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     fm_lock_release "$lock"
     return 1
   fi
-  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
+  if [ -n "$marker" ] && ! (set -C; : > "$marker") 2>/dev/null; then
     fm_lock_release "$lock"
     return 2
   fi

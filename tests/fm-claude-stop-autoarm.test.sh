@@ -469,11 +469,70 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
-  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  assert_not_contains "$out2" "automatic supervision mechanism is broken" "consecutive exhausted failure repeated the operator notice"
+  assert_contains "$out2" "retry the automatic arm" "a consecutive exhausted failure forced a continuation without naming its reason"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
   pass "auto-arm: consecutive failures keep Stop-owned retry without repeating notice"
+}
+
+# Every later failure in a notified episode reads the episode's re-block
+# budget, which the guard charges once per generation it observes. Within the
+# budget the continuation names why it exists; the firing that finds it spent
+# carries the one attended alarm and commits its marker, and every later
+# firing in that episode stays silent until positive recovery.
+test_failed_cycles_stop_at_the_episode_budget_with_one_alarm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/failed-budget")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  write_arm_fixture "$dir" failed
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failure with budget left must still retry through a continuation"
+  assert_contains "$out" "3 of 3 charged" "the retry continuation did not name the episode budget it spends"
+  assert_not_contains "$out" "FIRSTMATE SUPERVISION IS GENUINELY DOWN" "the alarm fired while budget remained"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "a within-budget retry recorded the attended alarm"
+
+  printf 'session=sess-autoarm\ncount=4\nepoch=10\n' > "$dir/state/.turnend-claude-blocks"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the firing that finds the budget spent must deliver the one attended alarm"
+  assert_contains "$out" "FIRSTMATE SUPERVISION IS GENUINELY DOWN" "the spent budget did not raise the attended alarm"
+  assert_contains "$out" "Keep this session attended" "the auto-arm alarm omitted the attended-session action"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "the auto-arm alarm assigned a manual watcher launch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the auto-arm alarm did not commit its episode marker"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "the alarm firing must record failed-suppressed"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "no automatic continuation may follow the episode's alarm"
+  [ -z "$out" ] || fail "a firing after the alarm produced output: $out"
+  pass "auto-arm: a notified episode's retries stop at its re-block budget with one attended alarm"
+}
+
+# The guard raises the same alarm under the owner micro-mutex, between the
+# auto-arm's own pre-checks and its commit. The owned commit creates its marker
+# exclusively, so an alarm another participant already recorded refuses this
+# generation's delivery instead of repeating it, while a fresh marker commits.
+test_alarm_commit_refuses_an_alarm_already_raised() {
+  local dir rc
+  dir=$(make_primary_dir "$TMP_ROOT/alarm-commit-exclusive")
+  rc=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    state=$2
+    alarm="$state/.claude-autoarm-failure-alarmed"
+    fm_autoarm_claim_next "$state" 300 || { echo claim-failed; exit 0; }
+    gen=$FM_AUTOARM_MY_GEN
+    : > "$alarm"
+    fm_autoarm_write_owned "$state" "$gen" failed-suppressed "$alarm"
+    raced=$?
+    rm -f "$alarm"
+    fm_autoarm_write_owned "$state" "$gen" failed-suppressed "$alarm"
+    printf "%s:%s\n" "$raced" "$?"
+  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state")
+  [ "$rc" = "2:0" ] || fail "an already-raised alarm must refuse the commit (2) and a fresh one commit (0), got: $rc"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the fresh commit did not create its marker"
+  pass "auto-arm: an alarm already raised by the guard is never delivered twice"
 }
 
 test_failure_notice_marker_write_refuses_delivery_and_retries() {
@@ -498,7 +557,8 @@ test_failure_notice_marker_write_refuses_delivery_and_retries() {
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
   assert_present "$marker" "the successful successor did not record the failure notice"
   assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
-  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  assert_not_contains "$out3" "automatic supervision mechanism is broken" "the firing after the successful marker commit repeated the notice"
+  assert_contains "$out3" "retry the automatic arm" "the firing after the successful marker commit continued without naming its reason"
   delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
   pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
@@ -579,8 +639,8 @@ test_positive_recovery_budget_contention_preserves_episode() {
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  expect_code 0 "$status" "a healthy auto-arm must close quietly when the episode reset lock is busy"
+  [ -z "$out" ] || fail "recovery contention produced output: $out"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
@@ -592,7 +652,7 @@ test_positive_recovery_budget_contention_preserves_episode() {
   expect_code 0 "$status" "a later healthy auto-arm must complete the episode reset"
   assert_absent "$dir/state/.turnend-claude-blocks" "successful retry left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful retry left the failure notice"
-  pass "auto-arm: budget contention preserves the episode and forces a reset retry"
+  pass "auto-arm: budget contention preserves the episode for a later reset without forcing a continuation"
 }
 
 test_owner_mutex_contention_preserves_failure_episode_reset() {
@@ -716,6 +776,41 @@ test_term_mid_arm_commits_failure_and_rewakes() {
   assert_contains "$(cat "$out")" "firstmate watcher auto-arm INTERRUPTED" \
     "TERM mid-arm omitted the rewake failure banner"
   pass "auto-arm: TERM mid-arm commits a durable failure and exits 2 for rewake"
+}
+
+# The same interruption inside an episode whose notice was already delivered
+# used to force its continuation with an EMPTY message. It must name why the
+# turn exists, like every other continuation.
+test_term_mid_arm_in_notified_episode_names_its_reason() {
+  local dir out hook_pid i status=0
+  dir=$(make_primary_dir "$TMP_ROOT/term-mid-arm-notified")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  write_arm_fixture "$dir" blocking-actionable
+  out="$dir/state/autoarm.out"
+  run_autoarm_bg "$dir" "$out"
+
+  hook_pid=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    hook_pid=$(epoch_field "$dir" owner_pid)
+    [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -n "$hook_pid" ] || fail "auto-arm did not publish its generation owner before TERM"
+  [ -e "$dir/state/arm-ran" ] || fail "auto-arm did not enter the foreground arm before TERM"
+
+  kill -TERM "$hook_pid" 2>/dev/null || fail "could not TERM the foreground auto-arm owner"
+  wait "$RUN_AUTOARM_BG_PID" || status=$?
+
+  expect_code 2 "$status" "TERM mid-arm in a notified episode must keep the rewake-triggering exit"
+  assert_contains "$(cat "$out")" "INTERRUPTED by TERM" "the notified-episode interruption did not name its cause"
+  assert_contains "$(cat "$out")" "retry the automatic arm" "the notified-episode interruption did not name why the turn exists"
+  assert_not_contains "$(cat "$out")" "automatic supervision mechanism did not reach" "the notified-episode interruption repeated the notice"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] \
+    || fail "the notified-episode interruption left outcome: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  pass "auto-arm: an interruption after the episode's notice names its reason instead of rewaking empty"
 }
 
 # --- abandoned single-flight claim recovery (legacy shim) ----------------------
@@ -1278,6 +1373,8 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
+test_failed_cycles_stop_at_the_episode_budget_with_one_alarm
+test_alarm_commit_refuses_an_alarm_already_raised
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
@@ -1288,6 +1385,7 @@ test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
+test_term_mid_arm_in_notified_episode_names_its_reason
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
