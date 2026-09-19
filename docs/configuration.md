@@ -1041,6 +1041,7 @@ FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail insid
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
+FM_PR_MERGE_NM_TIMEOUT=20    # seconds allowed per no-mistakes run-record read inside fm-pr-merge.sh's validation proof
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when the runs ledger is consulted: axi status cannot be attributed directly, or its answer is terminal and may have a live sibling run
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage

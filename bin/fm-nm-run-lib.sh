@@ -11,6 +11,8 @@
 # instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
+# fm-pr-merge.sh reuses only the bounded call and the TOON readers below; its
+# own header owns how a run record proves a pull request's head was validated.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -116,6 +118,23 @@ fm_nm_run_status_class() {  # <status_word>
     running)                    printf 'live' ;;
     *)                          printf 'unknown' ;;
   esac
+}
+
+# Rows of the `steps[N]{step,status,findings,duration_ms}:` table in captured
+# `axi status` TOON $1 - the full per-step ledger, present on terminal runs too,
+# unlike active_steps[], which the pipeline emits only while a step is actually
+# running or fixing. Column order is deliberately not assumed: the header's own
+# indentation bounds the block, and callers read each row as text.
+fm_nm_steps_rows() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*steps\[[0-9]+\]\{/ { hdr = index($0, "steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
 }
 
 # branch_sync.state from captured `axi status` TOON $1: the scalar directly

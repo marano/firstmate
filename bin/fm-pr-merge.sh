@@ -66,6 +66,27 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
+# Standing merge authority covers only a validated pull request, so after either
+# live forge read and before the merge, the verified head must be proven
+# validated by the no-mistakes pipeline's own run record, read through
+# `no-mistakes axi status --run <id>`. Nothing a worker can edit is proof: a
+# no-mistakes attestation in the pull request body is never accepted, and the
+# run id is only a pointer to the record. The candidate runs are the last
+# run=<id> in the task's status log and the run `no-mistakes axi status`
+# reports from the task's local copy. One proves the head when its record names
+# this pull request and its head branch, its head_sha equals the verified live
+# head exactly, and its steps table lists review and test both completed with no
+# other step failed; ci is ignored, covered by the live green check above, and
+# any other step that was skipped, configured off, or not yet run does not refuse. A task that
+# records mode direct-PR or local-only has no run behind it by definition, and
+# every other recorded mode, or none, is held to the no-mistakes proof. An unproven head is refused, naming the missing evidence
+# per candidate, unless --unvalidated is passed for an explicit captain
+# instruction to merge this pull request without a validation run. That waiver
+# is refused while the away-posture record exists, and it is deliberately
+# separate from --attended-override so following a merge-queue retry hint can
+# never waive validation. FM_PR_MERGE_NM_TIMEOUT bounds each no-mistakes read
+# (seconds, default 20).
+#
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
@@ -109,7 +130,7 @@
 # same way. A merge that already landed is never turned into a failed run by a
 # branch cleanup step.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--unvalidated] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -134,6 +155,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -157,6 +180,7 @@ PR_NUMBER=$FM_PR_NUMBER
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
 ATTENDED_OVERRIDE=false
+UNVALIDATED=false
 ALLOW_RED=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -176,6 +200,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --allow-red=*)
       echo "error: --allow-red requires a separate check name argument" >&2
+      exit 2
+      ;;
+    --unvalidated)
+      UNVALIDATED=true
+      shift
+      ;;
+    --unvalidated=*)
+      echo "error: --unvalidated takes no value" >&2
       exit 2
       ;;
     --) shift; break ;;
@@ -978,6 +1010,10 @@ require_current_away_authority() {
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
     return 2
   fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$UNVALIDATED" = true ]; then
+    echo "error: --unvalidated is attended-only; while the away-posture record exists a merge needs a proven validation run" >&2
+    return 2
+  fi
 }
 
 persist_accepted_merge_authority() {
@@ -1273,6 +1309,150 @@ gitlab_delete_merged_branch() {
   return 0
 }
 
+TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+FM_PR_NM_TIMEOUT=${FM_PR_MERGE_NM_TIMEOUT:-20}
+case "$FM_PR_NM_TIMEOUT" in ''|*[!0-9]*) FM_PR_NM_TIMEOUT=20 ;; esac
+
+# The run id the task's status log names last, or nothing. The worker writes
+# that log, so the id is only a pointer; validation_run_proves_head reads the
+# pipeline's own record behind it.
+recorded_validation_run_id() {
+  local log="$STATE/$ID.status" id
+  [ -f "$log" ] && [ ! -L "$log" ] || return 0
+  id=$(grep -oE '(^|[[:space:]])run=[A-Za-z0-9_-]+' "$log" 2>/dev/null | tail -1 || true)
+  printf '%s' "${id##*run=}"
+}
+
+# The run no-mistakes itself reports for the task's local copy, or nothing.
+local_copy_run_id() {
+  local wt out
+  wt=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  out=$(fm_nm_run_checked "$wt" "$FM_PR_NM_TIMEOUT" axi status) || return 0
+  fm_nm_strip_quotes "$(fm_nm_field "$out" id)"
+}
+
+# 0 when the pipeline's record for run $1 proves the verified head of this pull
+# request, whose head branch is $2 (empty when the forge did not name one).
+# Otherwise sets FM_PR_VALIDATION_REASON to one plain sentence naming the first
+# piece of evidence the record lacks.
+FM_PR_VALIDATION_REASON=
+validation_run_proves_head() {  # <run-id> <head-branch>
+  local run=$1 branch=$2 out rc=0 pr canon run_branch run_head row step rest status
+  local saw_review=0 saw_test=0 incomplete='' failed=''
+  out=$(fm_nm_run_bounded "$STATE" "$FM_PR_NM_TIMEOUT" axi status --run "$run" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    out=$(printf '%s\n' "$out" | head -1)
+    FM_PR_VALIDATION_REASON="run $run could not be read from no-mistakes${out:+ ($out)}"
+    return 1
+  fi
+  if [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")" != "$run" ]; then
+    FM_PR_VALIDATION_REASON="no-mistakes answered for run $run with a record that does not carry that id"
+    return 1
+  fi
+  pr=$(fm_nm_strip_quotes "$(fm_nm_field "$out" pr)")
+  canon=$(fm_pr_url_parse "$pr" && printf '%s' "$FM_PR_URL") || canon=
+  if [ -z "$canon" ] || [ "$canon" != "$URL" ]; then
+    FM_PR_VALIDATION_REASON="run $run is for ${pr:-no pull request}, not $URL"
+    return 1
+  fi
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  if [ -n "$branch" ] && [ "$run_branch" != "$branch" ]; then
+    FM_PR_VALIDATION_REASON="run $run validated branch ${run_branch:-unknown}, not the pull request's head branch $branch"
+    return 1
+  fi
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head_sha)" | tr '[:upper:]' '[:lower:]')
+  if [ "$run_head" != "$(printf '%s' "$FM_PR_MERGE_HEAD" | tr '[:upper:]' '[:lower:]')" ]; then
+    FM_PR_VALIDATION_REASON="run $run validated head ${run_head:-unknown}, not the pull request's current head $FM_PR_MERGE_HEAD"
+    return 1
+  fi
+  while IFS= read -r row; do
+    row=$(fm_nm_trim "$row")
+    [ -n "$row" ] || continue
+    step=$(fm_nm_trim "${row%%,*}")
+    rest=${row#*,}
+    status=$(fm_nm_strip_quotes "${rest%%,*}")
+    case "$step" in
+      ci) continue ;;
+      review|test)
+        [ "$step" = review ] && saw_review=1 || saw_test=1
+        [ "$status" = completed ] || incomplete="${incomplete:+$incomplete, }$step (${status:-no status})"
+        ;;
+      *)
+        [ "$status" != failed ] || failed="${failed:+$failed, }$step (failed)"
+        ;;
+    esac
+  done <<ROWS
+$(fm_nm_steps_rows "$out")
+ROWS
+  if [ "$saw_review" -ne 1 ] || [ "$saw_test" -ne 1 ]; then
+    FM_PR_VALIDATION_REASON="run $run's record lists no review and test steps"
+    return 1
+  fi
+  if [ -n "$incomplete" ]; then
+    FM_PR_VALIDATION_REASON="run $run did not complete its review and test steps: $incomplete"
+    return 1
+  fi
+  if [ -n "$failed" ]; then
+    FM_PR_VALIDATION_REASON="run $run has failed steps: $failed"
+    return 1
+  fi
+}
+
+# The validation gate for the verified head; $1 is the pull request's head
+# branch. The header above owns the evidence rule and the --unvalidated waiver.
+require_validation_run() {  # <head-branch>
+  local branch=$1 source run seen='' reasons=''
+  case "$TASK_MODE" in
+    direct-PR|local-only)
+      if [ "$UNVALIDATED" = true ]; then
+        printf 'notice: task %s ships %s, so no validation run stands behind %s; merging on the explicit captain instruction passed as --unvalidated\n' \
+          "$ID" "$TASK_MODE" "$URL" >&2
+        return 0
+      fi
+      printf 'error: refusing to merge %s: task %s ships %s, so no validation run stands behind it; it merges only on an explicit captain instruction for this merge, passed as --unvalidated\n' \
+        "$URL" "$ID" "$TASK_MODE" >&2
+      return 1
+      ;;
+  esac
+  if ! command -v no-mistakes >/dev/null 2>&1; then
+    reasons="  - the no-mistakes command is not installed, so no validation run can be read
+"
+  else
+    for source in recorded local; do
+      case "$source" in
+        recorded) run=$(recorded_validation_run_id) ;;
+        local) run=$(local_copy_run_id) ;;
+      esac
+      [ -n "$run" ] || continue
+      case "$run" in *[!A-Za-z0-9_-]*) continue ;; esac
+      case " $seen " in *" $run "*) continue ;; esac
+      seen="$seen $run"
+      if validation_run_proves_head "$run" "$branch"; then
+        printf 'verified: no-mistakes run %s validated head %s of %s\n' \
+          "$run" "$FM_PR_MERGE_HEAD" "$URL" >&2
+        return 0
+      fi
+      reasons="$reasons  - $FM_PR_VALIDATION_REASON
+"
+    done
+    [ -n "$seen" ] || reasons="  - task $ID records no validation run id, and no-mistakes reports no run for its local copy
+"
+  fi
+  if [ "$UNVALIDATED" = true ]; then
+    printf 'notice: no validation run is proven for head %s of %s; merging on the explicit captain instruction passed as --unvalidated\n' \
+      "$FM_PR_MERGE_HEAD" "$URL" >&2
+    printf '%s' "$reasons" >&2
+    return 0
+  fi
+  printf 'error: refusing to merge %s: no validation run is proven for its head %s\n' \
+    "$URL" "$FM_PR_MERGE_HEAD" >&2
+  printf '%s' "$reasons" >&2
+  echo "error: a no-mistakes attestation in the pull request body is not proof, because a worker can edit it; only the pipeline's own run record for this exact head is" >&2
+  echo "error: pass --unvalidated only on an explicit captain instruction to merge this pull request without a validation run" >&2
+  return 1
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -1296,6 +1476,7 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
+    require_validation_run "$FM_PR_GITHUB_HEAD_REF" || exit 1
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1
@@ -1347,6 +1528,7 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
+    require_validation_run "$FM_PR_GITLAB_SOURCE_BRANCH" || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;

@@ -187,7 +187,24 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # fm-pr-merge.sh merges only a head a no-mistakes run validated, so the
+  # pipeline answers every run lookup - by id or from a task's local copy - with
+  # a passing run at the fixture head for the pull request being merged: the
+  # caller's, else the one the task record names, which the merge records
+  # before it verifies anything.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = "axi status" ] || exit 0
+pr=${FM_TEST_MERGE_PR:-$(grep -h '^pr=' "$FM_HOME"/state/*.meta 2>/dev/null | tail -1 | cut -d= -f2-)}
+printf 'run:\n  id: "%s"\n  branch: fm/example-branch\n  status: running\n' "${4:-01TESTMERGERUN}"
+printf '  head_sha: %s\n  pr: "%s"\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" "$pr"
+printf '  steps[9]{step,status,findings,duration_ms}:\n'
+for step in intent rebase review test document lint push pr; do
+  printf '    %s,completed,0,1\n' "$step"
+done
+printf '    ci,running,0,0\n'
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -236,7 +253,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_MERGE_PR="${2:-}" PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
 
@@ -597,7 +614,8 @@ SH
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=no-mistakes'
+    printf 'done: merge ready run=01TESTMERGERUN\n' > "$dir/home/state/$id.status"
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -2317,7 +2335,7 @@ test_teardown_cannot_race_authority_consumption() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only' \
+    'mode=no-mistakes' \
     'yolo=on'
   write_away_record "$dir"
   run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \

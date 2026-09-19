@@ -29,6 +29,79 @@ MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
+# The run every case's task records in its status log, and which the mock
+# no-mistakes below reports as a passing run at the pull request's live head
+# unless the case says otherwise.
+NM_DEFAULT_RUN=01TESTPASSEDRUN
+NM_RECORD="$TMP_ROOT/nm-record"
+
+# nm-record <id> <branch> <head-sha> <pr-url> [<step>=<status>|<step>=- ...]:
+# one run record in the shape `no-mistakes axi status --run <id>` prints, with
+# every step completed except ci, which is still monitoring the pull request.
+# A <step>=<status> override replaces that step's status and <step>=- drops its
+# row. Shared by the mock and by the cases that write their own records.
+cat > "$NM_RECORD" <<'SH'
+#!/usr/bin/env bash
+id=$1 branch=$2 head=$3 pr=$4
+shift 4
+printf 'run:\n  id: "%s"\n  branch: %s\n  status: running\n  head: %s\n  head_sha: %s\n  pr: "%s"\n  findings: none\n' \
+  "$id" "$branch" "${head:0:8}" "$head" "$pr"
+printf '  steps[9]{step,status,findings,duration_ms}:\n'
+for step in intent rebase review test document lint push pr ci; do
+  status=completed
+  [ "$step" = ci ] && status=running
+  for kv in "$@"; do
+    [ "${kv%%=*}" = "$step" ] && status=${kv#*=}
+  done
+  [ "$status" = - ] || printf '    %s,%s,0,1\n' "$step" "$status"
+done
+SH
+chmod +x "$NM_RECORD"
+
+# The mock no-mistakes for one case: answers `axi status --run <id>` from the
+# case's nm-run-<id> file, and for the default run with a passing record at the
+# live head of whichever pull request the task has recorded, unless the case
+# marks that default absent. `axi status` with no run answers for the run named
+# in the case's nm-local-run file, or with nothing. Every call is logged.
+add_nm_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+dir=$FM_TEST_NM_DIR
+printf '%s|%s\n' "$PWD" "$*" >> "$dir/nm.log"
+[ "${1:-} ${2:-}" = "axi status" ] || exit 0
+if [ "${3:-}" = --run ]; then
+  run=${4:-}
+else
+  [ -f "$dir/nm-local-run" ] || exit 0
+  run=$(cat "$dir/nm-local-run")
+fi
+if [ -f "$dir/nm-run-$run" ]; then
+  cat "$dir/nm-run-$run"
+  exit 0
+fi
+if [ "$run" = "$FM_TEST_NM_DEFAULT_RUN" ] && [ ! -e "$dir/nm-default-absent" ]; then
+  pr=$(grep -h '^pr=' "$FM_STATE_OVERRIDE"/*.meta 2>/dev/null | tail -1 | cut -d= -f2-)
+  case "$pr" in
+    */-/merge_requests/*) head=$(jq -r .sha "$FM_TEST_GLAB_JSON") ;;
+    *) head=$(cat "$FM_TEST_GH_HEAD") ;;
+  esac
+  exec "$FM_TEST_NM_RECORD" "$run" fm/example-branch "$head" "$pr"
+fi
+printf 'error: "run \\"%s\\" not found"\n' "$run" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+}
+
+# write_nm_run <case_dir> <id> <branch> <head-sha> <pr-url> [overrides...]:
+# a run record the mock serves for <id>, overriding any default.
+write_nm_run() {
+  local case_dir=$1 id=$2
+  shift 2
+  "$NM_RECORD" "$id" "$@" > "$case_dir/nm-run-$id"
+}
+
 # Build a fresh sandbox for one test case: a state dir with task metadata and a
 # directory for its forge-command mocks. Echoes the case directory.
 make_case() {
@@ -45,6 +118,9 @@ make_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  printf 'done: PR https://github.com/example/repo/pull/1 checks green run=%s\n' \
+    "$NM_DEFAULT_RUN" > "$case_dir/state/task-x1.status"
+  add_nm_mock "$case_dir"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -449,6 +525,14 @@ glab_merge_line() {
   grep -F ' mr merge ' "$1" || true
 }
 
+# Every merge a case runs is bounded, so a mutant or a stuck mock can only turn a
+# case red, never hang the suite while it holds the machine-wide build lock. On
+# the deadline the watchdog kills the merge's whole process group, mocks
+# included, and exits 124.
+PR_MERGE_TIMEOUT=${FM_TEST_PR_MERGE_TIMEOUT:-120}
+# shellcheck disable=SC2016  # Perl source, expanded by perl rather than the shell.
+PR_MERGE_WATCHDOG='my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.5; kill "KILL", -$pid; waitpid $pid, 0; print STDERR "fm-pr-merge test watchdog: killed the merge after ${t}s\n"; exit 124 }; alarm $t; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)'
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -480,9 +564,12 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_NM_DIR="$case_dir" \
+  FM_TEST_NM_DEFAULT_RUN="$NM_DEFAULT_RUN" \
+  FM_TEST_NM_RECORD="$NM_RECORD" \
   HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$PR_MERGE" "$@"
+    perl -e "$PR_MERGE_WATCHDOG" "$PR_MERGE_TIMEOUT" "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
     echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
@@ -1176,6 +1263,25 @@ test_github_without_gh_failed_read_keeps_bookkeeping() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "github-without-gh-read-fails: a merge poll was armed without gh"
   pass "fm-pr-merge refuses a GitHub merge when gh is missing rather than merging blind"
+}
+
+test_a_hanging_mock_turns_the_case_red_not_hung() {
+  local case_dir rc started PR_MERGE_TIMEOUT=3
+  case_dir=$(make_case hanging-mock)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$case_dir/fakebin/gh"
+  started=$(date +%s)
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/128 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 124 "$rc" "hanging-mock: a stuck forge mock must end the run on the watchdog"
+  [ $(( $(date +%s) - started )) -lt 60 ] || fail "hanging-mock: the watchdog did not bound the run"
+  assert_grep 'watchdog: killed the merge after 3s' "$case_dir/stderr" \
+    "hanging-mock: the watchdog did not say why the run ended"
+  pass "a stuck mock turns a merge case red instead of hanging the suite"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
@@ -2229,6 +2335,284 @@ test_secondmate_without_parent_binding_is_loud() {
   assert_absent "$case_dir/state/.wake-queue" \
     "unbound-secondmate: a secondmate home fell back to the main-home record"
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
+}
+
+# One GitHub merge attempt for the validation cases below. Args: case_dir
+# pr-number [merge args...]; leaves stdout, stderr, and rc in the case dir.
+run_validation_case() {
+  local case_dir=$1 number=$2 rc
+  shift 2
+  set +e
+  run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$number" "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  printf '%s\n' "$rc" > "$case_dir/rc"
+}
+
+test_validated_merge_names_the_proving_run() {
+  local case_dir head=9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a
+  case_dir=$(make_case validated-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  run_validation_case "$case_dir" 120
+  expect_code 0 "$(cat "$case_dir/rc")" "validated-merge: a run at the exact head must merge"
+  assert_grep "verified: no-mistakes run $NM_DEFAULT_RUN validated head $head of https://github.com/example/repo/pull/120" \
+    "$case_dir/stderr" "validated-merge: the proving run was not named"
+  assert_grep "axi status --run $NM_DEFAULT_RUN" "$case_dir/nm.log" \
+    "validated-merge: the run record was never read from no-mistakes"
+  assert_logged_gh_merge "$case_dir" 120 example/repo --squash
+  pass "fm-pr-merge merges a no-mistakes PR whose exact head a passing run validated"
+}
+
+test_green_pr_without_a_validation_run_is_refused() {
+  local case_dir head=9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b
+  # No run anywhere: the status log names none and the local copy reports none.
+  case_dir=$(make_case no-validation-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR https://github.com/example/repo/pull/121 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  run_validation_case "$case_dir" 121
+  expect_code 1 "$(cat "$case_dir/rc")" "no-validation-run: a green PR with no run must be refused"
+  assert_grep "refusing to merge https://github.com/example/repo/pull/121: no validation run is proven for its head $head" \
+    "$case_dir/stderr" "no-validation-run: the refusal did not name the unproven head"
+  assert_grep 'task task-x1 records no validation run id, and no-mistakes reports no run for its local copy' \
+    "$case_dir/stderr" "no-validation-run: the missing evidence was not named"
+  assert_grep 'attestation in the pull request body is not proof' "$case_dir/stderr" \
+    "no-validation-run: the refusal did not rule out the PR-body attestation"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "no-validation-run: gh pr merge ran without a validation run"
+
+  # A recorded run id the pipeline has no record for proves nothing either.
+  case_dir=$(make_case unknown-validation-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 121
+  expect_code 1 "$(cat "$case_dir/rc")" "unknown-validation-run: a run id with no record must be refused"
+  assert_grep "run $NM_DEFAULT_RUN could not be read from no-mistakes" "$case_dir/stderr" \
+    "unknown-validation-run: the unreadable run was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "unknown-validation-run: gh pr merge ran on an unknown run"
+  pass "fm-pr-merge refuses a green PR when no validation run exists for its head"
+}
+
+test_run_with_other_steps_skipped_still_merges() {
+  local case_dir head=9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e
+  case_dir=$(make_case lint-document-skipped-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/128 lint=skipped document=skipped
+  run_validation_case "$case_dir" 128
+  expect_code 0 "$(cat "$case_dir/rc")" "lint-document-skipped-run: skipped lint and document must not refuse"
+  assert_grep 'pr merge' "$case_dir/gh.log" "lint-document-skipped-run: gh pr merge did not run"
+  pass "fm-pr-merge accepts a run whose lint and document steps were skipped"
+}
+
+test_run_at_an_older_head_is_refused() {
+  local case_dir head=9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c old=1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d
+  case_dir=$(make_case older-head-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$old" \
+    https://github.com/example/repo/pull/122 ci=completed
+  run_validation_case "$case_dir" 122
+  expect_code 1 "$(cat "$case_dir/rc")" "older-head-run: a run at an older head must be refused"
+  assert_grep "run $NM_DEFAULT_RUN validated head $old, not the pull request's current head $head" \
+    "$case_dir/stderr" "older-head-run: the stale head was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "older-head-run: gh pr merge ran on an unvalidated head"
+  pass "fm-pr-merge refuses a PR whose passing run validated an older head"
+}
+
+test_run_that_skipped_a_step_or_names_another_pr_is_refused() {
+  local case_dir head=9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d
+  case_dir=$(make_case skipped-review-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 review=skipped
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "skipped-review-run: a run that skipped review must be refused"
+  assert_grep "run $NM_DEFAULT_RUN did not complete its review and test steps: review (skipped)" \
+    "$case_dir/stderr" "skipped-review-run: the skipped step was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "skipped-review-run: gh pr merge ran without a review"
+
+  case_dir=$(make_case skipped-test-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 test=skipped
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "skipped-test-run: a run that skipped test must be refused"
+  assert_grep "run $NM_DEFAULT_RUN did not complete its review and test steps: test (skipped)" \
+    "$case_dir/stderr" "skipped-test-run: the skipped test step was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "skipped-test-run: gh pr merge ran without a test"
+
+  case_dir=$(make_case failed-lint-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 lint=failed
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "failed-lint-run: a run with a failed lint step must be refused"
+  assert_grep "run $NM_DEFAULT_RUN has failed steps: lint (failed)" \
+    "$case_dir/stderr" "failed-lint-run: the failed step was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "failed-lint-run: gh pr merge ran despite a failed step"
+
+  case_dir=$(make_case run-without-test-step)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 test=-
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "run-without-test-step: a record with no test step must be refused"
+  assert_grep "run $NM_DEFAULT_RUN's record lists no review and test steps" "$case_dir/stderr" \
+    "run-without-test-step: the missing step was not named"
+
+  case_dir=$(make_case run-for-another-pr)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/999
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "run-for-another-pr: another PR's run must be refused"
+  assert_grep "run $NM_DEFAULT_RUN is for https://github.com/example/repo/pull/999, not https://github.com/example/repo/pull/123" \
+    "$case_dir/stderr" "run-for-another-pr: the mismatched PR was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "run-for-another-pr: gh pr merge ran on another PR's run"
+  pass "fm-pr-merge refuses a run that skipped a validation step or belongs to another PR"
+}
+
+test_local_copy_run_proves_the_head_without_a_recorded_id() {
+  local case_dir head=9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e
+  case_dir=$(make_case local-copy-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR https://github.com/example/repo/pull/124 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  printf '01TESTLOCALRUN\n' > "$case_dir/nm-local-run"
+  write_nm_run "$case_dir" 01TESTLOCALRUN fm/example-branch "$head" \
+    https://github.com/example/repo/pull/124
+  run_validation_case "$case_dir" 124
+  expect_code 0 "$(cat "$case_dir/rc")" "local-copy-run: the local copy's passing run must prove the head"
+  assert_grep "$case_dir/wt|axi status" "$case_dir/nm.log" \
+    "local-copy-run: no-mistakes was not asked from the task's local copy"
+  assert_grep "verified: no-mistakes run 01TESTLOCALRUN validated head $head" "$case_dir/stderr" \
+    "local-copy-run: the local copy's run was not named"
+  assert_logged_gh_merge "$case_dir" 124 example/repo --squash
+  pass "fm-pr-merge finds the validating run from the task's local copy when none is recorded"
+}
+
+test_unvalidated_waiver_is_explicit_and_attended_only() {
+  local case_dir head=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f
+  # --attended-override is what a merge-queue retry hint asks for, so it must
+  # never waive validation.
+  case_dir=$(make_case attended-override-no-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 125 --attended-override
+  expect_code 1 "$(cat "$case_dir/rc")" "attended-override-no-run: --attended-override must not waive validation"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "attended-override-no-run: gh pr merge ran without a run"
+
+  case_dir=$(make_case unvalidated-waiver)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 125 --unvalidated
+  expect_code 0 "$(cat "$case_dir/rc")" "unvalidated-waiver: an explicit waiver must merge"
+  assert_grep 'merging on the explicit captain instruction passed as --unvalidated' "$case_dir/stderr" \
+    "unvalidated-waiver: the waiver was not announced"
+  assert_logged_gh_merge "$case_dir" 125 example/repo --squash
+
+  case_dir=$(make_case unvalidated-waiver-away)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/nm-default-absent"
+  write_away_record "$case_dir" --grant task-x1
+  run_validation_case "$case_dir" 125 --unvalidated
+  expect_code 2 "$(cat "$case_dir/rc")" "unvalidated-waiver-away: the waiver must be refused while away"
+  assert_grep '--unvalidated is attended-only' "$case_dir/stderr" \
+    "unvalidated-waiver-away: the refusal did not name attended-only"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "unvalidated-waiver-away: gh pr merge ran while away"
+  pass "fm-pr-merge waives validation only on an explicit attended --unvalidated"
+}
+
+test_direct_pr_merges_only_on_an_explicit_instruction() {
+  local case_dir head=8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a
+  case_dir=$(make_case direct-pr-standing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  sed 's/^mode=no-mistakes$/mode=direct-PR/' "$case_dir/state/task-x1.meta" > "$case_dir/meta.new"
+  printf 'yolo=on\n' >> "$case_dir/meta.new"
+  mv "$case_dir/meta.new" "$case_dir/state/task-x1.meta"
+  run_validation_case "$case_dir" 126
+  expect_code 1 "$(cat "$case_dir/rc")" "direct-pr-standing: standing authority must not merge a direct-PR PR"
+  assert_grep 'task task-x1 ships direct-PR, so no validation run stands behind it' "$case_dir/stderr" \
+    "direct-pr-standing: the refusal did not explain the unvalidated mode"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "direct-pr-standing: gh pr merge ran under standing authority"
+
+  case_dir=$(make_case direct-pr-attended)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  sed 's/^mode=no-mistakes$/mode=direct-PR/' "$case_dir/state/task-x1.meta" > "$case_dir/meta.new"
+  mv "$case_dir/meta.new" "$case_dir/state/task-x1.meta"
+  run_validation_case "$case_dir" 126 --unvalidated
+  expect_code 0 "$(cat "$case_dir/rc")" "direct-pr-attended: an explicit instruction must merge a direct-PR PR"
+  assert_logged_gh_merge "$case_dir" 126 example/repo --squash
+  pass "fm-pr-merge merges a direct-PR PR only on an explicit captain instruction"
+}
+
+test_task_without_a_mode_needs_the_validation_proof() {
+  local case_dir head=8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b
+  case_dir=$(make_case no-mode-no-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  grep -v '^mode=' "$case_dir/state/task-x1.meta" > "$case_dir/meta.new"
+  mv "$case_dir/meta.new" "$case_dir/state/task-x1.meta"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 127
+  expect_code 1 "$(cat "$case_dir/rc")" "no-mode-no-run: a task with no recorded mode must still need a run"
+  assert_grep 'no validation run is proven for its head' "$case_dir/stderr" \
+    "no-mode-no-run: the refusal did not name the missing run"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "no-mode-no-run: gh pr merge ran without a run"
+
+  # A mode firstmate does not know is no licence to skip the proof either.
+  case_dir=$(make_case unknown-mode-no-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  sed 's/^mode=no-mistakes$/mode=ship/' "$case_dir/state/task-x1.meta" > "$case_dir/meta.new"
+  mv "$case_dir/meta.new" "$case_dir/state/task-x1.meta"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 127
+  expect_code 1 "$(cat "$case_dir/rc")" "unknown-mode-no-run: an unknown mode must still need a run"
+  assert_grep 'no validation run is proven for its head' "$case_dir/stderr" \
+    "unknown-mode-no-run: the refusal did not name the missing run"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "unknown-mode-no-run: gh pr merge ran without a run"
+  pass "fm-pr-merge holds a task with no recorded or an unknown mode to the validation proof"
+}
+
+test_gitlab_merge_request_needs_the_validation_proof() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-no-run)
+  : > "$case_dir/nm-default-absent"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-no-run: a GitLab MR with no run must be refused"
+  assert_grep "no validation run is proven for its head $MR_HEAD" "$case_dir/stderr" \
+    "gitlab-no-run: the refusal did not name the unproven head"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] || fail "gitlab-no-run: glab merged without a run"
+
+  case_dir=$(make_gitlab_case gitlab-validated)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "gitlab-validated: a GitLab MR with a run at its head must merge"
+  assert_grep "verified: no-mistakes run $NM_DEFAULT_RUN validated head $MR_HEAD of $MR_URL" \
+    "$case_dir/stderr" "gitlab-validated: the proving run was not named"
+  pass "fm-pr-merge holds GitLab merge requests to the same validation proof"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry
@@ -3400,3 +3784,14 @@ test_branch_base_of_open_pr_is_left_in_place
 test_fork_head_branch_is_left_in_place
 test_gitlab_confirmed_merge_deletes_source_branch
 test_gitlab_unconfirmed_merge_leaves_branch_alone
+test_validated_merge_names_the_proving_run
+test_green_pr_without_a_validation_run_is_refused
+test_run_at_an_older_head_is_refused
+test_run_with_other_steps_skipped_still_merges
+test_run_that_skipped_a_step_or_names_another_pr_is_refused
+test_local_copy_run_proves_the_head_without_a_recorded_id
+test_unvalidated_waiver_is_explicit_and_attended_only
+test_direct_pr_merges_only_on_an_explicit_instruction
+test_task_without_a_mode_needs_the_validation_proof
+test_gitlab_merge_request_needs_the_validation_proof
+test_a_hanging_mock_turns_the_case_red_not_hung
