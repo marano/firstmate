@@ -214,8 +214,20 @@ make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
+  # Every recorded task's window runs claude, so fm-spawn.sh's launch
+  # confirmation reads the launched agent alive.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  list-windows*)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+  *'#{pane_current_command}'*) printf 'claude\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"

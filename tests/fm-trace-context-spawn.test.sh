@@ -25,7 +25,9 @@ EOF
 
 # Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
 # argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
-# one per line, in send order, so ordering is observable.
+# one per line, in send order, so ordering is observable. Once a launch command
+# has been typed, each recorded task's window runs claude, so the launch
+# confirmation reads it alive; <launch-log>.launched records that launch.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -34,11 +36,19 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'claude\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
     [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] && [ -e "$FM_FAKE_LAUNCH_LOG.launched" ]; then
+      for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+        [ -e "$meta" ] || continue
+        meta=${meta##*/}
+        printf 'fm-%s\n' "${meta%.meta}"
+      done
+    fi
     exit 0
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -80,6 +90,9 @@ case "${1:-}" in
           -l) continue ;;
           Enter|C-m) continue ;;
           *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
+        case "$a" in
+          *'encode launch-brief'*) : > "$FM_FAKE_LAUNCH_LOG.launched" ;;
         esac
       done
     fi
@@ -429,7 +442,8 @@ test_relaunch_reuses_recorded_carrier() {
 
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
-  # restarts.
+  # restarts. The restart took the first launch's window with it.
+  rm -f "$LAUNCH_LOG.launched"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "relaunch spawn should succeed"
@@ -564,6 +578,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   # Same environment, same task: a relaunch must reuse task A's recorded
   # carrier verbatim, so the per-task boundary never costs recovery identity.
+  # The restart took task A's first window with it.
+  rm -f "$log_a.launched"
   out=$(TRACEPARENT="$sm_tp" run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" "$proj_a")
   status=$?
   expect_code 0 "$status" "routed task A relaunch should succeed"
