@@ -145,6 +145,9 @@ an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (the return brief's health line carries it), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+When a stranded digest the daemon cannot resubmit is what blocks that flush (see "Own-digest resubmit"), a daemon running as the harness's own tracked background job, the native entry above, also hands supervision back through a path that never touches the composer: it prints a `HANDED SUPERVISION BACK` report listing the undelivered events, clears `state/.afk`, and exits, and the harness delivers that exit to firstmate as the job's completion (`stranded_handback` in `bin/fm-supervise-daemon.sh` owns the mechanism).
+That completion is supervision, never the captain's return: handle the listed events, let the ordinary supervision cycle own the home while the posture record stays, and start the daemon again only once the supervisor composer is clear, because the stranded text may still sit there.
+A daemon launched into its own terminal has no reader for its exit, so the wedge alarm stays its floor.
 
 ### Submit model
 
@@ -222,7 +225,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  no-op, and a natively tracked daemon blocked by a stranded digest hands
+  supervision back through its exit (see "Max-defer escape" above).
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit

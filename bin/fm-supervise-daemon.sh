@@ -60,7 +60,10 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if submit still cannot be confirmed. When a stranded digest it cannot
+#     resubmit is what blocks that flush, a daemon the harness runs as its own
+#     tracked background job also hands supervision back through its exit
+#     (stranded_handback).
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -235,6 +238,12 @@ INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # Set by inject_msg when it returns 3 (typed, submit unconfirmed); read by
 # escalate_flush to record the stranded digest.
 INJECT_STRANDED_TEXT=''
+# Set by the latest escalate_flush when a stranded digest still blocked typing
+# on the composer itself (not a busy pane or a missing target); read by
+# stranded_handback.
+STRANDED_FLUSH_BLOCKED=0
+# Set by stranded_handback; the main loop then shuts the daemon down.
+DAEMON_HANDED_BACK=0
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -744,6 +753,7 @@ escalate_add() {  # <state> <distilled-item>
 escalate_flush() {  # <state>
   local state=$1 buf item n msg rc
   buf="$state/.subsuper-escalations"
+  STRANDED_FLUSH_BLOCKED=0
   [ -s "$buf" ] || return 0
   if [ -e "$state/.subsuper-stranded" ]; then
     stranded_flush "$state"
@@ -858,11 +868,57 @@ stranded_flush() {  # <state>
         return 2
       fi
       log "inject deferred: the supervisor composer is not provably just the daemon's own stranded digest (state=${composer:-unknown}); leaving it untouched"
+      STRANDED_FLUSH_BLOCKED=1
       return 1
       ;;
   esac
   log "inject deferred: resubmitted the daemon's own stranded digest; submit still unconfirmed (verdict=$verdict)"
+  STRANDED_FLUSH_BLOCKED=1
   return 1
+}
+
+# daemon_launched_native: true when bin/fm-afk-launch.sh recorded this daemon as
+# a harness-native tracked background job (its `start-native` entry), whose exit
+# the harness delivers to firstmate as that job's completion. The launcher owns
+# the state/.afk-daemon-terminal record format; a terminal it launched into
+# records its backend and id instead, and nothing reads that terminal's exit.
+daemon_launched_native() {  # <state>
+  local backend='' target='' extra=''
+  IFS=$'\t' read -r backend target extra 2>/dev/null < "$1/.afk-daemon-terminal" || return 1
+  [ "$backend" = none ] && [ "$target" = - ] && [ "$extra" = native ]
+}
+
+# stranded_handback: the path back to firstmate when a stranded digest keeps
+# blocking delivery past max-defer - the composer holds text the daemon cannot
+# prove is only its own (a bordered or left-bar composer, text taller than the
+# pane, captain text mixed in, or a backend with no ownership proof), or its
+# resubmit never confirms. Every such path goes through the composer, so the
+# wedge alarm alone was all that surfaced it while firstmate sat idle. A daemon
+# the harness runs as its own tracked background job (claude's /quiet, grok) has
+# one path that does not: its exit, which the harness delivers to firstmate as a
+# job completion. That daemon prints the undelivered events on stdout, clears the
+# daemon flag so the ordinary supervision cycle owns the home again (the away
+# posture record, when there is one, stays), and has the main loop shut it down;
+# the composer is never touched, and the buffer and stranded record stay durable
+# for the return brief. A daemon launched into its own terminal has no reader for
+# its exit, so it keeps supervising behind the wedge alarm, the floor everywhere.
+stranded_handback() {  # <state> <undelivered-seconds>
+  local state=$1 age=$2 mode
+  [ "$STRANDED_FLUSH_BLOCKED" = 1 ] && [ -e "$state/.subsuper-stranded" ] || return 1
+  [ -s "$state/.subsuper-escalations" ] || return 1
+  daemon_launched_native "$state" || return 1
+  mode=$(fm_afk_mode "$state" 2>/dev/null) || mode=away
+  {
+    printf 'firstmate %s-mode daemon HANDED SUPERVISION BACK: a digest it typed was never confirmed submitted, and it cannot resubmit it because the supervisor composer does not provably hold only that text. Delivery has been blocked for %ss, past the %ss max-defer window.\n' \
+      "$mode" "$age" "${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
+    printf 'The daemon flag state/.afk is cleared and this daemon has stopped, so the ordinary supervision cycle owns this home again. The composer was left untouched and may still hold the stranded digest.\n'
+    printf 'Undelivered events, also retained in state/.subsuper-escalations:\n'
+    sed 's/^/  /' "$state/.subsuper-escalations" 2>/dev/null
+    printf 'Handle these events now, and start the %s-mode daemon again only once the supervisor composer is clear.\n' "$mode"
+  }
+  afk_exit "$state"
+  log "handback: a stranded digest blocked delivery for ${age}s past max-defer; printed the undelivered events for firstmate, cleared the daemon flag, and stopping"
+  DAEMON_HANDED_BACK=1
 }
 
 # Shutdown never flushes: it RETAINS the buffer for the next supervisor and
@@ -1179,8 +1235,10 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
-#     Never silently defer forever.
+#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm,
+#     and when an unresolvable stranded digest is what blocks it, hand
+#     supervision back where the daemon's exit reaches firstmate
+#     (stranded_handback). Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
@@ -1220,6 +1278,7 @@ housekeeping() {  # <state>
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
+        stranded_handback "$state" "$oldest" || true
       fi
     fi
   fi
@@ -1963,6 +2022,7 @@ fm_super_main() {
     if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
+      [ "$DAEMON_HANDED_BACK" != 1 ] || cleanup
     fi
   done
 }

@@ -4,6 +4,7 @@ The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations 
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 On tmux a digest of the daemon's own left unsent in the composer is not left to wedge: the daemon proves it is its own text and resubmits it (the `/afk` skill's "Submit model"), so the alarm is for stalls it cannot heal, such as captain text in the composer or a pane that stays busy.
 On a claude primary the away posture runs no daemon at all, so this alarm belongs to `/quiet` there and to away mode on the harnesses that still run the daemon.
+When a stranded digest the daemon cannot resubmit is what blocks delivery, a daemon the harness runs as its own tracked background job (claude's `/quiet`, grok) also hands its undelivered events back to firstmate through its exit, which reaches firstmate without the composer; a daemon launched into its own terminal has no such path, so this alarm is its floor (the `/afk` skill's "Max-defer escape").
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
