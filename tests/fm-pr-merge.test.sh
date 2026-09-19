@@ -2448,6 +2448,17 @@ test_run_that_skipped_a_step_or_names_another_pr_is_refused() {
     "$case_dir/stderr" "skipped-test-run: the skipped test step was not named"
   assert_no_grep 'pr merge' "$case_dir/gh.log" "skipped-test-run: gh pr merge ran without a test"
 
+  case_dir=$(make_case failed-lint-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_nm_run "$case_dir" "$NM_DEFAULT_RUN" fm/example-branch "$head" \
+    https://github.com/example/repo/pull/123 lint=failed
+  run_validation_case "$case_dir" 123
+  expect_code 1 "$(cat "$case_dir/rc")" "failed-lint-run: a run with a failed lint step must be refused"
+  assert_grep "run $NM_DEFAULT_RUN has failed steps: lint (failed)" \
+    "$case_dir/stderr" "failed-lint-run: the failed step was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "failed-lint-run: gh pr merge ran despite a failed step"
+
   case_dir=$(make_case run-without-test-step)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
