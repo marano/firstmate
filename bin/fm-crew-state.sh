@@ -424,22 +424,10 @@ nm_active_steps_rows() {
   '
 }
 
-# Rows of the `steps[N]{step,status,findings,duration_ms}:` table in the
-# captured run output ($RUN_OUT) - the full per-step ledger, present on
-# terminal runs too, unlike active_steps[] which the pipeline emits only while
-# a step is actually running or fixing. Column order is deliberately not
-# assumed: the header's own indentation bounds the block, and callers below
-# read the table as text.
+# Rows of the per-step ledger in the captured run output ($RUN_OUT); the
+# parser is fm_nm_steps_rows in bin/fm-nm-run-lib.sh.
 nm_steps_rows() {
-  printf '%s\n' "$RUN_OUT" | awk '
-    /^[[:space:]]*steps\[[0-9]+\]\{/ { hdr = index($0, "steps"); inblock = 1; next }
-    inblock {
-      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
-      match($0, /[^ \t]/)
-      if (RSTART <= hdr) { inblock = 0; next }
-      print
-    }
-  '
+  fm_nm_steps_rows "$RUN_OUT"
 }
 
 # 0 when the pipeline itself reports RECENT activity on an actively running or
