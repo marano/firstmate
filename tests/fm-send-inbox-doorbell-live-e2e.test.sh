@@ -13,9 +13,16 @@
 # file) and ACKNOWLEDGE it (the mv into handled/), failing loudly with the
 # harness name and version.
 #
+# For claude it also proves the queued shape live: a doorbell rung while the
+# worker is mid-turn waits in claude's queue above the composer, the shared
+# classifier must read that composer `pending` (not `empty`) while it waits,
+# and the queued doorbell must still be delivered and acknowledged when the
+# turn ends - the busy case the watcher's stuck-composer alarm must never
+# fire on (bin/fm-task-inbox-lib.sh).
+#
 # Run explicitly with FM_SEND_INBOX_LIVE_E2E=1. This test spends a small
-# number of real model tokens per installed harness (one short turn each) -
-# authorized by the harness-dependent-checks rule. An absent harness is
+# number of real model tokens per installed harness (one short turn each, two
+# for claude) - authorized by the harness-dependent-checks rule. An absent harness is
 # reported explicitly and skipped; a run that verified nothing fails rather
 # than passing vacuously. Restrict with
 # FM_SEND_INBOX_LIVE_HARNESSES="claude codex ..." when needed, and tune the
@@ -185,10 +192,73 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
+# claude's queued shape: busy the worker with a foreground command, ring the
+# doorbell into it, and require the composer to read pending while the
+# doorbell waits in the queue, then the ordinary act-and-acknowledge once the
+# turn ends. The queue signals seen are printed so the dated record can say
+# which of the classifier's two signals this version drew.
+check_claude_queued_doorbell() {
+  local version win=hx-claude-queue home task acted rec handled i ready_rc state screen
+  version=$(harness_version claude)
+  home="$LAB/claude-queue-home"
+  mkdir -p "$home/state"
+  task=live-claude-queue
+  acted="$LAB/acted-claude-queue"
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
+    -- bash -lc "$(launch_cmd claude)" \
+    || { FAILED=1; printf 'not ok - claude queue (%s): could not launch in the isolated tmux server\n' "$version" >&2; return 0; }
+  wait_ready "$win"; ready_rc=$?
+  [ "$ready_rc" -ne 1 ] || { FAILED=1; printf 'not ok - claude queue (%s): composer stayed visibly pending before the busy turn\n' "$version" >&2; return 0; }
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l \
+    "Run this exact shell command in the foreground, not in the background, and wait for it: python3 -c 'import time; time.sleep(40)' - then reply with one short line."
+  sleep 0.5
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Enter
+  i=0
+  until [ "$(fm_pane_busy_state "$SESSION:$win" claude)" = busy ]; do
+    i=$((i + 1))
+    [ "$i" -lt 60 ] || { FAILED=1; printf 'not ok - claude queue (%s): the worker never showed a busy turn\n' "$version" >&2; return 0; }
+    sleep 1
+  done
+  sleep 5
+  printf 'window=%s:%s\nkind=ship\nharness=claude\n' "$SESSION" "$win" > "$home/state/$task.meta"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
+    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
+    >/dev/null 2>&1 || { FAILED=1; printf 'not ok - claude queue (%s): fm-send refused the live steer\n' "$version" >&2; return 0; }
+  sleep 2
+  state=$(fm_tmux_composer_state "$SESSION:$win")
+  screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+  note "claude ($version) queue signals: placeholder=$(printf '%s\n' "$screen" | grep -cF 'Press up to edit queued messages') hint=$(printf '%s\n' "$screen" | grep -cF 'ctrl+x ctrl+s to send now') busy=$(fm_pane_busy_state "$SESSION:$win" claude)"
+  if [ "$state" != pending ]; then
+    FAILED=1
+    printf 'not ok - claude queue (%s): a doorbell queued behind a busy turn read %s, not pending\n' "$version" "$state" >&2
+    printf '%s\n' "$screen" | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  rec="$home/state/$task.inbox/001.msg"
+  handled="$home/state/$task.inbox/handled/001.msg"
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    [ -f "$handled" ] && [ -e "$acted" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -f "$handled" ] && [ -e "$acted" ]; then
+    pass "claude ($version): a doorbell queued behind a busy turn reads pending, then submits and is acted on and acked"
+  else
+    FAILED=1
+    printf 'not ok - claude queue (%s): the queued doorbell was not honored within %ss (acted=%s acked=%s)\n' \
+      "$version" "$TIMEOUT" "$([ -e "$acted" ] && echo yes || echo no)" "$([ -f "$handled" ] && echo yes || echo no)" >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
 HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse'}
 for h in $HARNESSES; do
   if command -v "$h" >/dev/null 2>&1; then
     check_harness_doorbell "$h"
+    [ "$h" != claude ] || check_claude_queued_doorbell
   else
     note "harness absent, not verified here: $h"
   fi

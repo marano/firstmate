@@ -419,6 +419,20 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
 
+# QUEUED INPUT: claude keeps a message submitted while a turn is running in a
+# queue drawn ABOVE its composer, where it waits for the turn to end, and fills
+# the otherwise-empty composer row with a dim placeholder. Ghost stripping
+# removes that placeholder, so without this rule a pane holding unsent queued
+# text read `empty`. The queue is real input the model has not received, so a
+# bare composer showing it reads `pending`. Two independent signals, either of
+# which carries the verdict (verified live on claude 2.1.278; see
+# docs/verification/runtime-backends.md "Queued claude input"): the placeholder
+# on the composer row itself, and the send-now hint drawn under the last queued
+# message, within FM_COMPOSER_QUEUED_HINT_ROWS rows above the composer row.
+FM_COMPOSER_QUEUED_PLACEHOLDER_RE_DEFAULT='^Press up to edit queued messages$'
+FM_COMPOSER_QUEUED_HINT_RE_DEFAULT='ctrl\+x ctrl\+s to send now'
+FM_COMPOSER_QUEUED_HINT_ROWS=3
+
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
@@ -1056,6 +1070,10 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   plain=$(_fm_composer_row_content "$raw" 0)
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
+  if _fm_composer_bare_row_holds_queue "$screen" "$row" "$plain"; then
+    printf 'pending'
+    return 0
+  fi
   state=$(fm_composer_classify_content 0 "$content" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 0 "$styled")
   if [ "$styled" != 1 ] && [ "$state" = pending ]; then
@@ -1063,6 +1081,24 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
     return 0
   fi
   printf '%s' "$state"
+}
+
+# _fm_composer_bare_row_holds_queue: 0 when the bare composer at <row> shows
+# queued, unsent input (FM_COMPOSER_QUEUED_* above). <plain> is the composer
+# row's unstripped text, so the dim placeholder is still visible in it.
+_fm_composer_bare_row_holds_queue() {  # <screen> <row> <plain>
+  local screen=$1 row=$2 body=$3 glyph='' above i=1
+  if fm_composer_leading_agent_glyph_var glyph "$body"; then
+    body=${body#*"$glyph"}
+    fm_composer_normalize_trim_var body
+    printf '%s' "$body" | grep -qE "$FM_COMPOSER_QUEUED_PLACEHOLDER_RE_DEFAULT" && return 0
+  fi
+  while [ "$i" -le "$FM_COMPOSER_QUEUED_HINT_ROWS" ] && [ "$((row - i))" -ge 0 ]; do
+    above=$(_fm_composer_screen_row "$((row - i))" "$screen" | fm_composer_strip_ansi)
+    printf '%s' "$above" | grep -qE "$FM_COMPOSER_QUEUED_HINT_RE_DEFAULT" && return 0
+    i=$((i + 1))
+  done
+  return 1
 }
 
 # _fm_composer_row_is_omp_status: 0 when the trimmed row is omp's status line

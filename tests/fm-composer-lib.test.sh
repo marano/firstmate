@@ -572,6 +572,68 @@ test_matrix_claude_inside_zellij_ansi_dump() {
   pass "matrix: the real claude-in-zellij --ansi dump reads empty in both locales"
 }
 
+# claude_queued_screen <spinner> <placeholder> <hint>: a claude pane holding a
+# queued doorbell, with the escape sequences captured live on claude 2.1.278
+# (docs/verification/runtime-backends.md "Queued claude input"); only the
+# inbox path is shortened. Each argument is 1 to keep that row: the busy
+# spinner row, the dim placeholder on the composer row (0 draws claude's
+# idle `❯`+NBSP instead), and the send-now hint under the queued message. The
+# composer row is row 9.
+claude_queued_screen() {  # <spinner> <placeholder> <hint>
+  local rule="${ESC}[38;5;244m────────────────────────────────────────${ESC}[39m"
+  printf '%s\n' "⏺ Bash(python3 -c 'import time; time.sleep(40)')"
+  printf '%s\n' "  ⎿  Running… (9s)"
+  if [ "$1" = 1 ]; then
+    printf '%s\n' "${ESC}[38;5;174m✶${ESC}[39m ${ESC}[38;5;174mGerminating… ${ESC}[38;5;246m(11s · ↓${ESC}[39m ${ESC}[38;5;246m97 tokens)${ESC}[39m"
+  else
+    printf '\n'
+  fi
+  printf '\n'
+  printf '%s\n' "${ESC}[38;5;239m${ESC}[48;5;237m❯ ${ESC}[38;5;246m: Firstmate instruction waiting: list '/work/w1.inbox'/*.msg and, ${ESC}[39m"
+  printf '%s\n' "  ${ESC}[38;5;246min numeric order, read and act on each, then mv each handled file to ${ESC}[39m"
+  printf '%s\n' "  ${ESC}[38;5;246m'/work/w1.inbox'/handled/.${ESC}[39m"
+  if [ "$3" = 1 ]; then
+    printf '%s\n' "${ESC}[49m  ${ESC}[38;5;246mctrl+x ctrl+s to send now${ESC}[39m"
+  else
+    printf '\n'
+  fi
+  printf '%s\n' "$rule"
+  if [ "$2" = 1 ]; then
+    printf '%s\n' "${ESC}[38;5;246m❯ ${ESC}[2m${ESC}[39mPress up to edit queued messages${ESC}[0m"
+  else
+    printf '%s\n' "${ESC}[38;5;246m❯${NBSP}${ESC}[39m"
+  fi
+  printf '%s\n' "$rule"
+  printf '%s\n' "  ${ESC}[38;5;211m⏵⏵ bypass permissions on${ESC}[39m"
+}
+
+test_matrix_claude_queued_input_is_pending() {
+  # A message submitted while claude is mid-turn waits in a queue ABOVE the
+  # composer and never reaches the model until that turn ends. Ghost stripping
+  # removes the dim placeholder that is all the composer row shows, so this
+  # pane read `empty` and a doorbell rang into it queued behind the text.
+  local screen plain
+  screen=$(claude_queued_screen 1 1 1)
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "claude queued on tmux" pending "$CAPS_TMUX" "$screen" 9 probe-absent
+  assert_screen "claude queued on herdr" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "claude queued on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude queued on cmux/orca" pending "$CAPS_PLAIN" "$plain"
+  # Either signal alone carries the verdict, so neither vendor string is
+  # load-bearing on its own.
+  assert_screen "claude queued, placeholder only" pending "$CAPS_TMUX" "$(claude_queued_screen 1 1 0)" 9 probe-absent
+  assert_screen "claude queued, hint only" pending "$CAPS_TMUX" "$(claude_queued_screen 1 0 1)" 9 probe-absent
+  # The divergence the two cases above depend on: with both signals gone the
+  # same screen is claude's ordinary empty composer, so neither case can pass
+  # vacuously.
+  assert_screen "claude with no queue signal" empty "$CAPS_TMUX" "$(claude_queued_screen 1 0 0)" 9 probe-absent
+  # The hint counts only directly above the composer: the same words further
+  # up the transcript are just text.
+  screen=$'  ctrl+x ctrl+s to send now\nlater output\nmore output\nstill more output\n'"$(claude_queued_screen 0 0 0)"
+  assert_screen "claude hint text far above the composer" empty "$CAPS_TMUX" "$screen" 13 probe-absent
+  pass "matrix: claude's queued, unsent input reads pending on every profile, from either signal"
+}
+
 test_strict_blank_row_divergence() {
   # THE STRICT POSTURE PIN (captain decision blank-row-injection-posture,
   # 2026-08-09): a blank or otherwise unidentified input row with no positive
@@ -794,6 +856,7 @@ test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
+test_matrix_claude_queued_input_is_pending
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_contiguous_transcript_reanchors_on_live_prompt

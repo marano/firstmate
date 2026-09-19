@@ -632,6 +632,27 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+### Queued claude input
+
+A doorbell rung while a claude worker is mid-turn does not submit: claude 2.1.278 moves it into a queue drawn above the composer, adds a `ctrl+x ctrl+s to send now` hint under the last queued message, and leaves the composer row showing only a dim `Press up to edit queued messages` placeholder.
+Ghost stripping removes that placeholder, so before the classifier learned the shape the pane read `empty` while the doorbell had not reached the model, and every re-ring queued another copy behind it.
+`bin/fm-composer-lib.sh` now reads either signal as `pending`, and the steering-inbox ladder names a worker whose composer stays that way through every attempt as unable to receive messages.
+Verified on 2026-09-19 with claude 2.1.278 (Claude Code), tmux 3.6a, macOS arm64, on an isolated private socket:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=claude tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.278 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
+# claude (2.1.278 (Claude Code)) queue signals: placeholder=1 hint=1 busy=busy
+ok - claude (2.1.278 (Claude Code)): a doorbell queued behind a busy turn reads pending, then submits and is acted on and acked
+```
+
+Both signals rendered, the composer read `pending` while the doorbell waited behind the busy turn, and the queue then submitted by itself: the worker acted on the instruction and acknowledged it, which is the busy case the stuck-composer alarm must stay silent on.
+The shape was first captured live on the same version while reproducing a queued doorbell by hand; that capture's escape sequences are the portable fixtures in `tests/fm-composer-lib.test.sh` and `tests/fm-task-inbox.test.sh`.
+The trigger that leaves such a queue stranded on an idle worker was not reproduced: a turn that ended normally and one interrupted with Escape both submitted the queued doorbell.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
