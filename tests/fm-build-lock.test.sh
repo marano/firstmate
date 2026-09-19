@@ -725,9 +725,11 @@ HOLD_STATUS="$TMP_ROOT/hold.status"
 HOLD_MARK="$TMP_ROOT/hold-status-running"
 FM_TASK_STATUS="$HOLD_STATUS" FM_BUILD_LOCK_HOLD_WARN=2 \
   "$SCRIPT" sh -c "touch '$HOLD_MARK'; sleep 5" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
 HOLD_HOLDER=$!
 await_path "$HOLD_MARK" || fail "the holder-status fixture never started"
 "$SCRIPT" true >/dev/null 2>&1 &
+# shellcheck disable=SC2031
 HOLD_WAITER=$!
 wait "$HOLD_HOLDER" 2>/dev/null || true
 wait "$HOLD_WAITER" 2>/dev/null || true
@@ -753,6 +755,7 @@ WAIT_STATUS="$TMP_ROOT/wait.status"
 : >"$WAIT_STATUS"
 WAIT_MARK="$TMP_ROOT/wait-status-running"
 "$SCRIPT" sh -c "touch '$WAIT_MARK'; sleep 3.5" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
 WAIT_HOLDER=$!
 await_path "$WAIT_MARK" || fail "the waiter-status fixture never started"
 FM_TASK_STATUS="$WAIT_STATUS" FM_BUILD_LOCK_WAIT_WARN=1 \
@@ -794,6 +797,7 @@ pass "without an absolute FM_TASK_STATUS a ceiling appends nothing"
 LABEL_MARK="$TMP_ROOT/label-running"
 "$SCRIPT" --label 'bin/fm-test-run.sh tests/labelled.test.sh' \
   sh -c "touch '$LABEL_MARK'; sleep 3" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
 LABEL_HOLDER=$!
 await_path "$LABEL_MARK" || fail "the label fixture never started"
 sleep 0.3
