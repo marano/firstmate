@@ -99,6 +99,10 @@ A second, baseline-gated conversion covers harnesses whose mid-turn screen the c
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
+Typed content can impersonate structure, so a composer holding the caller's own unconfirmed text can read `unknown` indefinitely: a wrapped row ending in the away digest's ` | ` separator reads as a box edge.
+`fm_tmux_resubmit_own_text` therefore presses Enter again, never retyping or clearing, only while `fm_composer_holds_text` proves the composer holds exactly the text the caller typed, anchored on the agent prompt glyph and the cursor row; any other, extra, or moved text sends nothing.
+The away daemon is its only caller, for its own digest; `tests/fm-afk-inject-e2e.test.sh` (Scenario E) and `tests/fm-composer-lib.test.sh` cover it, and the live composer guard proves it on a real Claude composer.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.

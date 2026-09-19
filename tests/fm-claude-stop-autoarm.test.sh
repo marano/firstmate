@@ -1202,6 +1202,39 @@ test_afk_mid_cycle_suppresses_rewake() {
   pass "auto-arm: mid-cycle AFK hands triage to the daemon with no rewake"
 }
 
+# The claude away posture end to end: /afk records the posture and the real
+# launcher, run under a claude ancestor, refuses to start the typed-injection
+# daemon, so no daemon flag stands. An actionable wake while away then reaches
+# firstmate through this Stop hook's exit-2 rewake, and nothing ever sends a
+# keystroke to any pane - the path that strands a daemon digest is never used.
+test_claude_away_posture_rewakes_without_a_typing_daemon() {
+  local dir out status tmuxbin
+  dir=$(make_primary_dir "$TMP_ROOT/claude-away")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  tmuxbin="$TMP_ROOT/claude-away-tmuxbin"
+  mkdir -p "$tmuxbin"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "$dir/tmux-calls" > "$tmuxbin/tmux"
+  chmod +x "$tmuxbin/tmux"
+  if ! FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null 2>&1 \
+    || ! FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null 2>&1; then
+    fail "claude away: could not confirm the away posture"
+  fi
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" TMUX_PANE=%fm-claude-away PATH="$tmuxbin:$PATH" \
+    "$FAKE_CLAUDE" -c '"$1" start-native; exit $?' _ "$ROOT/bin/fm-afk-launch.sh" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "claude away: the daemon entry must refuse an away entry on claude"
+  assert_contains "$out" "no longer launched on claude" "claude away: the refusal must name claude"
+  [ ! -e "$dir/state/.afk" ] || fail "claude away: a daemon flag was written, so the Stop hook would stand down"
+  [ ! -e "$dir/state/.supervise-daemon.lock" ] || fail "claude away: a daemon lock appeared"
+  assert_present "$dir/state/.afk-contract" "claude away: the away posture record must stand"
+  out=$(PATH="$tmuxbin:$PATH" run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "claude away: an actionable wake must rewake firstmate through the Stop hook"
+  assert_contains "$out" "firstmate watcher wake" "claude away: the rewake must carry the wake banner"
+  assert_contains "$out" "stale: fixture-win actionable" "claude away: the rewake must carry the wake reason"
+  [ ! -s "$dir/tmux-calls" ] || fail "claude away: something drove a pane while away: $(cat "$dir/tmux-calls")"
+  pass "claude away: the posture launches no daemon and an actionable wake still rewakes firstmate with nothing typed"
+}
+
 test_active_in_marked_secondmate_home() {
   local dir out status
   dir=$(make_secondmate_dir "$TMP_ROOT/secondmate")
@@ -1272,6 +1305,7 @@ test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
+test_claude_away_posture_rewakes_without_a_typing_daemon
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib

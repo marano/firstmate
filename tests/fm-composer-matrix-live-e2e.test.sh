@@ -11,6 +11,8 @@
 # `empty`, failing loudly with the harness name and version. It also proves:
 #   - the strict blank-row posture live: a plain shell pane with a blank
 #     cursor row must classify unknown and defer injection;
+#   - the away daemon's own unsent digest provable in a real claude composer
+#     (fm_tmux_composer_holds_text), with one more typed character breaking it;
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
@@ -65,6 +67,8 @@ chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmux-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-operational-input.sh"
 
 tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 220 -y 50 -c "$ROOT"
 
@@ -122,6 +126,59 @@ for h in claude codex opencode pi grok kimi muse; do
     note "harness absent, not verified here: $h"
   fi
 done
+
+# --- 1b. claude: the away daemon's own unsent digest is provable -------------
+# Claude Code strips the digest's invisible U+2063 marks and swallows the
+# Enter that should submit it, so the typed digest can sit in the composer,
+# and a wrapped row ending in its ` | ` separator makes the classifier read
+# `unknown` (2026-09-18: every later injection deferred for 7.4 hours). The
+# daemon then resubmits only text fm_tmux_composer_holds_text proves is
+# exactly its own. This types a digest into a real idle claude at a width that
+# wraps it (no Enter, so no prompt is submitted), requires the proof to hold,
+# requires it to fail once one more character is typed, and reports whether
+# the classifier could prove the same composer.
+check_claude_own_digest_provable() {
+  local win=hx-claude-own version encoded msg verdict i=0
+  version=$(harness_version claude)
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- claude \
+    || fail "claude ($version): could not launch the own-digest check"
+  tmux -L "$SOCKET" resize-window -t "$SESSION:$win" -x 140 -y 50 2>/dev/null || true
+  while [ "$i" -lt "${FM_COMPOSER_MATRIX_LIVE_POLLS:-45}" ]; do
+    [ "$(fm_tmux_composer_state "$SESSION:$win")" = empty ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+  msg='Supervisor escalate (       2 event(s)): unknown wake: inactive terminal outcome awaiting captain presentation: child=demo-alpha-widget-lock-signals state=done pr=https://example.invalid/demo/widgets/pull/390 | demo-beta-comment-auth.status: needs-decision [key=nm-01DEMO0000000000000000000-test]: ask-user findings=test-1 file=/tmp/fm-afk-repro/data/demo-beta-comment-auth/nm-01DEMO0000000000000000000-findings.txt (pre-read; re-arm not needed — watcher daemon-managed)'
+  fm_operational_input_encode away-supervisor "$msg" encoded \
+    || fail "claude ($version): could not encode the probe digest"
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l "$encoded"
+  sleep 2
+  verdict=$(fm_tmux_composer_state "$SESSION:$win")
+  if fm_tmux_composer_holds_text "$SESSION:$win" "$encoded"; then
+    tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l 'x'
+    sleep 1
+    if fm_tmux_composer_holds_text "$SESSION:$win" "$encoded"; then
+      FAILED=1
+      printf 'not ok - claude (%s): own-digest proof still held after another character was typed\n' "$version" >&2
+    else
+      CHECKED=$((CHECKED + 1))
+      pass "claude ($version): its composer holding the daemon's own digest is provable, and one more character breaks the proof (classifier verdict: $verdict)"
+    fi
+  else
+    printf '# claude own-digest pane tail at failure:\n' >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null \
+      | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - claude (%s): its composer holding the daemon'"'"'s own digest was not provable (classifier verdict: %s)\n' \
+      "$version" "${verdict:-unreadable}" >&2
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+if command -v claude >/dev/null 2>&1; then
+  check_claude_own_digest_provable
+else
+  note "harness absent, not verified here: claude (own-digest proof)"
+fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------
 # A plain shell pane parked on a blank line between two rules (the audit's

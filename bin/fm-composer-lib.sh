@@ -1470,6 +1470,116 @@ EOF
   esac
 }
 
+# Zero-width format characters (Unicode Cf, White_Space=No) that a harness may
+# drop from typed text or a transport may add, as UTF-8 octal escapes for the
+# same reviewability reason as FM_COMPOSER_UNICODE_SPACES above:
+#   U+200B..U+200D ZERO WIDTH SPACE..ZERO WIDTH JOINER
+#   U+2060..U+2064 WORD JOINER..INVISIBLE PLUS (U+2063 is the operational mark)
+#   U+FEFF ZERO WIDTH NO-BREAK SPACE
+# Only the typed-text ownership proof below drops them; the shape classifier
+# never does, because it must not read an invisible character as nothing.
+FM_COMPOSER_ZERO_WIDTH=()
+for _fm_composer_zw_octal in \
+  '\0342\0200\0213' '\0342\0200\0214' '\0342\0200\0215' \
+  '\0342\0201\0240' '\0342\0201\0241' '\0342\0201\0242' '\0342\0201\0243' '\0342\0201\0244' \
+  '\0357\0273\0277'; do
+  printf -v _fm_composer_zw_utf8 '%b' "$_fm_composer_zw_octal"
+  FM_COMPOSER_ZERO_WIDTH+=("$_fm_composer_zw_utf8")
+done
+unset -v _fm_composer_zw_octal _fm_composer_zw_utf8
+
+# fm_composer_squash_var: reduce text to the bytes a terminal must show for it,
+# in place through the named variable: Unicode whitespace is mapped, then every
+# whitespace character and every zero-width format character is removed.
+# Wrapping inserts line breaks and indentation anywhere, including mid-word, so
+# only this squashed form compares typed text with its rendering.
+fm_composer_squash_var() {  # <varname>
+  local __fmsq_name=$1 __fmsq_text __fmsq_zw
+  fm_composer_normalize_spaces_var "$__fmsq_name"
+  __fmsq_text=${!__fmsq_name}
+  for __fmsq_zw in "${FM_COMPOSER_ZERO_WIDTH[@]}"; do
+    __fmsq_text=${__fmsq_text//"$__fmsq_zw"/}
+  done
+  __fmsq_text=${__fmsq_text//[[:space:]]/}
+  printf -v "$__fmsq_name" '%s' "$__fmsq_text"
+}
+
+# fm_composer_holds_text: 0 when the captured screen's composer holds EXACTLY
+# <text> and nothing else - the positive proof a caller needs before pressing
+# Enter again on text it typed itself whose submit it could not confirm.
+#
+# Why a text-anchored proof rather than fm_composer_classify_screen: the
+# classifier proves SHAPE, and typed content can impersonate shape. A wrapped
+# row of the away daemon's own digest that begins or ends with its ` | `
+# separator reads as a structural edge, so the wrap region is unproven and the
+# verdict is `unknown` for as long as the text stays (measured on claude
+# 2.1.277 at 101-105 and 135-152 columns). The caller knows every byte it
+# typed, so ownership is proven by matching those bytes instead:
+#   - the match starts right after a leading AGENT prompt glyph (a bare
+#     composer's own row; a shell glyph never anchors it) with nothing else
+#     before it on that row;
+#   - that row and the rows below it, squashed and concatenated
+#     (fm_composer_squash_var), equal <text> squashed, exactly;
+#   - the row after the match is blank or a structural edge, such as the
+#     composer's own closing rule, so nothing typed follows it;
+#   - with a cursor (tmux), the cursor sits on the match's last row, where
+#     typing the text left it.
+# The anchor is the bottom-most agent-glyph row at or above the cursor (the
+# bottom-most one without a cursor), so a transcript echo of an earlier,
+# delivered copy of the same text never matches. Rows are read ANSI-stripped
+# but not ghost-stripped, because the proof compares exact visible bytes.
+# A screen this cannot prove - a bordered or left-bar composer, text taller
+# than the pane, or anything else - returns 1 and the caller must not press.
+fm_composer_holds_text() {  # <caps> <screen> <cursor_row> <text>
+  local caps=$1 screen=$2 cy=${3:-} text=$4 kv cursor=0 plain expected row=0 line glyph='' g=-1 acc next
+  local -a rows=()
+  while IFS= read -r kv; do
+    [ "$kv" = cursor=1 ] && cursor=1
+  done <<CAPS
+$caps
+CAPS
+  [ "$cursor" = 1 ] || cy=''
+  case "$cy" in *[!0-9]*) return 1 ;; esac
+  expected=$text
+  fm_composer_squash_var expected
+  [ -n "$expected" ] || return 1
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    rows[row]=$line
+    if { [ -z "$cy" ] || [ "$row" -le "$cy" ]; } \
+       && fm_composer_leading_agent_glyph_var glyph "$line"; then
+      g=$row
+    fi
+    row=$((row + 1))
+  done <<SCREEN
+$plain
+SCREEN
+  [ "$g" -ge 0 ] || return 1
+  fm_composer_leading_agent_glyph_var glyph "${rows[g]}" || return 1
+  acc=${rows[g]#*"$glyph"}
+  fm_composer_squash_var acc
+  row=$g
+  while :; do
+    case "$expected" in
+      "$acc"*) ;;
+      *) return 1 ;;
+    esac
+    [ "$acc" != "$expected" ] || break
+    row=$((row + 1))
+    [ "$row" -lt "${#rows[@]}" ] || return 1
+    line=${rows[row]}
+    fm_composer_squash_var line
+    [ -n "$line" ] || return 1
+    acc=$acc$line
+  done
+  if [ -n "$cy" ] && [ "$cy" -ne "$row" ]; then
+    return 1
+  fi
+  next=${rows[row + 1]:-}
+  fm_composer_normalize_trim_var next
+  [ -z "$next" ] || fm_composer_row_has_edge "$next"
+}
+
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
 # for the cursor-less backends (cmux, orca, zellij), parameterised by the
 # adapter's send-key and composer-state functions. The caller has already

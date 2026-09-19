@@ -267,6 +267,7 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
     "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-stranded" \
     "$TRUNCATED_INPUT"
 }
 
@@ -373,6 +374,10 @@ GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
+  fi
+  if [ -s "$STATE/.subsuper-stranded" ]; then
+    lines="$lines
+delivery stranded: a digest the daemon typed was never confirmed submitted and may still sit unsent in the composer"
   fi
   if [ -s "$TRUNCATED_INPUT" ]; then
     truncated=$(awk -F '\t' -v since="${since:-0}" '

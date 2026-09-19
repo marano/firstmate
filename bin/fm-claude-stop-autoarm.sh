@@ -17,7 +17,9 @@
 #     ancestry remains inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
-#     translation time so a mid-cycle AFK transition is honored).
+#     translation time so a mid-cycle AFK transition is honored). On claude
+#     that flag stands only for /quiet: an away posture launches no daemon
+#     (bin/fm-afk-launch.sh), so this hook keeps delivering every wake.
 #   - Need: arms only while the home needs supervision, as
 #     bin/fm-supervision-lib.sh defines it; an idle home exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one

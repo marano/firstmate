@@ -546,6 +546,29 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-19 Claude away digest left unsent in the composer
+
+Verified on 2026-09-19 on macOS arm64 with tmux 3.6a against Claude Code 2.1.277 and 2.1.278, each in an isolated private tmux server with the away digest typed through `tmux send-keys -l` exactly as the daemon types it.
+Claude Code removes the digest's U+2063 operational marks from the composer, prints `Removed 2 invisible characters · review and press Enter to send`, and swallows that Enter; only the next Enter submits, and the submitted message carries no U+2063.
+When a wrapped continuation row of the digest ends in its ` | ` separator, the shared classifier reads that composer `unknown`: a two-event digest did so at 101-105 and 135-152 columns on 2.1.277, and the daemon's own flush then logged `inject failed: submit unconfirmed ... (verdict=unknown ...)` followed by `inject deferred: supervisor composer not confirmed-empty (state=unknown ...)` on every later flush.
+The away daemon therefore resubmits only text `fm_composer_holds_text` proves is exactly its own, and a claude away posture runs no daemon at all.
+The live composer guard is the refresh command; it types a digest into a real idle claude at 140 columns without submitting it:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.278 (Claude Code)): real idle composer classifies empty
+ok - claude (2.1.278 (Claude Code)): its composer holding the daemon's own digest is provable, and one more character breaks the proof (classifier verdict: unknown)
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 3 live surface(s)
+```
+
+The guard does not press Enter, so the swallowed-Enter behavior above is recorded from the isolated runs rather than refreshed by it; `tests/fm-afk-inject-e2e.test.sh` Scenario E pins the resulting daemon behavior portably against a fixture composer with that shape.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

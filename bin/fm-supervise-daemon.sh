@@ -232,6 +232,9 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
+# Set by inject_msg when it returns 3 (typed, submit unconfirmed); read by
+# escalate_flush to record the stranded digest.
+INJECT_STRANDED_TEXT=''
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -732,17 +735,133 @@ escalate_add() {  # <state> <distilled-item>
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
+# A digest typed by an earlier flush whose submit was never confirmed is
+# resolved first (stranded_flush below), so a new digest is never typed behind
+# one that may still sit in the composer. Once that digest is resubmitted, the
+# supervisor's turn on it is starting, so anything buffered after it waits for
+# the next flush instead of being typed into a pane the busy guard may not yet
+# see as busy.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg rc
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
+  if [ -e "$state/.subsuper-stranded" ]; then
+    stranded_flush "$state"
+    rc=$?
+    case "$rc" in
+      0)
+        rm -f "$state/.subsuper-inject-wedged"
+        return 0
+        ;;
+      2) [ -s "$buf" ] || return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  inject_msg "$msg" "$state"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  [ "$rc" -ne 3 ] || stranded_record "$state" "$n" "$INJECT_STRANDED_TEXT"
+  return 1
+}
+
+# --- stranded digest: typed, never confirmed submitted ----------------------
+# state/.subsuper-stranded records a digest inject_msg typed whose submit it
+# could not confirm, so the text may still sit in the supervisor composer:
+# line 1 is how many leading buffer lines that digest carries, line 2 the exact
+# typed text. On 2026-09-18 such a digest (claude swallowed its Enter, and the
+# wrapped text read as unknown) blocked every later injection for 7.4 hours,
+# because the composer guard only ever saw "not confirmed-empty". The record
+# lets every later flush recognise that text as the daemon's OWN and press
+# Enter on it again - only while the backend proves the composer holds exactly
+# that text (fm_backend_resubmit_own_text), never retyping and never clearing,
+# so text the captain typed is never touched.
+stranded_record() {  # <state> <covered-lines> <typed-text>
+  local state=$1 lines=$2 text=$3 rec tmp
+  lines=$(printf '%s' "$lines" | tr -d '[:space:]')
+  case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+  rec="$state/.subsuper-stranded"
+  tmp=$(mktemp "$rec.XXXXXX") || { log "stranded digest: could not record the unconfirmed digest"; return 1; }
+  printf '%s\n%s\n' "$lines" "$text" > "$tmp" && mv -f "$tmp" "$rec" && return 0
+  rm -f "$tmp"
+  log "stranded digest: could not record the unconfirmed digest"
+  return 1
+}
+
+# stranded_drop_delivered: remove the leading buffer lines a resubmitted
+# stranded digest carried. Items buffered after it follow them in order, so
+# they stay queued for the next ordinary flush.
+stranded_drop_delivered() {  # <state> <covered-lines>
+  local state=$1 lines=$2 buf tmp
+  buf="$state/.subsuper-escalations"
+  [ -s "$buf" ] || return 0
+  tmp=$(mktemp "$buf.XXXXXX") || return 1
+  if tail -n +"$((lines + 1))" "$buf" > "$tmp" && mv -f "$tmp" "$buf"; then
+    [ -s "$buf" ] || rm -f "${buf}.since"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# stranded_flush: resolve the stranded digest. 0 when it was resubmitted and
+# confirmed (its buffer lines are dropped), 2 when the record is gone without a
+# confirmation (it left the composer, or the record was unreadable), and 1
+# while it still blocks typing (resubmit unconfirmed, or the composer is not
+# provably just the daemon's own text). A digest that left the composer
+# without a confirmation may have been discarded, so its lines stay buffered
+# for re-delivery: a duplicate beats a loss.
+stranded_flush() {  # <state>
+  local state=$1 rec lines='' text='' target backend retries sleep_s verdict composer
+  rec="$state/.subsuper-stranded"
+  { IFS= read -r lines; IFS= read -r text; } < "$rec" 2>/dev/null || true
+  case "$lines" in ''|*[!0-9]*) lines='' ;; esac
+  if [ -z "$lines" ] || [ -z "$text" ]; then
+    log "stranded digest record unreadable; dropping it and re-delivering the buffer"
+    rm -f "$rec"
+    return 2
+  fi
+  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  target="${FM_SUPERVISOR_TARGET:-}"
+  if [ -z "$target" ]; then
+    log "inject deferred: no supervisor pane resolved (FM_SUPERVISOR_TARGET unset)"
+    return 1
+  fi
+  backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  fm_backend_target_exists "$backend" "$target" || return 1
+  if pane_is_busy "$target" "$backend"; then
+    log "inject deferred: supervisor pane busy (agent mid-turn)"
+    return 1
+  fi
+  retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
+  sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
+  verdict=$(fm_backend_resubmit_own_text "$backend" "$target" "$text" "$retries" "$sleep_s")
+  case "$verdict" in
+    empty)
+      stranded_drop_delivered "$state" "$lines" || {
+        log "stranded digest resubmitted, but its ${lines} buffered event(s) could not be dropped; they may repeat"
+      }
+      rm -f "$rec"
+      log "inject recovered: resubmitted the daemon's own stranded digest (${lines} event(s))"
+      return 0
+      ;;
+    not-own)
+      composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+      if [ "$composer" = empty ]; then
+        rm -f "$rec"
+        log "stranded digest left the composer unconfirmed; re-delivering its ${lines} event(s)"
+        return 2
+      fi
+      log "inject deferred: the supervisor composer is not provably just the daemon's own stranded digest (state=${composer:-unknown}); leaving it untouched"
+      return 1
+      ;;
+  esac
+  log "inject deferred: resubmitted the daemon's own stranded digest; submit still unconfirmed (verdict=$verdict)"
   return 1
 }
 
@@ -761,6 +880,8 @@ escalate_retain_at_shutdown() {  # <state>
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null | tr -d ' ')
   log "shutdown: retained ${n:-?} buffered escalation(s) in $buf for the next supervisor; typed nothing"
+  [ ! -e "$state/.subsuper-stranded" ] \
+    || log "shutdown: a digest typed earlier was never confirmed submitted and may still sit in the supervisor composer"
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -1277,6 +1398,9 @@ window_for_task() {  # <task-key> [state]
 # gone, the supervisor is busy, afk is inactive, or the verified submit cannot
 # be confirmed after bounded retries. On non-zero the caller preserves
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
+# Returns 3 exactly when the digest WAS typed and its submit stayed unconfirmed,
+# with the typed text in INJECT_STRANDED_TEXT, so the caller can record it as
+# stranded (escalate_flush / stranded_record).
 #
 # Submit model:
 #   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
@@ -1292,7 +1416,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded own
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1353,8 +1477,24 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
-  return 1
+  [ "$verdict" != send-failed ] || {
+    log "inject failed: could not type the digest into the supervisor pane"
+    return 1
+  }
+  # (5) Self-heal the swallowed submit. The retry loop presses Enter again only
+  # on a proven `pending` composer, but the daemon's own wrapped digest can read
+  # `unknown` (a row ending in its ` | ` separator looks like a box edge), and
+  # claude swallows the first Enter after stripping the digest's invisible
+  # markers. When the backend proves the composer holds exactly this digest,
+  # press Enter again now - Enter only, never a retype.
+  own=$(fm_backend_resubmit_own_text "$backend" "$target" "$msg" "$retries" "$sleep_s")
+  if [ "$own" = empty ]; then
+    log "inject recovered: resubmitted the daemon's own unconfirmed digest (first submit verdict=$verdict)"
+    return 0
+  fi
+  INJECT_STRANDED_TEXT=$msg
+  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, own-text resubmit=$own, text may be in composer)"
+  return 3
 }
 
 # --- INJECT_SKIP prefix match (literal prefixes, no regex) ------------------

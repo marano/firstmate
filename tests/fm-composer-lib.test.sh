@@ -806,6 +806,62 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+# =============================================================================
+# fm_composer_holds_text: the caller's own typed text, proven by its bytes.
+# The screen is the shape measured on claude 2.1.277 at 147 columns on
+# 2026-09-19: the away digest, its U+2063 marks stripped by claude, wrapped
+# with one continuation row ending in the digest's own ` | ` separator (the
+# row the classifier reads as a box edge) and one path split mid-word, above
+# an earlier delivered copy's transcript echo.
+# =============================================================================
+
+HOLD_MARK=$(printf '\342\201\243')
+HOLD_TEXT="${HOLD_MARK}FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       2 event(s)): unknown wake: inactive terminal outcome awaiting captain presentation: child=demo-alpha state=done pr=https://example.test/pr/390 | demo-beta.status: needs-decision [key=nm-01DEMO-test]: ask-user findings=test-1 file=/tmp/fm-e2e/demo-beta/nm-01DEMOFINDINGS.txt (pre-read) ${HOLD_MARK}/FIRSTMATE_OP: v1 away-supervisor"
+HOLD_RULE='──────────────────────────────────────'
+HOLD_ROWS=$'❯ FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       2 event(s)): unknown wake: inactive terminal outcome awaiting captain\n  presentation: child=demo-alpha state=done pr=https://example.test/pr/390 |\n  demo-beta.status: needs-decision [key=nm-01DEMO-test]: ask-user findings=test-1 file=/tmp/fm-e2e/demo-beta/nm-01DEMO\n  FINDINGS.txt (pre-read) /FIRSTMATE_OP: v1 away-supervisor'
+HOLD_SCREEN="❯ an earlier, delivered message"$'\n'"⏺ ack"$'\n'"$HOLD_RULE"$'\n'"$HOLD_ROWS"$'\n'"$HOLD_RULE"$'\n'"  manual mode on    Removed 2 invisible characters · review and press Enter to send"
+HOLD_LAST=6  # zero-based row of the text's last line (the cursor row)
+
+# holds <label> <want 0|1> <caps> <screen> <cursor> <text>, in both locales.
+assert_holds() {
+  local label=$1 want=$2 rc
+  shift 2
+  fm_composer_holds_text "$@"; rc=$?
+  [ "$rc" = "$want" ] || fail "$label: expected holds=$want, got $rc"
+  LC_ALL=C fm_composer_holds_text "$@"; rc=$?
+  [ "$rc" = "$want" ] || fail "$label under LC_ALL=C: expected holds=$want, got $rc"
+}
+
+test_holds_text_proves_own_text_the_classifier_cannot() {
+  # The divergence that makes the proof necessary: the classifier cannot
+  # prove this composer at all, while the caller's own bytes can.
+  assert_screen "stranded claude digest" unknown "$CAPS_TMUX" "$HOLD_SCREEN" "$HOLD_LAST" probe-absent
+  assert_holds "own stranded digest (tmux)" 0 "$CAPS_TMUX" "$HOLD_SCREEN" "$HOLD_LAST" "$HOLD_TEXT"
+  assert_holds "own stranded digest (cursorless)" 0 "$CAPS_STYLED" "$HOLD_SCREEN" '' "$HOLD_TEXT"
+  pass "fm_composer_holds_text: proves the caller's own wrapped, mark-stripped text where the classifier reads unknown"
+}
+
+test_holds_text_refuses_anything_else() {
+  local screen
+  assert_holds "one character different" 1 "$CAPS_TMUX" "$HOLD_SCREEN" "$HOLD_LAST" "${HOLD_TEXT}x"
+  assert_holds "a prefix of the text" 1 "$CAPS_TMUX" "$HOLD_SCREEN" "$HOLD_LAST" "${HOLD_TEXT% away-supervisor}"
+  assert_holds "cursor above the text's end" 1 "$CAPS_TMUX" "$HOLD_SCREEN" "$((HOLD_LAST - 1))" "$HOLD_TEXT"
+  screen=${HOLD_SCREEN/away-supervisor$'\n'"$HOLD_RULE"/away-supervisor and my reply$'\n'"$HOLD_RULE"}
+  assert_holds "captain text appended on the last row" 1 "$CAPS_TMUX" "$screen" "$HOLD_LAST" "$HOLD_TEXT"
+  screen=${HOLD_SCREEN/away-supervisor$'\n'"$HOLD_RULE"/away-supervisor$'\n'"  my reply on a new line"$'\n'"$HOLD_RULE"}
+  assert_holds "captain text on a row below" 1 "$CAPS_TMUX" "$screen" "$HOLD_LAST" "$HOLD_TEXT"
+  assert_holds "captain text on a row below (cursorless)" 1 "$CAPS_STYLED" "$screen" '' "$HOLD_TEXT"
+  screen=${HOLD_SCREEN/❯ FIRSTMATE_OP/❯ note: FIRSTMATE_OP}
+  assert_holds "captain text typed before it" 1 "$CAPS_TMUX" "$screen" "$HOLD_LAST" "$HOLD_TEXT"
+  screen="$HOLD_ROWS"$'\n'"⏺ ack"$'\n'"$HOLD_RULE"$'\n❯ \n'"$HOLD_RULE"
+  assert_holds "only a delivered transcript echo above an empty composer" 1 "$CAPS_TMUX" "$screen" 6 "$HOLD_TEXT"
+  assert_holds "only a delivered transcript echo (cursorless)" 1 "$CAPS_STYLED" "$screen" '' "$HOLD_TEXT"
+  assert_holds "a bordered composer is not provable" 1 "$CAPS_TMUX" $'╭────────╮\n│ ❯ hello │\n╰────────╯' 1 'hello'
+  assert_holds "a shell glyph never anchors the text" 1 "$CAPS_TMUX" $'$ hello\n' 0 'hello'
+  assert_holds "empty text is never owned" 1 "$CAPS_TMUX" $'❯ \n' 0 ''
+  pass "fm_composer_holds_text: refuses other, extra, moved, echoed, bordered, and shell-anchored text"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)
@@ -836,3 +892,5 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_holds_text_proves_own_text_the_classifier_cannot
+test_holds_text_refuses_anything_else

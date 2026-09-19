@@ -12,11 +12,16 @@
 # clause fields, the never-set, the refusal wording, and the record schema); `confirm` promotes it
 # into state/.afk-contract and prints the entry announcement (hold-for-return
 # only: no phone channel exists). The record is the posture in every harness.
-# On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
-# on Pi, the ordinary supervision session keeps running in both postures, and
-# `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` require the confirmed record before they
-# launch the daemon.
+# On Pi, pi-signed, and claude the away entry ENDS there: the away daemon is not
+# launched, the ordinary supervision session keeps running in both postures, and
+# `start` and `start-native` refuse an away entry on those harnesses. On claude
+# that session is the Stop-hook asyncRewake supervision
+# (bin/fm-claude-stop-autoarm.sh), which wakes firstmate without typing into its
+# composer; the daemon's typed digests stranded there overnight on 2026-09-18
+# when claude swallowed the submit. Claude still runs the daemon for /quiet
+# (FM_AFK_MODE=quiet, or a refresh of a running quiet daemon). Every other
+# harness still runs the daemon for now, so `start` and `start-native` require
+# the confirmed record before they launch the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -75,7 +80,9 @@
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
-# placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
+# placeholder instead of a real daemon. FM_AFK_LAUNCH_PRIMARY_HARNESS pins the
+# detected primary harness, so a test's verdict cannot depend on which harness
+# happens to run the test. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
 # override the captured captain pane/backend (an isolated lab pane in tests).
 # FM_AFK_MODE (away|quiet, default away) declares which mode a `start` entry
 # requests; leave it unset for a plain refresh of an already-running daemon
@@ -192,17 +199,35 @@ fm_afk_launch_usage() {
 }
 
 fm_afk_launch_primary_harness() {
+  if [ -n "${FM_AFK_LAUNCH_PRIMARY_HARNESS:-}" ]; then
+    printf '%s' "$FM_AFK_LAUNCH_PRIMARY_HARNESS"
+    return 0
+  fi
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 
-# The away daemon is no longer launched on Pi: the posture record is the whole
-# entry there and the ordinary supervision session runs in both postures.
+# The away daemon is not launched on Pi or claude: the posture record is the
+# whole away entry there and the ordinary supervision session runs in both
+# postures. Claude keeps the daemon only for quiet mode: an explicit
+# FM_AFK_MODE=quiet entry, or a mode-preserving refresh of a live quiet daemon.
 fm_afk_launch_daemon_allowed() {
   local harness
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh confirm and stop)"
+      return 1 ;;
+    claude)
+      case "${FM_AFK_MODE:-}" in
+        quiet) return 0 ;;
+        '')
+          if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && [ "$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")" = quiet ] \
+            && daemon_lock_held_by_live_daemon; then
+            return 0
+          fi
+          ;;
+      esac
+      fm_afk_launch_log "the away daemon is no longer launched on claude; the away-posture record is the posture there and the Stop-hook supervision keeps waking firstmate without typing into its composer (run bin/fm-afk-launch.sh confirm and stop)"
       return 1 ;;
   esac
   return 0
@@ -454,11 +479,12 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-stranded" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-stranded; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -582,7 +608,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-stranded; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -649,7 +675,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-stranded; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
