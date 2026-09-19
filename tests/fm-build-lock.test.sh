@@ -723,8 +723,8 @@ classify() {  # <function> <status-line>
 HOLD_STATUS="$TMP_ROOT/hold.status"
 : >"$HOLD_STATUS"
 HOLD_MARK="$TMP_ROOT/hold-status-running"
-FM_TASK_STATUS="$HOLD_STATUS" FM_BUILD_LOCK_HOLD_WARN=1 \
-  "$SCRIPT" sh -c "touch '$HOLD_MARK'; sleep 3.5" >/dev/null 2>&1 &
+FM_TASK_STATUS="$HOLD_STATUS" FM_BUILD_LOCK_HOLD_WARN=2 \
+  "$SCRIPT" sh -c "touch '$HOLD_MARK'; sleep 5" >/dev/null 2>&1 &
 HOLD_HOLDER=$!
 await_path "$HOLD_MARK" || fail "the holder-status fixture never started"
 "$SCRIPT" true >/dev/null 2>&1 &
