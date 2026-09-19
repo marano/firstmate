@@ -117,7 +117,9 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          # The job cap is this lane's hang tripwire, so it keeps the runner
+          # unbounded per script; the runner's default bound is for local runs.
+          bin/fm-test-run.sh --lane portable-parallel-1 --per-script-timeout-secs 0 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
@@ -156,7 +158,8 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
+          # Unbounded per script for the same reason as shard 1.
+          bin/fm-test-run.sh --lane portable-parallel-2 --per-script-timeout-secs 0 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
@@ -197,7 +200,8 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-3 \
+          # Unbounded per script for the same reason as shard 1.
+          bin/fm-test-run.sh --lane portable-parallel-3 --per-script-timeout-secs 0 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-3.json"
       - name: Upload shard 3 timing artifact
         if: always()
@@ -276,7 +280,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-test"
           # The Pi package is installed above and CI provides npm and tsc, so
           # any missing typecheck prerequisite is a broken lane, not a valid skip.
-          bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+          # The job cap is this lane's hang tripwire, so it keeps the runner
+          # unbounded per script; the runner's default bound is for local runs.
+          bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" --per-script-timeout-secs 0 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
@@ -386,7 +392,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-test"
           # Serial only. Fail if any script reports herdr not found. Live
           # harness credential tests stay outside this family (opt-in env only).
-          bin/fm-test-run.sh --family real-herdr-gated \
+          # The step timeout above is this lane's hang tripwire, so it keeps
+          # the runner unbounded per script.
+          bin/fm-test-run.sh --family real-herdr-gated --per-script-timeout-secs 0 \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
