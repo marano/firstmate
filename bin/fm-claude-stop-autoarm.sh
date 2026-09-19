@@ -53,8 +53,11 @@
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     exit 2 so the next Stop retries without repeating the notice, each one
+#     naming why it continues, until the episode's re-block budget
+#     (fm_turnend_block_budget in bin/fm-wake-lib.sh) is spent. The firing that
+#     finds it spent carries the episode's one attended alarm instead, and every
+#     later firing stays silent until positive watcher recovery.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -67,7 +70,9 @@
 # suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# exit 0 is always silent, and exit 2 always carries a non-empty rewake banner
+# on stderr naming its reason - a continuation with nothing to act on is the
+# 2026-09-18 endless-rewake loop.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
@@ -234,7 +239,41 @@ handle_autoarm_signal() {
     autoarm_commit failed "$FAILURE_NOTICE" && exit 2
     exit 0
   fi
-  autoarm_commit failed-suppressed && exit 2
+  continue_failed_episode "was INTERRUPTED by $signal before reaching a terminal watcher outcome"
+}
+
+# A failure in an episode whose one notice was already delivered. It still
+# forces a continuation so the next Stop retries the automatic arm, but never
+# an empty one and never past the episode's re-block budget: within the budget
+# the banner names why the turn exists, and the firing that finds the budget
+# spent (fm_turnend_block_count, which the guard charges once per generation it
+# observes in the episode) carries the one attended alarm instead and commits
+# its marker, so every later firing stays silent until positive recovery. A
+# refused commit exits 0 silently even after printing, like every other path.
+continue_failed_episode() {  # <what-happened>
+  local what=$1 budget count marker=
+  budget=$(fm_turnend_block_budget)
+  count=$(fm_turnend_block_count "$STATE")
+  [ "$count" -le "$budget" ] || marker=$FAILURE_ALARM
+  {
+    if [ -n "$marker" ]; then
+      printf 'FIRSTMATE SUPERVISION IS GENUINELY DOWN: the Stop-owned watcher auto-arm %s, and this failure episode has spent its re-block budget of %s continuations (%s charged) since its one failure notice.\n' "$what" "$budget" "$count"
+    else
+      printf 'firstmate watcher auto-arm %s. Its failure notice was already delivered; this continuation only lets the next turn end retry the automatic arm (re-block budget for this failure episode: %s of %s charged).\n' "$what" "$count" "$budget"
+    fi
+    [ -z "${OUT:-}" ] || grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    if [ -n "$marker" ]; then
+      printf 'No further automatic continuation follows until a watcher is verified healthy again. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.\n'
+    else
+      printf 'End the turn; do not launch a manual background arm from this notice.\n'
+    fi
+  } >&2
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if [ -n "$marker" ]; then
+    autoarm_commit failed-suppressed "$marker" && exit 2
+  else
+    autoarm_commit failed-suppressed && exit 2
+  fi
   exit 0
 }
 
@@ -319,11 +358,12 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  if autoarm_commit failed-suppressed; then
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    [ -e "$FAILURE_ALARM" ] && exit 0
-    exit 2
-  fi
+  # The reset could not take the episode lock. A verified healthy watcher
+  # already supervises this home, so a continuation would carry nothing to act
+  # on - and against a lock holder that stays busy, one per Stop would never
+  # end. Record that the episode is still open and close quietly; the next
+  # verified-healthy boundary in either Stop hook clears it.
+  autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
@@ -378,9 +418,8 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
-if autoarm_commit failed-suppressed; then
+if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 2
+  exit 0
 fi
-[ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-exit 0
+continue_failed_episode "failed again after $attempt bounded attempts with no live watcher verified"
