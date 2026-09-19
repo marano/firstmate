@@ -1,0 +1,3 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 23761 for 38s running: bash tests/fm-build-lock.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XTZG1H367Y5G61JJTENABA])
+fm-build-lock: acquired the machine-wide build lock after 2s
+skip: herdr not found
