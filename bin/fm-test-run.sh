@@ -2554,7 +2554,9 @@ declare -a WORKER_SCRIPTS=()
 # --- the machine-wide build lock, one hold per script ------------------------
 #
 # Every script this runner executes runs under bin/fm-build-lock.sh, one hold
-# per script, or one hold per concurrent phase: never one hold around the whole
+# per serial script (released between scripts), or one hold for a whole
+# concurrent phase (held from its first worker until its last finishes or the
+# next phase break, so its length is the phase's): never one hold around the whole
 # loop, which is what kept every other worker's build waiting 20-30 minutes
 # behind a single firstmate test run (docs/verification/build-lock-contention.md).
 # So a caller does not wrap this runner in `mutex`; one that still does keeps
@@ -2905,7 +2907,8 @@ else
     while [ "$active_workers" -ge "$JOBS" ]; do
       wait_one_completed_job_worker
     done
-    # One hold per concurrent phase: its workers share the machine together.
+    # One hold spans the whole concurrent phase, not each script in it: its workers
+    # share the machine together, and it is released only at a phase break or drain.
     build_lock_hold
     worker_n=$((worker_n + 1))
     work="$RUN_TMP/w$worker_n"
