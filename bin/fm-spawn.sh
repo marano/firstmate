@@ -2016,7 +2016,7 @@ case "$HARNESS" in
 # reads as alive, which no later check can tell from a working worker. Refuse
 # while nothing exists yet, exactly as the resolved-path adapters below do.
 claude | codex | opencode | grok | gemini)
-  resolve_pi_executable "$HARNESS" >/dev/null || {
+  [ "$RAW_LAUNCH" = 1 ] || resolve_pi_executable "$HARNESS" >/dev/null || {
     echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
     exit 1
   }

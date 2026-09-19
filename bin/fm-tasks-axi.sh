@@ -257,12 +257,19 @@ handback() {  # <unit> <member> <reason>
     fm_lock_release "$lock"
     verb_fail 1 "could not rewrite $unit's membership (${FM_BACKLOG_TRANSITION_ERROR:-write failed}); nothing was handed back"
   fi
-  fm_backlog_body_append_line "$DATA" "$member" "Handed back undelivered by $unit: $reason"
+  fm_backlog_row_probe "$DATA" "$member"
   status=$?
-  if [ "$status" -eq 0 ]; then
-    fm_backlog_requeue "$DATA" "$member" "Handed back undelivered by $unit: $reason"
-    status=$?
-  fi
+  case "$status:$FM_BACKLOG_ROW_STATE" in
+    0:in_flight\ *)
+      fm_backlog_requeue "$DATA" "$member" "Handed back undelivered by $unit: $reason"
+      status=$?
+      ;;
+    0:*)
+      fm_lock_release "$lock"
+      verb_fail 1 "$member is no longer part of $unit, but it is not In flight (${FM_BACKLOG_ROW_STATE%% *}), so it was not returned to Queued"
+      ;;
+    *) FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR ;;
+  esac
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || verb_fail 1 "$member is no longer part of $unit, but it could not be returned to Queued: $FM_BACKLOG_TRANSITION_ERROR"
   printf 'ok: handback %s from %s -> Queued\n' "$member" "$unit"
