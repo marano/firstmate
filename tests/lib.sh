@@ -360,6 +360,15 @@ SH
   done
 }
 
+# fm_fake_harness_clis <fakebin>
+# bin/fm-spawn.sh refuses to launch a bare-name harness (claude, codex,
+# opencode, grok, gemini) whose command is not on PATH, so a spawn fixture that
+# stands in for an installed harness puts an exit-0 command of each name first
+# on PATH. A fake tmux never runs the launch, so nothing more is needed.
+fm_fake_harness_clis() {
+  fm_fake_exit0 "$1" claude codex opencode grok gemini
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

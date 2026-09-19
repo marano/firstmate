@@ -113,6 +113,7 @@ exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s"
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_harness_clis "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

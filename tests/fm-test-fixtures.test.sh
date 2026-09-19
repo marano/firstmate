@@ -18,6 +18,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-test-fixtures)
+# bin/fm-spawn.sh refuses a bare-name harness missing from PATH; these cases
+# are about what happens past that preflight, so every one is installed here.
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-clis")
+fm_fake_harness_clis "$HARNESS_FAKEBIN"
+export PATH="$HARNESS_FAKEBIN:$PATH"
 
 test_git_config_isolation() (
   local dir="$TMP_ROOT/git-config" helper jobs timeout fakebin rc
