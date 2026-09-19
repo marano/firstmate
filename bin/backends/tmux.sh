@@ -58,6 +58,13 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_resubmit_own_text: Enter-only resubmit of the caller's own
+# unconfirmed text. Re-exports fm_tmux_resubmit_own_text (bin/fm-tmux-lib.sh)
+# verbatim; see that file for the ownership proof and echoed verdicts.
+fm_backend_tmux_resubmit_own_text() {  # <target> <text> <retries> <enter-sleep>
+  fm_tmux_resubmit_own_text "$@"
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;

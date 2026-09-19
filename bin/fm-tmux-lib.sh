@@ -278,6 +278,33 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
+# fm_tmux_composer_holds_text: 0 when <target>'s composer provably holds
+# exactly <text>; fm_composer_holds_text (bin/fm-composer-lib.sh) owns the
+# proof, and this adapter only supplies the styled capture and cursor row.
+fm_tmux_composer_holds_text() {  # <target> <text>
+  local target=$1 text=$2 cy pane
+  cy=$(fm_tmux_composer_cursor_row "$target") || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  fm_composer_holds_text "$(fm_tmux_composer_caps)" "$pane" "$cy" "$text"
+}
+
+# fm_tmux_resubmit_own_text: re-press Enter on text this caller typed earlier
+# whose submit it could not confirm, ONLY while the composer provably holds
+# exactly that text. Prints `not-own` and sends nothing when the proof fails
+# (other or additional text, a moved cursor, an unprovable screen), otherwise
+# the Enter-only submit verdict of fm_tmux_submit_enter_core, whose idle-to-busy
+# conversion needs the idle baseline read here. Never retypes and never clears.
+fm_tmux_resubmit_own_text() {  # <target> <text> <retries> <enter-sleep>
+  local target=$1 text=$2 retries=$3 sleep_s=$4 baseline_idle=''
+  if ! fm_tmux_composer_holds_text "$target" "$text"; then
+    printf 'not-own'
+    return 0
+  fi
+  [ "$(fm_pane_busy_state "$target")" = idle ] && baseline_idle=1
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
   # The turn-started baseline must predate our own typing: a pane already

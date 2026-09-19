@@ -141,6 +141,10 @@ unit_claude_away_never_launches_the_daemon() {
     else
       fail "claude $entry: away entry did not refuse cleanly (rc=$rc): $out"
     fi
+    # A regressed refusal really launched a daemon terminal: close it by its
+    # recorded exact id rather than leak it past the test.
+    [ ! -e "$st/state/.afk-daemon-terminal" ] \
+      || FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
     rm -rf "$st"
   done
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-claude-quiet.XXXXXX")

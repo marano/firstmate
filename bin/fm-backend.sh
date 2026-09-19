@@ -743,6 +743,22 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_resubmit_own_text: press Enter again on text the caller typed
+# earlier and could not confirm, only while that backend can prove its composer
+# holds exactly that text. Echoes `not-own` (nothing sent) or the submit
+# verdict; callers still require exact `empty` for confirmed delivery. Only
+# tmux can supply the proof today, so every other backend answers `not-own`
+# and its caller keeps deferring exactly as before.
+fm_backend_resubmit_own_text() {  # <backend> <target> <text> <retries> <enter-sleep>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'not-own'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_resubmit_own_text "$@" ;;
+    *) printf 'not-own' ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint. An already-gone target
 # is NOT an error and returns 0 silently, so ordinary cleanup of an
 # already-exited session stays quiet. A nonzero return means the close could

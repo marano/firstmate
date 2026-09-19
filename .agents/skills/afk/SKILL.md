@@ -133,7 +133,8 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
-In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, and a dead shell.
+The daemon's own previous injection sitting unsent is the one non-empty composer it acts on, and only by pressing Enter on it again (see "Submit model").
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
@@ -157,6 +158,11 @@ Without that baseline, busy state never converts an `unknown` composer into conf
 For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
+
+**Own-digest resubmit.** A digest's own text can impersonate structure: a wrapped row ending in its ` | ` separator reads as a box edge, so the composer verdict is `unknown` and the Enter retry never runs, and claude additionally swallows the first Enter after stripping the digest's invisible marks.
+When a submit stays unconfirmed, the daemon asks the backend to prove the composer holds exactly the digest it typed (`fm_backend_resubmit_own_text`, whose tmux proof `fm_composer_holds_text` in `bin/fm-composer-lib.sh` owns) and presses Enter again on it, never retyping and never clearing.
+A digest still unconfirmed after that is recorded in `state/.subsuper-stranded`, and every later flush resolves it first: it is resubmitted while the proof holds, re-delivered from the buffer once it has left the composer unconfirmed, and never typed behind; anything buffered after it waits for the next flush.
+Text the captain typed before, after, or instead of it breaks the proof, so it is never submitted or changed; only tmux supplies the proof today, and other backends keep deferring.
 
 **Busy-queued Enter exception (opencode 1.18.4).** OpenCode keeps queued text visible while it is mid-turn, so tmux and herdr delegate the final delivery decision to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh` rather than treating visible text alone as a swallowed Enter.
 The daemon still clears its buffer only on the backend's `empty` success verdict; [`docs/tmux-backend.md`](../../../docs/tmux-backend.md) and [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals.
@@ -251,7 +257,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ### Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-stranded`, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown, clears it, and archives the posture record last.
 The shutdown never types: it retains the buffer for the return brief or a restarted daemon, because a stopping daemon cannot confirm a submit and unconfirmed text left in the captain's composer is how a digest surfaces later as a false return.

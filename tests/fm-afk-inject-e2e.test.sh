@@ -22,6 +22,13 @@
 #     supervisor composer and leave the buffer intact for the next supervisor
 #     (the 2026-09-17 ghost-text incident).
 #
+#   Scenario E (own digest stranded): a claude-shaped composer strips the
+#     digest's invisible marks, swallows its Enter, and reads `unknown`. The
+#     daemon must resubmit its OWN digest (Enter only) in the same flush, and
+#     a digest an earlier flush stranded must be resubmitted by the next one,
+#     while text the captain typed is never submitted or changed (the
+#     2026-09-18 overnight wedge).
+#
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
@@ -503,9 +510,222 @@ test_scenario_d() {
   pass "Scenario D: a shutdown that cannot confirm a submit types nothing and retains the buffer"
 }
 
+# --- Scenario E: the daemon's own digest stranded in a claude-shaped composer
+# The 2026-09-18 overnight wedge. Claude Code strips the digest's invisible
+# U+2063 operational marks and swallows the Enter that should submit it
+# ("review and press Enter to send"), and the wrapped digest in its composer
+# reads `unknown`: a continuation row that ends in the digest's own ` | `
+# separator looks like a structural box edge. The submit core retried Enter
+# only on `pending`, so the text stayed in the composer and every later
+# injection deferred on "composer not confirmed-empty" for 7.4 hours.
+# This fixture draws that measured shape deterministically: the claude-style
+# bare `❯` composer between two rules, wrapped at each separator so a
+# continuation row ends in ` |` at any width and under either platform's
+# `wc -l` padding, with the invisible marks stripped and the next Enter
+# swallowed. The real-harness proof of the wrap is the live composer guard
+# (tests/fm-composer-matrix-live-e2e.test.sh).
+CLAUDE_LOOP="$STATE_DIR/claude-composer-loop.sh"
+CLAUDE_LOG="$STATE_DIR/claude-submitted.log"
+cat > "$CLAUDE_LOOP" <<'LOOP'
+#!/usr/bin/env bash
+MARK=$'\xE2\x81\xA3'
+LOG="$1"
+RULE=$(printf '%0.s─' $(seq 1 100))
+OLD_STTY=$(stty -g 2>/dev/null || true)
+[ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
+cleanup() {
+  [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+_buf=
+_armed=0
+_notice=
+redraw() {
+  local rest=$_buf i last
+  local -a rows=()
+  while :; do
+    case "$rest" in
+      *' | '*) rows+=("${rest%%' | '*} |"); rest=${rest#*' | '} ;;
+      *) rows+=("$rest"); break ;;
+    esac
+  done
+  printf '\033[H\033[2J'
+  printf '\xe2\x8f\xba fixture transcript\r\n\r\n%s\r\n' "$RULE"
+  for i in "${!rows[@]}"; do
+    if [ "$i" -eq 0 ]; then
+      printf '\xe2\x9d\xaf %s\r\n' "${rows[i]}"
+    else
+      printf '  %s\r\n' "${rows[i]}"
+    fi
+  done
+  printf '%s\r\n  manual mode on    %s' "$RULE" "$_notice"
+  last=$((${#rows[@]} - 1))
+  printf '\033[%d;%dH' "$((4 + last))" "$((3 + ${#rows[last]}))"
+  printf '%s' "$_buf" > "$LOG.composer"
+}
+submit_line() {
+  if [ "$_armed" = 1 ]; then
+    _armed=0
+    redraw
+    return 0
+  fi
+  printf '%s\n' "$_buf" >> "$LOG"
+  _buf=
+  _notice=
+  redraw
+}
+redraw
+while IFS= read -r -n 1 _ch; do
+  if [ -z "$_ch" ]; then
+    submit_line
+    continue
+  fi
+  case "$_ch" in
+    $'\r'|$'\n') submit_line ;;
+    $'\177'|$'\b') _buf=${_buf%?}; redraw ;;
+    *)
+      _buf="${_buf}${_ch}"
+      case "$_buf" in
+        *"$MARK"*)
+          _buf=${_buf//"$MARK"/}
+          _armed=1
+          _notice='Removed invisible characters - review and press Enter to send'
+          ;;
+      esac
+      redraw
+      ;;
+  esac
+done
+LOOP
+chmod +x "$CLAUDE_LOOP"
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s claudesup -x 240 -y 50
+CLAUDE_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t claudesup '#{pane_id}')
+
+claude_fixture_restart() {
+  : > "$CLAUDE_LOG"
+  rm -f "$CLAUDE_LOG.composer"
+  "$REAL_TMUX" -L "$SOCKET" respawn-pane -k -t "$CLAUDE_PANE" "bash '$CLAUDE_LOOP' '$CLAUDE_LOG'"
+  local i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$CLAUDE_LOG.composer" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$CLAUDE_LOG.composer" ] || fail "Scenario E: the claude-shaped fixture composer did not start"
+}
+
+# One daemon flush against the fixture, exactly as housekeeping runs it.
+claude_flush() {
+  PATH="$TMUX_SHIM_DIR:$PATH" FM_STATE_OVERRIDE="$STATE_DIR" LOG="$STATE_DIR/scenario-e.log" \
+    FM_SUPERVISOR_TARGET="$CLAUDE_PANE" FM_SUPERVISOR_BACKEND=tmux FM_DAEMON_PRIMARY_HARNESS=claude \
+    FM_INJECT_CONFIRM_SLEEP=0.3 FM_INJECT_CONFIRM_RETRIES=3 escalate_flush "$STATE_DIR"
+}
+
+# The exact text escalate_flush types for the current buffer.
+claude_digest_text() {
+  local n msg encoded
+  n=$(wc -l < "$STATE_DIR/.subsuper-escalations")
+  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$STATE_DIR/.subsuper-escalations")
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  msg=$(_collapse_newlines "$msg")
+  fm_operational_input_encode away-supervisor "$msg" encoded
+  printf '%s' "$encoded"
+}
+
+claude_buffer_three() {
+  printf '%s\n' \
+    "demo-alpha.status: needs-decision [key=demo-a]: ask-user findings=test-1 file=/tmp/fm-e2e/demo-alpha/findings.txt" \
+    "demo-beta.status: done: PR https://example.test/pr/501 checks green run=01DEMO" \
+    "check: fleet idle with ready work: in-progress=3 capacity=5 ready=16 idle=928s" \
+    > "$STATE_DIR/.subsuper-escalations"
+  date +%s > "$STATE_DIR/.subsuper-escalations.since"
+}
+
+# Type text the way an earlier daemon did, and let the fixture swallow Enter.
+claude_strand() {  # <text>
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l "$1"
+  sleep 0.5
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" Enter
+  sleep 0.5
+}
+
+test_scenario_e() {
+  local text stripped composer
+
+  # E1: a fresh flush whose Enter claude swallows must still deliver its own
+  # digest exactly once, instead of stranding it and deferring every later flush.
+  reset_state
+  afk_enter "$STATE_DIR"
+  claude_fixture_restart
+  claude_buffer_three
+  text=$(claude_digest_text)
+  stripped=${text//$'\xE2\x81\xA3'/}
+  claude_flush || true
+  sleep 0.5
+  claude_flush || true
+  [ "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" = 1 ] && [ "$(cat "$CLAUDE_LOG")" = "$stripped" ] \
+    || fail "Scenario E: the daemon's own digest stranded in the claude composer and every later flush deferred (submitted: $(cat "$CLAUDE_LOG"); composer: $(cat "$CLAUDE_LOG.composer" 2>/dev/null); log: $(cat "$STATE_DIR/scenario-e.log" 2>/dev/null))"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] || fail "Scenario E: the delivered digest was left in the buffer"
+  [ ! -e "$STATE_DIR/.subsuper-stranded" ] || fail "Scenario E: a delivered digest was left recorded as stranded"
+  [ ! -s "$CLAUDE_LOG.composer" ] || fail "Scenario E: text was left in the composer: $(cat "$CLAUDE_LOG.composer")"
+  pass "Scenario E: a swallowed submit of the daemon's own digest in a claude-shaped composer self-heals in the same flush"
+
+  # E2: a digest an earlier flush stranded (the overnight state) is resubmitted
+  # by the next flush, and an event buffered after it waits for the flush after.
+  reset_state
+  afk_enter "$STATE_DIR"
+  claude_fixture_restart
+  claude_buffer_three
+  text=$(claude_digest_text)
+  stripped=${text//$'\xE2\x81\xA3'/}
+  claude_strand "$text"
+  [ "$(cat "$CLAUDE_LOG.composer")" = "$stripped" ] || fail "Scenario E: the fixture did not strand the digest"
+  printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
+  echo "demo-gamma.status: failed: a newer event buffered behind the stranded digest" >> "$STATE_DIR/.subsuper-escalations"
+  claude_flush || true
+  [ "$(cat "$CLAUDE_LOG")" = "$stripped" ] \
+    || fail "Scenario E: a digest stranded by an earlier flush was never resubmitted (submitted: $(cat "$CLAUDE_LOG"); log: $(cat "$STATE_DIR/scenario-e.log" 2>/dev/null))"
+  [ "$(cat "$STATE_DIR/.subsuper-escalations")" = "demo-gamma.status: failed: a newer event buffered behind the stranded digest" ] \
+    || fail "Scenario E: resubmitting the stranded digest did not keep exactly the newer event buffered: $(cat "$STATE_DIR/.subsuper-escalations")"
+  [ ! -e "$STATE_DIR/.subsuper-stranded" ] || fail "Scenario E: the resubmitted digest stayed recorded as stranded"
+  sleep 0.5
+  claude_flush || true
+  if [ "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" != 2 ] \
+    || ! grep -F 'a newer event buffered behind the stranded digest' "$CLAUDE_LOG" >/dev/null; then
+    fail "Scenario E: the event buffered behind the stranded digest was not delivered next (submitted: $(cat "$CLAUDE_LOG"))"
+  fi
+  pass "Scenario E: a digest stranded by an earlier flush is resubmitted, and what was buffered behind it follows"
+
+  # E3: text the captain typed is never touched - not appended to the stranded
+  # digest, and not in place of it.
+  reset_state
+  afk_enter "$STATE_DIR"
+  claude_fixture_restart
+  claude_buffer_three
+  text=$(claude_digest_text)
+  claude_strand "$text"
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l " and one more thing"
+  sleep 0.5
+  composer=$(cat "$CLAUDE_LOG.composer")
+  printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
+  claude_flush && fail "Scenario E: a flush reported success over captain text"
+  [ ! -s "$CLAUDE_LOG" ] || fail "Scenario E: captain text appended to the stranded digest was submitted: $(cat "$CLAUDE_LOG")"
+  [ "$(cat "$CLAUDE_LOG.composer")" = "$composer" ] || fail "Scenario E: captain text appended to the stranded digest was changed"
+  grep -F "leaving it untouched" "$STATE_DIR/scenario-e.log" >/dev/null \
+    || fail "Scenario E: the refusal to touch captain text was not logged"
+  claude_fixture_restart
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l "captain draft only"
+  sleep 0.5
+  claude_flush && fail "Scenario E: a flush reported success over a captain draft"
+  [ ! -s "$CLAUDE_LOG" ] || fail "Scenario E: a captain draft was submitted in place of the stranded digest: $(cat "$CLAUDE_LOG")"
+  [ "$(cat "$CLAUDE_LOG.composer")" = "captain draft only" ] || fail "Scenario E: a captain draft was changed"
+  afk_exit "$STATE_DIR"
+  pass "Scenario E: captain text, appended to the stranded digest or in its place, is never submitted or changed"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
 test_scenario_d
+test_scenario_e
 
 echo "all e2e injection tests passed"
