@@ -131,6 +131,7 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  fm_fake_harness_clis "$fb"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
