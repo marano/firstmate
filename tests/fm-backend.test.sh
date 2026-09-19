@@ -800,9 +800,16 @@ set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   display-message)
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf 'claude\\n'; exit 0 ;; esac; done
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "\${FM_STATE_OVERRIDE:?}"/*.meta; do
+      [ -e "\$meta" ] || continue
+      meta=\${meta##*/}
+      printf 'fm-%s\\n' "\${meta%.meta}"
+    done
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -872,8 +879,15 @@ case "\${1:-}" in
       fi
       exit 0
     ;; esac; done
+    for a in "\$@"; do case "\$a" in *pane_current_command*) printf 'claude\\n'; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "\${FM_STATE_OVERRIDE:?}"/*.meta; do
+      [ -e "\$meta" ] || continue
+      meta=\${meta##*/}
+      printf 'fm-%s\\n' "\${meta%.meta}"
+    done
+    exit 0 ;;
 esac
 exit 0
 SH

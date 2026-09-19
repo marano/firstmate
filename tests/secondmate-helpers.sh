@@ -11,7 +11,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
-# FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
+# FM_FAKE_TMUX_WINDOW plus every window this stub created whose task is still
+# recorded - so a test that drops a record models that window gone - capture-pane echoes
+# FM_FAKE_TMUX_CAPTURE, and a created window's foreground command is claude so
+# fm-spawn.sh's launch confirmation reads the launched agent alive) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
 # to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
 # FM_FAKE_TREEHOUSE_RETURN_FAIL is set), plus the bare-name harness commands
@@ -29,6 +32,16 @@ set -u
 case "${1:-}" in
   has-session|new-session|new-window|send-keys|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    prev=
+    for arg in "$@"; do
+      if [ "$1" = new-window ] && [ "$prev" = -n ]; then
+        printf '%s\n' "$arg" >> "$FM_FAKE_TMUX_LOG.created"
+      elif [ "$1" = kill-window ] && [ "$prev" = -t ] && [ -f "$FM_FAKE_TMUX_LOG.created" ]; then
+        grep -Fxv -- "${arg#*:}" "$FM_FAKE_TMUX_LOG.created" > "$FM_FAKE_TMUX_LOG.created.tmp" || true
+        mv "$FM_FAKE_TMUX_LOG.created.tmp" "$FM_FAKE_TMUX_LOG.created"
+      fi
+      prev=$arg
+    done
     exit 0
     ;;
   list-windows)
@@ -52,11 +65,28 @@ case "${1:-}" in
     done <<EOF
 ${FM_FAKE_TMUX_WINDOW:-}
 EOF
+    while IFS= read -r created; do
+      [ -e "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}/${created#fm-}.meta" ] \
+        && printf '%s\n' "$created"
+    done < "$FM_FAKE_TMUX_LOG.created" 2>/dev/null
     exit 0
     ;;
   display-message)
+    target=
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -t ]; then target=$arg; break; fi
+      prev=$arg
+    done
     case "$*" in
       *'#{cursor_y}'*) printf '0\n' ;;
+      *'#{pane_current_command}'*)
+        if grep -Fqx -- "${target#*:}" "$FM_FAKE_TMUX_LOG.created" 2>/dev/null; then
+          printf 'claude\n'
+        else
+          printf 'firstmate\n'
+        fi
+        ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0

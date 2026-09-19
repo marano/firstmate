@@ -91,6 +91,7 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   It clears any input the adopted shell still holds before typing, so a launch that never landed there cannot swallow the replacement's, and its header owns how it confirms the replacement actually started.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 

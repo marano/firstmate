@@ -88,10 +88,24 @@ Delivery contract: mode=no-mistakes
 EOF
   done
 
+  # A launched agent reads alive to fm-spawn.sh's launch confirmation: each
+  # recorded task has its fm-<id> window, whose foreground command is claude.
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'claude\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows)
+    for meta in "$FM_HOME"/state/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"

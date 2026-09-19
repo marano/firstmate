@@ -435,13 +435,25 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
-# pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
+# A tmux stub that accepts every subcommand and prints nothing before a task is
+# recorded, so no window pre-exists and the spawn proceeds to write its meta.
+# Once the record exists its fm-<id> window is listed with a claude foreground,
+# which is what fm-spawn.sh's launch confirmation reads. Echoes the fakebin dir.
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  list-windows*)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+  *'#{pane_current_command}'*) printf 'claude\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -662,10 +674,18 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'claude\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then

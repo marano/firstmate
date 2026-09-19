@@ -30,7 +30,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
 # calls, then FM_FAKE_PANE_PATH forever after - reproducing a pane that
-# transiently reports a stale cwd before settling into the real worktree.
+# transiently reports a stale cwd before settling into the real worktree. Each
+# recorded task's window runs codex, so the launch confirmation reads it alive.
 make_settle_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -52,9 +53,19 @@ case "$*" in
     exit 0
     ;;
 esac
+case "$*" in
+  *"#{pane_current_command}"*) printf 'codex\n'; exit 0 ;;
+esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys) exit 0 ;;
 esac
