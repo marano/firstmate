@@ -72,7 +72,7 @@ Firstmate's wrapper still matters: crewmates route every `ask-user` finding to f
 [`docs/configuration.md`](docs/configuration.md#gate-defaults-no-mistakesyaml) owns the tracked `.no-mistakes.yaml` gate defaults.
 The `firstmate-coding-guidelines` skill owns the rule that local no-mistakes Test stays intent-targeted rather than configuring `commands.test`.
 Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subjects you care about rather than chaining `bash tests/a.test.sh && bash tests/b.test.sh`, because a list of script paths gets the same bounded concurrency as `--changed`.
-Never wrap `bin/fm-test-run.sh` or `bin/fm-stock-bash-lane.sh` in `mutex`: the runner takes the machine-wide build lock once per script, so other workers' builds go between two tests, and an outer `mutex` turns that back into one hold around the whole loop.
+Never wrap `bin/fm-test-run.sh` or `bin/fm-stock-bash-lane.sh` in `mutex`: the runner takes the machine-wide build lock itself (once per serial script, once per whole concurrent phase; its header owns the rule), and an outer `mutex` turns that back into one hold around the whole loop.
 Before pushing a shell change, run `bin/fm-stock-bash-lane.sh` and treat a failure as a stop: it runs exactly what CI's stock macOS Bash 3.2 lane runs, which is where CI-only failures have landed, and its header owns what that is.
 It shortens the feedback loop and does not replace the CI lane.
 The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
