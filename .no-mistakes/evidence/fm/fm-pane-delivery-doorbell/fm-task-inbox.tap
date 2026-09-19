@@ -1,0 +1,33 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 31378 for 59s running: bin/fm-test-run.sh tests/fm-test-run.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 2m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 31378 for 1m59s running: bin/fm-test-run.sh tests/fm-test-run.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 3m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 31378 for 2m59s running: bin/fm-test-run.sh tests/fm-test-run.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 4m00s for the machine-wide build lock - position 2 of 2 in line - held by pid 39553 for 30s running: bash tests/fm-build-lock.test.sh [in /private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-3-firstmate/f3735aa4-2b4b-4bd1-96a0-a7134828b6b9/scratchpad/w2-hold-drop]
+fm-build-lock: still waiting 5m00s for the machine-wide build lock - position 1 of 2 in line - held by pid 50676 for 46s running: python3 /private/tmp/claude-501/-Users-marano--treehouse-bluejam-platform-f6906d-2-bluejam-platform/0ad3dde2-6bbd-4efc-a1b9-37b482dd2300/scratchpad/mutants.py [in /Users/marano/.treehouse/bluejam-platform-f6906d/2/bluejam-platform]
+fm-build-lock: still waiting 6m00s for the machine-wide build lock - position 1 of 2 in line - held by pid 50676 for 1m46s running: python3 /private/tmp/claude-501/-Users-marano--treehouse-bluejam-platform-f6906d-2-bluejam-platform/0ad3dde2-6bbd-4efc-a1b9-37b482dd2300/scratchpad/mutants.py [in /Users/marano/.treehouse/bluejam-platform-f6906d/2/bluejam-platform]
+fm-build-lock: acquired the machine-wide build lock after 6m32s
+ok - inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell
+ok - inbox: a hostile-path doorbell executes as a no-op in bare shells
+ok - inbox: terminal-control paths are rejected without typing
+ok - inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints
+ok - inbox: the ring reports a doorbell the idle composer never submitted
+ok - inbox: the idempotent enqueue dedups an exact re-run onto the same record, handled or not
+ok - inbox: idempotent enqueue follows a record concurrently moved to handled
+ok - inbox: the handled mv is the idempotent ack and sequences are never reissued
+ok - inbox: concurrent writers serialize on the sequence lock and lose nothing
+ok - inbox: a writer retries when a competing lock vanishes after its failed claim
+ok - inbox: ladder bookkeeping ignores a concurrently removed inbox
+ok - inbox: fire-and-forget records stay durable and outside the ladder
+ok - inbox: the re-ring ladder paces by grace, escalates once, and resets on ack
+ok - inbox: the ladder names a composer stuck through the whole budget, and only that
+ok - watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it
+ok - watcher: a busy pane just waits - the record is durable and no doorbell is typed
+ok - watcher: a healthy or empty inbox stays completely silent
+ok - watcher: acknowledgement silences an unwritable ladder without a stale wake
+ok - watcher: unwritable ladder bookkeeping surfaces a stale wake after the doorbell
+ok - watcher: a spent ring budget emits exactly one ordinary stale wake for recovery
+ok - watcher: a live idle worker whose composer never submits is named as unable to receive messages
+ok - watcher: claude idle with a stranded queued doorbell is named as unable to receive messages
+ok - watcher: a busy worker whose queued text will still submit is never rung into or alarmed on
+ok - watcher: a positively dead pane is never typed into and surfaces exactly one stale wake
+ok - watcher: dead-pane recovery overrides stale busy state
