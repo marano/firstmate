@@ -227,6 +227,13 @@ PER_SCRIPT_TIMEOUT_GIVEN=0
 # not a speed control: a HUNG script becomes a bounded, named failure instead
 # of an unbounded suite, which is the shape that silently outruns a caller's
 # invocation budget.
+#
+# Who reaches this default: local and CI runs that name no bound get 1800s. The
+# CI portable-parallel, portable-serial and real-herdr lanes pass an explicit 0
+# because their job caps are their hang tripwire. The macOS stock-bash lane
+# passes its own bound in bin/fm-stock-bash-lane.sh. The measurements behind
+# 1800s: tests/fm-watch-triage.test.sh at 588-723s across 28 CI portable-serial
+# runs and 788-825s on a loaded macOS host, more than 2x headroom.
 DEFAULT_PER_SCRIPT_TIMEOUT_SECS=1800
 
 # How many separate-runner shards the portable serial remainder splits into.
