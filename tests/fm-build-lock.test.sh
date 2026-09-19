@@ -654,6 +654,22 @@ assert_equals "holder-done
 foreign" "$(cat "$FOREIGN_ORDER")" "a hold variable naming a non-owner must not bypass the lock"
 pass "a nested invocation inside a hold runs straight through, and a foreign hold variable does not"
 
+# An outer hold that exported NO hold variables (an older installed entry point)
+# must still be recognised: its pid is the lock owner and an ancestor of the
+# inner invocation. The outer child runs with the variables unset via env -u.
+# Mutant: drop the ancestor-owner check (keep only the variable check); the
+# inner invocation queues behind its ancestor and the bounded wait reds.
+# shellcheck disable=SC2016 # The child sh expands its own positional argument.
+"$SCRIPT" env -u FM_BUILD_LOCK_HELD_BY -u FM_BUILD_LOCK_HELD_LOCK \
+  "$SCRIPT" sh -c 'printf "ancestor\n" >"$1"' _ "$TMP_ROOT/ancestor.out" \
+  >/dev/null 2>"$TMP_ROOT/ancestor.err" &
+ANCESTOR=$!
+await_pid_exit "$ANCESTOR" 100 || fail "a nested invocation without hold variables deadlocked on its ancestor holder"
+wait "$ANCESTOR" 2>/dev/null
+expect_code 0 $? "an ancestor-owned nested invocation must succeed"
+assert_equals 'ancestor' "$(cat "$TMP_ROOT/ancestor.out" 2>/dev/null)" "the ancestor-nested command must run"
+pass "a nested invocation under an owner that exported no hold variables runs straight through"
+
 # --- --help teaches one invocation per run ----------------------------------
 # Workers are pointed at --help as the contract, so it must carry the wrap rule.
 # Mutant: drop the "Never put one invocation around a loop" sentence.

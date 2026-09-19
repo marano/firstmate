@@ -73,7 +73,10 @@
 # and FM_BUILD_LOCK_HELD_LOCK (the lock path) to the wrapped command, and an
 # invocation that finds both naming the lock it resolved, with that pid still
 # the lock's live owner, runs its command without queueing: it is already
-# inside that hold. A stale or foreign value falls back to an ordinary acquire.
+# inside that hold. So does an invocation whose lock owner (LOCK/pid) is a live
+# ANCESTOR process, which covers a hold taken by an older entry point that
+# exported no variables. A stale or foreign value, or a non-ancestor owner,
+# falls back to an ordinary acquire.
 #
 # Ordering never outranks getting builds run. A waiting line that cannot be
 # reached at all - a process STOPPED rather than killed still owns any lock it
@@ -714,6 +717,25 @@ case "${FM_BUILD_LOCK_HELD_BY:-}" in
     fi
     ;;
 esac
+
+# The lock's recorded owner being a live ancestor of this process also means we
+# are inside its hold, whichever entry point or version took it.
+fm_build_lock_owner_is_ancestor() {
+  local owner walk=$$ depth=0
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$owner" || return 1
+  while [ "$depth" -lt 64 ]; do
+    walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
+    case "$walk" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$walk" = "$owner" ] && return 0
+    depth=$((depth + 1))
+  done
+  return 1
+}
+if fm_build_lock_owner_is_ancestor; then
+  exec "$@"
+fi
 
 # --- acquire, run, release --------------------------------------------------
 
