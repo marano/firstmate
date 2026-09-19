@@ -585,12 +585,6 @@ fi
 exec "$REAL_STAT" "$@"
 SH
   chmod +x "$fakebin/uname" "$fakebin/stat"
-  # The faked uname sends the build lock's ticket-age read down the non-Darwin
-  # stat path, which this host's stat cannot answer, so every ticket would read
-  # as stale and the runner would never reach the front of the line. Ticket
-  # staleness is not what this case is about; dead-waiter reaping still runs.
-  local FM_BUILD_LOCK_TICKET_STALE=0
-  export FM_BUILD_LOCK_TICKET_STALE
   set +e
   out=$(cd "$repo" && PATH="$fakebin:$PATH" REAL_STAT="$real_stat" \
     bin/fm-test-run.sh --jobs 2 \

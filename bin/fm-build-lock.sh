@@ -92,7 +92,8 @@
 # ticket on every poll, and a ticket nobody is renewing is removed too, so a
 # waiter that stops polling - or a pid number an unrelated process has since
 # been given - cannot hold the head of the line. A renewal always restores the
-# waiter's own place, so no live waiter is ever sent to the back.
+# waiter's own place, so no live waiter is ever sent to the back. A ticket whose
+# age cannot be read is unknown, not old, so it is never reaped on staleness.
 #
 # Environment:
 #   FM_BUILD_LOCK_DIR              directory holding the lock (see LOCK PATH)
@@ -392,7 +393,7 @@ fm_build_lock_abandon_order() {  # <why>
 # newest sequence numbers, how many waiters it holds, and how many of them are
 # ahead of <mine> when a sequence number is given.
 fm_build_lock_queue_scan() {  # [mine]
-  local mine=${1:-} entry seq pid age
+  local mine=${1:-} entry seq pid mtime age
   FM_BUILD_LOCK_QUEUE_MIN=
   FM_BUILD_LOCK_QUEUE_MAX=
   FM_BUILD_LOCK_QUEUE_COUNT=0
@@ -407,12 +408,17 @@ fm_build_lock_queue_scan() {  # [mine]
       rm -f -- "$entry" 2>/dev/null || true
       continue
     fi
-    age=$(fm_path_age "$entry")
-    case "$age" in ''|*[!0-9]*) age=0 ;; esac
-    if [ "$TICKET_STALE" -gt 0 ] && [ "$age" -gt "$TICKET_STALE" ]; then
-      rm -f -- "$entry" 2>/dev/null || true
-      continue
-    fi
+    mtime=$(fm_path_mtime "$entry" 2>/dev/null || true)
+    case "$mtime" in
+      ''|*[!0-9]*) ;;
+      *)
+        age=$(( $(date +%s) - mtime ))
+        if [ "$TICKET_STALE" -gt 0 ] && [ "$age" -gt "$TICKET_STALE" ]; then
+          rm -f -- "$entry" 2>/dev/null || true
+          continue
+        fi
+        ;;
+    esac
     FM_BUILD_LOCK_QUEUE_COUNT=$((FM_BUILD_LOCK_QUEUE_COUNT + 1))
     if [ -z "$FM_BUILD_LOCK_QUEUE_MIN" ] || [ "$seq" -lt "$FM_BUILD_LOCK_QUEUE_MIN" ]; then
       FM_BUILD_LOCK_QUEUE_MIN=$seq

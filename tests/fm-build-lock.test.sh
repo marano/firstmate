@@ -379,6 +379,40 @@ unset FM_BUILD_LOCK_TICKET_STALE
 settle_queue
 pass "a waiter that stops renewing its ticket loses its place instead of wedging the line"
 
+# --- an unreadable ticket age is unknown, not stale -------------------------
+# A host whose stat cannot answer (the fake uname sends the lock's mtime read
+# down the non-Darwin path, so this forces it on macOS too) must not make every
+# ticket look old: the waiter would reap its own ticket every poll and never
+# reach the front of the line.
+# Mutant: treat an unreadable ticket age as stale again (the pre-fix
+# behaviour); the waiter reaps its own ticket each poll and the bounded wait reds.
+
+BLIND_BIN="$TMP_ROOT/blind-bin"
+BLIND_MARK="$TMP_ROOT/blind-holding"
+BLIND_RELEASE="$TMP_ROOT/blind-release"
+BLIND_OUT="$TMP_ROOT/blind.out"
+mkdir -p "$BLIND_BIN"
+printf '#!/bin/sh\necho Linux\n' >"$BLIND_BIN/uname"
+printf '#!/bin/sh\nexit 1\n' >"$BLIND_BIN/stat"
+chmod +x "$BLIND_BIN/uname" "$BLIND_BIN/stat"
+
+"$SCRIPT" sh -c "touch '$BLIND_MARK'; while [ ! -e '$BLIND_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+BLIND_HOLDER=$!
+await_path "$BLIND_MARK" || fail "the unreadable-age fixture never took the lock"
+PATH="$BLIND_BIN:$PATH" FM_BUILD_LOCK_TICKET_STALE=1 "$SCRIPT" printf 'blind\n' \
+  >"$BLIND_OUT" 2>/dev/null &
+BLIND_WAITER=$!
+sleep 3
+touch "$BLIND_RELEASE"
+await_pid_exit "$BLIND_WAITER" 100 || fail "a waiter whose ticket age is unreadable never acquired the lock"
+wait "$BLIND_WAITER" 2>/dev/null || true
+wait "$BLIND_HOLDER" 2>/dev/null || true
+assert_equals 'blind' "$(cat "$BLIND_OUT" 2>/dev/null || true)" \
+  "the waiter with an unreadable ticket age must still acquire"
+settle_queue
+pass "an unreadable ticket age is not treated as stale"
+
 # --- a waiter killed in line leaves no residue in the lock root -------------
 # The lockdir mutex mints its owner directory before the symlink that publishes
 # it, and nothing points at one in between: a process killed inside that window
