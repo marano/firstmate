@@ -34,6 +34,8 @@ export FM_BUILD_LOCK_NOTICE_INTERVAL=1
 # A hold inherited from whatever runs this suite names another lock; drop it so
 # every case starts outside any hold.
 unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
+# Ceiling lines go only where a case points them.
+unset FM_TASK_STATUS
 
 # Count the lock's own artifacts in a root. Zero means the lock was never taken
 # or was fully released, including the owner directory the lockdir mutex links.
@@ -703,6 +705,110 @@ wait "$ANCESTOR" 2>/dev/null
 expect_code 0 $? "an ancestor-owned nested invocation must succeed"
 assert_equals 'ancestor' "$(cat "$TMP_ROOT/ancestor.out" 2>/dev/null)" "the ancestor-nested command must run"
 pass "a nested invocation under an owner that exported no hold variables runs straight through"
+
+# --- a ceiling reaches the supervisor through the task status file ---------
+# A long hold used to warn only on the holder's own stderr, which nobody reads
+# when the command runs in the background. With FM_TASK_STATUS set, the first
+# crossing of each ceiling appends one line to that task status file.
+
+# Read a status line through the supervisor's own classifier, in a subshell so
+# the library's globals stay out of this suite.
+classify() {  # <function> <status-line>
+  ( . "$ROOT/bin/fm-classify-lib.sh" && "$1" "$2" )
+}
+
+# Holder: one `note:` line naming the command and the queue, never a decision.
+# Mutants: drop the holder's status append (no line); append it with a
+# decision or blocker verb (the line then classifies as captain-relevant).
+HOLD_STATUS="$TMP_ROOT/hold.status"
+: >"$HOLD_STATUS"
+HOLD_MARK="$TMP_ROOT/hold-status-running"
+FM_TASK_STATUS="$HOLD_STATUS" FM_BUILD_LOCK_HOLD_WARN=2 \
+  "$SCRIPT" sh -c "touch '$HOLD_MARK'; sleep 5" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
+HOLD_HOLDER=$!
+await_path "$HOLD_MARK" || fail "the holder-status fixture never started"
+"$SCRIPT" true >/dev/null 2>&1 &
+# shellcheck disable=SC2031
+HOLD_WAITER=$!
+wait "$HOLD_HOLDER" 2>/dev/null || true
+wait "$HOLD_WAITER" 2>/dev/null || true
+assert_equals 1 "$(grep -c '' "$HOLD_STATUS")" "a long hold must append exactly one status line, once per hold"
+HOLD_LINE=$(cat "$HOLD_STATUS")
+case "$HOLD_LINE" in
+  'note: holding the machine-wide build lock for '*) : ;;
+  *) fail "the holder's status line must be an informational note: $HOLD_LINE" ;;
+esac
+assert_contains "$HOLD_LINE" 'hold-status-running' "the holder's status line must name what it runs"
+assert_contains "$HOLD_LINE" '1 waiting' "the holder's status line must say how many are queued"
+assert_contains "$HOLD_LINE" 'not being killed' "the holder's status line must say the hold is not being killed"
+classify status_is_captain_relevant "$HOLD_LINE" \
+  && fail "the holder's status line must not wake firstmate as a decision: $HOLD_LINE"
+classify status_line_is_unread_surface "$HOLD_LINE" \
+  || fail "the holder's status line must reach firstmate's unread-status surface: $HOLD_LINE"
+pass "a hold past its ceiling appends one informational note to the task status file"
+
+# Waiter: a declared `paused:` wait naming the holder, then `working:` once in.
+# Mutants: drop the waiter's status append; give it any verb but paused (the
+# supervisor then reads the idle waiter as wedged or as a decision).
+WAIT_STATUS="$TMP_ROOT/wait.status"
+: >"$WAIT_STATUS"
+WAIT_MARK="$TMP_ROOT/wait-status-running"
+"$SCRIPT" sh -c "touch '$WAIT_MARK'; sleep 3.5" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
+WAIT_HOLDER=$!
+await_path "$WAIT_MARK" || fail "the waiter-status fixture never started"
+FM_TASK_STATUS="$WAIT_STATUS" FM_BUILD_LOCK_WAIT_WARN=1 \
+  "$SCRIPT" printf 'waited-in\n' >/dev/null 2>&1
+wait "$WAIT_HOLDER" 2>/dev/null || true
+WAIT_FIRST=$(sed -n 1p "$WAIT_STATUS")
+WAIT_SECOND=$(sed -n 2p "$WAIT_STATUS")
+assert_equals 2 "$(grep -c '' "$WAIT_STATUS")" "a long wait must append exactly a paused line and a working line"
+classify status_is_paused "$WAIT_FIRST" \
+  || fail "the waiter's first status line must be a declared paused: wait: $WAIT_FIRST"
+assert_contains "$WAIT_FIRST" 'printf' "the waiter's paused line must name what it is waiting to run"
+assert_contains "$WAIT_FIRST" 'held by pid ' "the waiter's paused line must name the holder"
+case "$WAIT_SECOND" in
+  'working: acquired the machine-wide build lock after '*) : ;;
+  *) fail "the waiter must say working: once it gets in: $WAIT_SECOND" ;;
+esac
+pass "a wait past its ceiling appends a declared pause, then working once the lock is taken"
+
+# No FM_TASK_STATUS, no line anywhere: a path is never guessed from the task id
+# or the home. Mutant: derive a status path from FM_TASK_ID or FM_HOME when
+# FM_TASK_STATUS is unset; a line then appears under this fake home.
+GUESS_HOME="$TMP_ROOT/guess-home"
+mkdir -p "$GUESS_HOME/state"
+( unset FM_TASK_STATUS
+  FM_HOME="$GUESS_HOME" FM_TASK_ID=guess-task FM_BUILD_LOCK_HOLD_WARN=1 \
+    "$SCRIPT" sh -c 'sleep 2.5' >/dev/null 2>&1 )
+assert_equals '' "$(find "$GUESS_HOME" -type f 2>/dev/null)" \
+  "without FM_TASK_STATUS a ceiling must append nothing, not guess a status file"
+FM_TASK_STATUS=relative.status FM_BUILD_LOCK_HOLD_WARN=1 \
+  "$SCRIPT" sh -c 'sleep 2.5' >/dev/null 2>&1
+[ ! -e relative.status ] || { rm -f relative.status; fail "a relative FM_TASK_STATUS must be ignored"; }
+pass "without an absolute FM_TASK_STATUS a ceiling appends nothing"
+
+# --- --label names the hold ---------------------------------------------------
+# bin/fm-test-run.sh's holder is a bare `bash -c` loop; the label is what lets a
+# waiter, --status and a status line say which script the hold is for.
+# Mutant: ignore --label and render the command.
+
+LABEL_MARK="$TMP_ROOT/label-running"
+"$SCRIPT" --label 'bin/fm-test-run.sh tests/labelled.test.sh' \
+  sh -c "touch '$LABEL_MARK'; sleep 3" >/dev/null 2>&1 &
+# shellcheck disable=SC2031
+LABEL_HOLDER=$!
+await_path "$LABEL_MARK" || fail "the label fixture never started"
+sleep 0.3
+LABEL_LINE=$("$SCRIPT" --status)
+wait "$LABEL_HOLDER" 2>/dev/null || true
+assert_contains "$LABEL_LINE" 'running: bin/fm-test-run.sh tests/labelled.test.sh [in ' \
+  "--status must show the label in place of the command"
+assert_not_contains "$LABEL_LINE" 'sleep 3' "--label must replace the rendered command"
+"$SCRIPT" --label '' true >/dev/null 2>&1
+expect_code 2 $? "an empty --label must be refused"
+pass "--label names the hold in place of the rendered command"
 
 # --- --help teaches one invocation per run ----------------------------------
 # Workers are pointed at --help as the contract, so it must carry the wrap rule.

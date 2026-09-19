@@ -1933,6 +1933,10 @@ SH
     'held by pid '*) ;;
     *) fail "the runner did not hold the build lock while a script ran: $(cat "$tmp/status")" ;;
   esac
+  # Mutant: drop the label from build_lock_hold; the holder then reads as a bare
+  # `bash -c` loop to every waiter instead of naming the script it holds for.
+  assert_contains "$(cat "$tmp/status")" "running: bin/fm-test-run.sh $first [in " \
+    "the runner's hold must name the script it holds the build lock for"
 
   # Queue a worker behind the running script, then let the script finish.
   # shellcheck disable=SC2016 # The child sh expands the exported ORDER.

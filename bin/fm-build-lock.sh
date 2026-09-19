@@ -3,11 +3,16 @@
 # that every local build and test invocation on this machine shares.
 #
 # Usage:
-#   fm-build-lock.sh [--] <command> [args...]   acquire, run, release
+#   fm-build-lock.sh [--label <text>] [--] <command> [args...]
+#                                               acquire, run, release
 #   fm-build-lock.sh --status                   print the current holder
 #   fm-build-lock.sh --lock-path                print the resolved lock path
 #   fm-build-lock.sh --install-mutex <dir>      link <dir>/mutex at this script
 #   fm-build-lock.sh --help
+#
+# --label names the hold for everyone who reads it - waiters, --status and the
+# task status line below - in place of the rendered command, for a caller whose
+# own command line says nothing useful (bin/fm-test-run.sh's per-script holder).
 #
 # Prefix it in front of any local build or test command; no repository is
 # modified to make this work:
@@ -44,6 +49,19 @@
 # ceiling warns from its own pane even with nobody waiting; a waiter past its
 # ceiling warns too, and every waiting line names the holder so an inspected
 # quiet pane reads as waiting rather than wedged.
+#
+# A CEILING ALSO REACHES THE SUPERVISOR. Stderr is read by nobody when the
+# command runs in the background, which is where every measured long hold ran.
+# When FM_TASK_STATUS names a task's status file - bin/fm-spawn.sh exports it
+# into ship and scout panes next to FM_TASK_ID - the first crossing of each
+# ceiling also appends one line there, which wakes firstmate through its
+# ordinary status path. A holder appends an informational `note:` naming what it
+# runs, how long it has held and how many are queued; it is still working, so
+# the line never reads as a decision or a blocker. A waiter appends a declared
+# `paused:` wait naming the holder, and a `working:` line once it gets in, the
+# pairing a worker owes for any wait. Without FM_TASK_STATUS nothing is appended
+# and no path is ever guessed: a captain's own terminal and pipeline agents keep
+# stderr only. A failed append never fails the build.
 #
 # ARRIVAL ORDER, SO BARGING IS IMPOSSIBLE BY CONSTRUCTION. Acquisition is
 # ticketed: every invocation claims a monotonically increasing ticket on arrival
@@ -104,6 +122,8 @@
 #   FM_BUILD_LOCK_POLL             acquire poll interval in seconds (default 0.5)
 #   FM_BUILD_LOCK_TICKET_STALE     seconds an unrenewed waiting-line ticket
 #                                  survives, 0 off (default 30)
+#   FM_TASK_STATUS                 absolute status file for ceiling lines (see
+#                                  A CEILING ALSO REACHES THE SUPERVISOR)
 #   FM_BUILD_LOCK_HELD_BY          set by a holder for its wrapped command;
 #   FM_BUILD_LOCK_HELD_LOCK        see A NESTED INVOCATION above
 #
@@ -328,6 +348,18 @@ fm_build_lock_read_holder_settled() {  # <lockdir> <info-path>
 # It reports and never signals the wrapped command: a wrongly killed build is
 # worse than a slow one.
 
+# Append one line to the task status file named by FM_TASK_STATUS, or do
+# nothing. The directory must already exist: this never creates a home.
+fm_build_lock_task_status() {  # <status-line>
+  local path=${FM_TASK_STATUS:-}
+  case "$path" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  [ -d "${path%/*}" ] && [ ! -d "$path" ] || return 0
+  { printf '%s\n' "$1" >> "$path"; } 2>/dev/null || true
+}
+
 fm_build_lock_report_ceiling() {  # <held-secs> <display>
   printf 'fm-build-lock: WARNING: this command has held the machine-wide build lock for %s and is blocking every other local build: %s\n' \
     "$(fm_build_lock_elapsed "$1")" "$2" >&2
@@ -533,7 +565,7 @@ fm_build_lock_queue_position() {
 # --- observable acquire -----------------------------------------------------
 
 fm_build_lock_acquire() {  # <lockdir> <info-path>
-  local lockdir=$1 info=$2 start waited=0 next_notice holder now place
+  local lockdir=$1 info=$2 start waited=0 next_notice holder now place paused=0
   fm_build_lock_queue_enter
   if fm_build_lock_my_turn && fm_lock_try_acquire "$lockdir"; then
     fm_build_lock_queue_leave
@@ -558,6 +590,10 @@ fm_build_lock_acquire() {  # <lockdir> <info-path>
     holder=$FM_BUILD_LOCK_HOLDER_TEXT
     if [ "$WAIT_WARN" -gt 0 ] && [ "$waited" -ge "$WAIT_WARN" ]; then
       note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for the machine-wide build lock, past the ${WAIT_WARN}s ceiling${place:+ - }${place}${holder:+ - }${holder}"
+      if [ "$paused" = 0 ]; then
+        paused=1
+        fm_build_lock_task_status "paused: waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock to run $DISPLAY_LINE${holder:+ - }${holder}"
+      fi
     else
       note "still waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock${place:+ - }${place}${holder:+ - }${holder}"
     fi
@@ -570,6 +606,8 @@ fm_build_lock_acquire() {  # <lockdir> <info-path>
   waited=$((now - start))
   fm_build_lock_queue_leave
   note "acquired the machine-wide build lock after $(fm_build_lock_elapsed "$waited")"
+  [ "$paused" = 0 ] \
+    || fm_build_lock_task_status "working: acquired the machine-wide build lock after $(fm_build_lock_elapsed "$waited")"
 }
 
 # --- release ----------------------------------------------------------------
@@ -611,6 +649,7 @@ fm_build_lock_on_signal() {  # <signal-name> <signal-number>
 
 MODE=run
 INSTALL_DIR=
+LABEL=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -631,6 +670,12 @@ while [ "$#" -gt 0 ]; do
       MODE='lock-path'
       shift
       [ "$#" -eq 0 ] || die "--lock-path takes no further arguments"
+      ;;
+    --label)
+      shift
+      [ "$#" -gt 0 ] && [ -n "$1" ] || die "--label takes a non-empty text"
+      LABEL=$1
+      shift
       ;;
     --install-mutex)
       MODE=install
@@ -753,7 +798,11 @@ trap 'fm_build_lock_on_signal HUP 1' HUP
 # Rendered before the acquire so publishing the holder record costs one write
 # and nothing else: every fork left inside that window is time a waiter can
 # spend looking at a lock whose command is not published yet.
-DISPLAY_LINE="$(fm_build_lock_render_command "$@") [in $(pwd -P)]"
+if [ -n "$LABEL" ]; then
+  DISPLAY_LINE="$(printf '%s' "$LABEL" | tr '\n\r' '  ') [in $(pwd -P)]"
+else
+  DISPLAY_LINE="$(fm_build_lock_render_command "$@") [in $(pwd -P)]"
+fi
 
 fm_build_lock_acquire "$LOCK" "$INFO"
 FM_BUILD_LOCK_HELD=1
@@ -772,6 +821,7 @@ FM_BUILD_LOCK_CHILD=$!
 
 # SECONDS is bash's own wall clock, so the ceiling costs no fork per tick.
 NEXT_HOLD_WARN=$HOLD_WARN
+HELD_REPORTED=0
 while kill -0 "$FM_BUILD_LOCK_CHILD" 2>/dev/null; do
   sleep "$POLL"
   [ "$HOLD_WARN" -gt 0 ] || continue
@@ -779,6 +829,11 @@ while kill -0 "$FM_BUILD_LOCK_CHILD" 2>/dev/null; do
   [ "$HELD" -ge "$NEXT_HOLD_WARN" ] || continue
   NEXT_HOLD_WARN=$((HELD + HOLD_WARN))
   fm_build_lock_report_ceiling "$HELD" "$DISPLAY_LINE"
+  if [ "$HELD_REPORTED" = 0 ]; then
+    HELD_REPORTED=1
+    fm_build_lock_queue_scan
+    fm_build_lock_task_status "note: holding the machine-wide build lock for $(fm_build_lock_elapsed "$HELD") with $FM_BUILD_LOCK_QUEUE_COUNT waiting, past the ${HOLD_WARN}s ceiling; not being killed: $DISPLAY_LINE"
+  fi
 done
 
 # The loop leaves only after the child is gone; wait then reports the status

@@ -2580,8 +2580,9 @@ BUILD_LOCK_HELD_BY=
 BUILD_LOCK_HELD_LOCK=
 BUILD_LOCK_WAIT_MS=0
 
-build_lock_hold() {
-  local acquired begin rc=0 held
+# <label> names the hold for waiters, --status and any ceiling status line.
+build_lock_hold() {  # <label>
+  local label=$1 acquired begin rc=0 held
   [ -z "$BUILD_LOCK_PID" ] || return 0
   [ -x "$BUILD_LOCK" ] || die "build lock not found: $BUILD_LOCK"
   BUILD_LOCK_N=$((BUILD_LOCK_N + 1))
@@ -2590,7 +2591,7 @@ build_lock_hold() {
   begin=$(now_ms)
   # Expansion is intentionally deferred to the child bash passed to -c.
   # shellcheck disable=SC2016
-  FM_BUILD_LOCK_POLL=${FM_BUILD_LOCK_POLL:-0.2} "$BUILD_LOCK" -- bash -c '
+  FM_BUILD_LOCK_POLL=${FM_BUILD_LOCK_POLL:-0.2} "$BUILD_LOCK" --label "$label" -- bash -c '
     printf "%s\t%s\n" "${FM_BUILD_LOCK_HELD_BY:-}" "${FM_BUILD_LOCK_HELD_LOCK:-}" >"$1.tmp" \
       && mv -f "$1.tmp" "$1" || exit 1
     while [ ! -e "$2" ] && kill -0 "$3" 2>/dev/null; do sleep 0.05; done
@@ -2793,7 +2794,7 @@ run_one_serial() {
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
-  build_lock_hold
+  build_lock_hold "bin/fm-test-run.sh $script"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
@@ -2910,7 +2911,7 @@ else
     done
     # One hold spans the whole concurrent phase, not each script in it: its workers
     # share the machine together, and it is released only at a phase break or drain.
-    build_lock_hold
+    build_lock_hold "bin/fm-test-run.sh concurrent phase starting with $script"
     worker_n=$((worker_n + 1))
     work="$RUN_TMP/w$worker_n"
     mkdir -p "$work/tmp"
