@@ -1221,7 +1221,7 @@ test_claude_away_posture_rewakes_without_a_typing_daemon() {
     fail "claude away: could not confirm the away posture"
   fi
   out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" TMUX_PANE=%fm-claude-away PATH="$tmuxbin:$PATH" \
-    "$FAKE_CLAUDE" -c '"$1" start-native' _ "$ROOT/bin/fm-afk-launch.sh" 2>&1); status=$?
+    "$FAKE_CLAUDE" -c '"$1" start-native; exit $?' _ "$ROOT/bin/fm-afk-launch.sh" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "claude away: the daemon entry must refuse an away entry on claude"
   assert_contains "$out" "no longer launched on claude" "claude away: the refusal must name claude"
   [ ! -e "$dir/state/.afk" ] || fail "claude away: a daemon flag was written, so the Stop hook would stand down"
