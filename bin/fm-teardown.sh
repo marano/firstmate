@@ -1419,13 +1419,15 @@ work_is_landed() {
 # harness that died at launch left a live shell prompt, and its cleanup closed
 # the item exactly like a shipped one. Any one of these is evidence: a status
 # line, which every worker writes from its first phase; a pull request this
-# teardown already holds; or a commit on the task's copy that no remote holds,
-# counted only when the repository has remotes to compare against, since
-# without one every commit of its history would read as new. A scout is judged
-# by its report, which teardown already requires, and has nothing to add here.
-# Absent all evidence the item is requeued, not closed, and never refused:
-# nothing is there to lose.
+# teardown already holds; or a commit on the task's copy that its default
+# branch does not contain (origin's when the project has one, the local one
+# otherwise). A spawn starts the copy at that branch's tip, so an unstarted
+# copy carries no such commit, while pushed, fork, and squash-merged work all
+# do. A scout is judged by its report, which teardown already requires, and has
+# nothing to add here. Absent all evidence the item is requeued, not closed,
+# and never refused: nothing is there to lose.
 teardown_work_was_started() {
+  local name ref
   [ "$KIND" = ship ] || return 0
   [ -z "$PR_URL" ] || return 0
   if [ -f "$STATE/$ID.status" ] && grep -q '[^[:space:]]' "$STATE/$ID.status" 2>/dev/null; then
@@ -1433,8 +1435,11 @@ teardown_work_was_started() {
   fi
   teardown_owns_worktree || return 1
   [ -d "$WT" ] || return 1
-  [ -n "$(git -C "$WT" for-each-ref --count=1 --format=x refs/remotes 2>/dev/null)" ] || return 1
-  [ -n "$(git -C "$WT" log --format=%H -1 HEAD --not --remotes -- 2>/dev/null)" ]
+  name=$(default_branch) || return 1
+  ref="refs/remotes/origin/$name"
+  git -C "$WT" rev-parse --quiet --verify "$ref" >/dev/null 2>&1 || ref="refs/heads/$name"
+  git -C "$WT" rev-parse --quiet --verify "$ref" >/dev/null 2>&1 || return 1
+  [ -n "$(git -C "$WT" log --format=%H -1 HEAD --not "$ref" -- 2>/dev/null)" ]
 }
 
 # The completion links this teardown already holds locally. A scout's

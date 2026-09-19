@@ -727,6 +727,40 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+# Completion closes only work something shows was started
+# (bin/fm-teardown.sh teardown_work_was_started). A copy still at the default
+# branch's tip, with no status line and no PR, is a worker that never ran.
+test_teardown_requeues_a_copy_its_worker_never_committed_to() {
+  local case_dir out body
+  case_dir=$(make_case unstarted-copy)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "unstarted-copy: teardown failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = queued ] \
+    || fail "unstarted-copy: cleanup recorded work nobody started as $(backlog_row_state "$case_dir")"
+  body=$(tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md" 2>/dev/null)
+  assert_contains "$body" "no commit, no status line, and no pull request" \
+    "unstarted-copy: the requeued item does not say why it was not closed"
+  pass "teardown requeues a task whose copy never left the default branch"
+}
+
+# A commit is evidence wherever it went: pushed to a fork, with no status line
+# and no PR recorded, the work was still started and landed, so it closes.
+test_teardown_closes_pushed_work_that_left_no_status_line() {
+  local case_dir out
+  case_dir=$(make_case pushed-no-status)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit "$case_dir" "work pushed without a status line"
+  add_fork_with_pushed_branch "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "pushed-no-status: teardown failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "pushed-no-status: a landed commit was not recorded as done: $(backlog_row_state "$case_dir")"
+  pass "teardown closes pushed work even when its worker left no status line"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -3750,3 +3784,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_teardown_requeues_a_copy_its_worker_never_committed_to
+test_teardown_closes_pushed_work_that_left_no_status_line
