@@ -44,7 +44,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    - **Claude**: stop here too.
      The Stop-hook supervision (`bin/fm-claude-stop-autoarm.sh`) keeps running with the record present and wakes firstmate for every actionable event without typing into its composer.
      Typed delivery is unfit there: claude strips the digest's invisible operational markers and swallows the Enter that should submit it, which is how a digest once sat unsent in the composer all night.
-     A wake arrives as Stop hook feedback, which is supervision and never the captain's return; handle it as an ordinary wake under the away posture.
+     A wake arrives as Stop hook feedback, which is supervision and never the captain's return (see "How to exit").
      `bin/fm-afk-launch.sh start` and `start-native` refuse an away entry on claude; claude keeps the daemon only for `/quiet`.
    - **Harness WITH a native in-pane tracked-background tool** (grok's background tool, and claude's background bash for `/quiet` only): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
@@ -86,6 +86,7 @@ No `/back` is needed. The first genuine message is the return signal:
   Record it with `bin/fm-afk-return.sh truncated-input`, the exact message on stdin, so the return brief's health section reports it; the recorder refuses any message without that provenance, and a refusal means the message is the captain back.
   Treat the surviving text as a partial escalation: re-read current state for whatever it names rather than trusting the fragment, then keep supervising.
   A sentinel followed by any other text is the captain typing past or quoting a digest, and is the captain back.
+- A supervision wake with no daemon behind it, such as claude's Stop hook feedback or Pi's supervision follow-up, is not a message -> stay away and handle it as an ordinary wake.
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
 Bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
