@@ -60,6 +60,8 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
   same two carve-outs `/afk` documents for away mode.
 - Every other message while in quiet mode is simply answered as ordinary
   work; the flag and daemon are left untouched.
+- A daemon that hands supervision back (the `afk` skill's "Max-defer escape") has already cleared the flag and stopped, so quiet mode is over.
+  Handle the events its report lists, tell the captain quiet mode ended because the supervisor composer holds text the daemon could not deliver around, and re-enter `/quiet` only once that composer is clear.
 
 ## Orthogonal to approval authority
 
