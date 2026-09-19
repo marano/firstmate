@@ -37,6 +37,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 TMP_ROOT=$(fm_test_tmproot fm-remote-parent-binding)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+# bin/fm-spawn.sh refuses a bare-name harness missing from PATH; these cases
+# are about what happens past that preflight, so every one is installed here.
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-clis")
+fm_fake_harness_clis "$HARNESS_FAKEBIN"
+export PATH="$HARNESS_FAKEBIN:$PATH"
 PARENT="$TMP_ROOT/parent"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -117,6 +122,9 @@ pass "remote provisioning publishes durable parent state before its completion m
   cd "$ROOT" || exit
   tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
+# The remote host resolves its tools from its own code root's bin/, so the
+# harness this route launches is installed there.
+fm_fake_harness_clis "$REMOTE_ROOT/bin"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main

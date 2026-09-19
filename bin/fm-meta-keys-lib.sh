@@ -53,7 +53,11 @@ FM_META_APPEND_ONLY_KEYS="decisions_reviewed decision_keys"
 #   x_*               bin/fm-x-lib.sh, the relay link and its reply context
 #   remote_*          bin/fm-spawn.sh, a remotely placed secondmate
 #   cleanup_recovery  bin/fm-spawn.sh, an Orca worktree left to reclaim
-FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery"
+#   delivers          bin/fm-spawn.sh --delivers at first dispatch, rewritten only
+#                     by bin/fm-tasks-axi.sh handback; not spawn-owned, so a
+#                     relaunch carries it forward (bin/fm-backlog-transition-lib.sh
+#                     MEMBERSHIP owns the contract)
+FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery delivers"
 
 # The same lists as delimited lookup sets, built once so recognising a key
 # costs no process.

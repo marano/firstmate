@@ -39,6 +39,12 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
+# bin/fm-spawn.sh refuses a bare-name harness missing from PATH; these cases
+# are about what happens past that preflight, so every one is installed here.
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-clis")
+fm_fake_harness_clis "$HARNESS_FAKEBIN"
+export PATH="$HARNESS_FAKEBIN:$PATH"
+BASE_PATH="$HARNESS_FAKEBIN:$BASE_PATH"
 
 # --- unit level: fm_backend_tmux_agent_state --------------------------------
 

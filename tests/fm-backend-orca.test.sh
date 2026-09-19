@@ -55,6 +55,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_fake_harness_clis "$fb"
   printf '%s\n' "$fb"
 }
 

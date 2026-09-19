@@ -15,6 +15,11 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
+# These cases exercise the batch loop and project scoping past the harness
+# preflight, so every bare-name harness is installed for the whole file.
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+fm_fake_harness_clis "$HARNESS_FAKEBIN"
+export PATH="$HARNESS_FAKEBIN:$PATH"
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
 run_spawn() {

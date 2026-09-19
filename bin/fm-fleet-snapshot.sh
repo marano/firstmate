@@ -57,6 +57,9 @@
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     delivers[] is a grouped dispatch's recorded membership, the backlog items
+#     that one task record owns besides its own (bin/fm-backlog-transition-lib.sh
+#     MEMBERSHIP); empty for an ordinary task.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -84,8 +87,9 @@
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
-#     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
-#     current backlog rows). Does not invent live tasks; meta remains truth for
+#     (orphan structured in-flight ids with no state/<id>.meta and no task record
+#     naming them in its delivers= membership, and unstructured current backlog
+#     rows). Does not invent live tasks; meta remains truth for
 #     workers. Bearings maps failures into omitted[] disclosure (and a Charted
 #     Next gate line) rather than silent empty Underway.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
@@ -752,7 +756,7 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen delivers backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -773,6 +777,7 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     spawn_gen=$(meta_value "$meta" spawn_gen)
+    delivers=$(meta_value "$meta" delivers)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     if [ -n "$remote_host" ]; then
@@ -879,6 +884,7 @@ task_json_lines() {
       --arg home "$home" \
       --arg projects "$projects" \
       --arg spawn_gen "$spawn_gen" \
+      --arg delivers "$delivers" \
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
@@ -910,6 +916,7 @@ task_json_lines() {
         yolo:($yolo // ""),
         project:($project // ""),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        delivers:($delivers | if . == "" then [] else split(",") | map(select(. != "")) end),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
@@ -965,8 +972,9 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]?
          | select(.state == "in_flight" and .structured and .requires_child_metadata) ]) as $owned_in_flight
+    | ([ $tasks[] | .id, (.delivers // [])[] ]) as $owning_ids
     | ([ $owned_in_flight[]
-         | select(.id as $id | [$tasks[].id] | index($id) | not)
+         | select(.id as $id | $owning_ids | index($id) | not)
          | .id ]) as $orphan_in_flight
     | (($unstructured_current | length) == 0
        and ($orphan_in_flight | length) == 0) as $valid
@@ -1036,9 +1044,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[] | .id, (.delivers // [])[] ]) as $owning_ids
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
-         | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
+         | select(.id as $id | $owning_ids | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
          | select(.kind != "secondmate")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)

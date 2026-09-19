@@ -44,6 +44,7 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 make_stub() {  # <case-dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  fm_fake_harness_clis "$fb"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

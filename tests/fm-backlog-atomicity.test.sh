@@ -95,7 +95,9 @@ case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  # bin/fm-spawn.sh refuses a bare-name harness missing from PATH; the fake
+  # tmux never runs it, so an executable stand-in is all it needs.
+  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes claude
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -575,9 +577,18 @@ SH
   chmod +x "$case_dir/fakebin/mv"
 }
 
+# A worker that started leaves a status line from its first phase; completion
+# closes only work something shows was started (bin/fm-teardown.sh
+# teardown_work_was_started). The fixture records stand in for such workers,
+# and the unstarted cases remove this line to model a worker that never ran.
+mark_worker_started() {  # <case-dir> <id>
+  printf 'working: fixture worker started\n' >> "$(home_of "$1")/state/$2.status"
+}
+
 write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
   local case_dir=$1 id=$2 kind=$3 mode=$4
   shift 4
+  mark_worker_started "$case_dir" "$id"
   fm_write_meta "$(home_of "$case_dir")/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
@@ -601,7 +612,8 @@ run_spawn() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" 2>&1 || return $?
+  mark_worker_started "$case_dir" "$1"
 }
 
 run_ship_spawn() {  # <case-dir> <id>
@@ -2993,6 +3005,327 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+# --- grouped dispatch and unstarted work --------------------------------------
+# One worker delivering several backlog items in one job records its members at
+# dispatch (bin/fm-backlog-transition-lib.sh MEMBERSHIP); cleanup closes exactly
+# those members with the job's PR, never a member handed back undone. Cleanup of
+# a worker that never started must return its item to Queued, not close it.
+
+row_body() {  # <case-dir> <id>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$1")" "$ROOT/bin/fm-tasks-axi.sh" body "$2"
+}
+
+row_links() {  # <case-dir> <id>
+  tasks-axi show "$2" --file "$(backlog_of "$1")" 2>/dev/null |
+    sed -n 's/^  links: *//p' | head -1
+}
+
+idle_fleet_ready_count() {  # <case-dir>
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-idle-fleet-lib.sh"
+    PATH="$1/fakebin:$PATH" fm_idle_fleet_ready_count "$(home_of "$1")"
+  )
+}
+
+# A tmux stand-in that records whether an endpoint or local copy was requested.
+record_endpoint_creation() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *new-window*|*new-session*) : > "$case_dir/task-endpoint-created" ;;
+  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+test_grouped_dispatch_records_members_and_moves_them_in_flight() {
+  local case_dir unit out meta
+  unit=atomic-group-unit-g1
+  case_dir=$(make_home group-dispatch "$unit")
+  add_item "$case_dir" "$unit"
+  add_item "$case_dir" group-a-g1
+  add_item "$case_dir" group-b-g1
+  add_item "$case_dir" unrelated-g1
+  # The usual parking of a grouped card behind the job that will deliver it.
+  tasks-axi block group-b-g1 --by "$unit" --file "$(backlog_of "$case_dir")" >/dev/null
+  [ "$(idle_fleet_ready_count "$case_dir")" = 3 ] \
+    || fail "fixture: expected the unit, one member and the unrelated item ready before dispatch"
+
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers group-a-g1,group-b-g1) || fail "grouped spawn failed: $out"
+  meta="$(home_of "$case_dir")/state/$unit.meta"
+  assert_exact_line "$meta" "delivers=group-a-g1,group-b-g1" \
+    "the grouped dispatch did not record its membership in the unit's record"
+  for id in "$unit" group-a-g1 group-b-g1; do
+    [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+      || fail "grouped dispatch left $id $(row_state "$case_dir" "$id")"
+  done
+  [ "$(row_state "$case_dir" unrelated-g1)" = queued ] \
+    || fail "grouped dispatch moved an item it does not deliver"
+  [ "$(idle_fleet_ready_count "$case_dir")" = 1 ] \
+    || fail "the idle-fleet ready count still counts delivered members: $(idle_fleet_ready_count "$case_dir")"
+  pass "grouped dispatch records its members and takes them out of the ready count"
+}
+
+test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
+  local case_dir unit out rc=0
+  unit=atomic-group-unit-g2
+  case_dir=$(make_home group-refuse "$unit")
+  add_item "$case_dir" "$unit"
+  add_item "$case_dir" group-ok-g2
+  add_item "$case_dir" group-blocked-g2
+  add_item "$case_dir" other-dep-g2
+  tasks-axi block group-blocked-g2 --by other-dep-g2 --file "$(backlog_of "$case_dir")" >/dev/null
+  record_endpoint_creation "$case_dir"
+
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers group-ok-g2,group-blocked-g2) || rc=$?
+  [ "$rc" -ne 0 ] || fail "grouped spawn accepted a member with an unfinished dependency"
+  assert_contains "$out" "blocked by other-dep-g2" "the refusal did not name the blocking dependency"
+  assert_absent "$(home_of "$case_dir")/state/$unit.meta" "the refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" "the refusal created an endpoint"
+  for id in "$unit" group-ok-g2 group-blocked-g2; do
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "the refusal moved $id to $(row_state "$case_dir" "$id")"
+  done
+  rc=0
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers group-ok-g2,absent-g2) || rc=$?
+  [ "$rc" -ne 0 ] || fail "grouped spawn accepted a member this home has no item for"
+  assert_contains "$out" "absent-g2" "the refusal did not name the missing member"
+  pass "grouped dispatch refuses a member it cannot deliver before creating anything"
+}
+
+grouped_unit_in_flight() {  # <case-dir> <unit> <members-csv> [extra-meta-line...]
+  local case_dir=$1 unit=$2 member_csv=$3 m
+  shift 3
+  add_item "$case_dir" "$unit"
+  start_item "$case_dir" "$unit"
+  for m in ${member_csv//,/ }; do
+    add_item "$case_dir" "$m"
+    start_item "$case_dir" "$m"
+  done
+  write_task_meta "$case_dir" "$unit" ship no-mistakes "spawn_gen=spawn-$unit" \
+    "delivers=$member_csv" "$@"
+  printf 'done: PR https://github.com/example/repo/pull/42 checks green run=r1\n' \
+    > "$(home_of "$case_dir")/state/$unit.status"
+}
+
+test_grouped_close_closes_every_delivered_member() {
+  local case_dir unit out id
+  unit=atomic-group-close-g3
+  case_dir=$(make_home group-close)
+  grouped_unit_in_flight "$case_dir" "$unit" group-a-g3,group-b-g3,group-c-g3 \
+    "pr=https://github.com/example/repo/pull/42"
+
+  out=$(run_teardown "$case_dir" "$unit") || fail "teardown failed: $out"
+  for id in "$unit" group-a-g3 group-b-g3 group-c-g3; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "a landed grouped dispatch left $id $(row_state "$case_dir" "$id")"
+    assert_contains "$(row_links "$case_dir" "$id")" "https://github.com/example/repo/pull/42" \
+      "$id was closed without the job's pull request"
+  done
+  assert_contains "$out" "closed with it: group-a-g3 group-b-g3 group-c-g3" \
+    "teardown did not report the members it closed"
+  pass "a landed grouped dispatch closes every member it delivered, with its PR"
+}
+
+test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason() {
+  local case_dir unit out
+  unit=atomic-group-handback-g4
+  case_dir=$(make_home group-handback)
+  grouped_unit_in_flight "$case_dir" "$unit" group-a-g4,group-b-g4,group-c-g4 \
+    "pr=https://github.com/example/repo/pull/43"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-tasks-axi.sh" handback "$unit" group-c-g4 \
+    --reason "investigation answered; its recommendation was deliberately not built") \
+    || fail "handback failed: $out"
+  assert_exact_line "$(home_of "$case_dir")/state/$unit.meta" "delivers=group-a-g4,group-b-g4" \
+    "handback did not drop the member from the unit's membership"
+  [ "$(row_state "$case_dir" group-c-g4)" = queued ] \
+    || fail "handback left the member $(row_state "$case_dir" group-c-g4)"
+
+  out=$(run_teardown "$case_dir" "$unit") || fail "teardown failed: $out"
+  for id in "$unit" group-a-g4 group-b-g4; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "a delivered member $id was left $(row_state "$case_dir" "$id")"
+  done
+  [ "$(row_state "$case_dir" group-c-g4)" = queued ] \
+    || fail "cleanup closed a member the worker handed back undone: $(row_state "$case_dir" group-c-g4)"
+  assert_contains "$(row_body "$case_dir" group-c-g4)" \
+    "Handed back undelivered by $unit: investigation answered; its recommendation was deliberately not built" \
+    "the handed-back member does not say why it is still queued"
+  assert_not_contains "$(row_links "$case_dir" group-c-g4)" "pull/43" \
+    "the handed-back member carries the job's PR as though it shipped"
+  pass "a member handed back stays queued with its reason while the rest close"
+}
+
+test_handback_refuses_an_item_the_unit_does_not_deliver() {
+  local case_dir unit out rc=0
+  unit=atomic-group-handback-refuse-g5
+  case_dir=$(make_home group-handback-refuse)
+  grouped_unit_in_flight "$case_dir" "$unit" group-a-g5
+  add_item "$case_dir" stranger-g5
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-tasks-axi.sh" handback "$unit" stranger-g5 --reason "not ours" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "handback accepted an item outside the unit's membership"
+  assert_contains "$out" "does not deliver stranger-g5" "the refusal did not name the membership"
+  assert_exact_line "$(home_of "$case_dir")/state/$unit.meta" "delivers=group-a-g5" \
+    "a refused handback changed the unit's membership"
+  pass "handback refuses an item the unit does not deliver"
+}
+
+test_recovery_replays_an_interrupted_grouped_close_for_every_member() {
+  local case_dir unit out id
+  unit=atomic-group-replay-g6
+  case_dir=$(make_home group-replay)
+  add_item "$case_dir" "$unit"
+  start_item "$case_dir" "$unit"
+  for id in group-a-g6 group-b-g6; do
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+  done
+  # Killed after the unit closed and before either member did.
+  tasks-axi "done" "$unit" --pr https://github.com/example/repo/pull/44 \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-g6\narg=--pr\narg=https://github.com/example/repo/pull/44\nmember=group-a-g6\nmember=group-b-g6\n' \
+    "$unit" "$(home_of "$case_dir")/data" > "$(home_of "$case_dir")/state/$unit.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  for id in group-a-g6 group-b-g6; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "session start left member $id $(row_state "$case_dir" "$id"): $out"
+    assert_contains "$(row_links "$case_dir" "$id")" "pull/44" \
+      "the replayed member close dropped the job's PR"
+  done
+  assert_absent "$(home_of "$case_dir")/state/$unit.backlog-close" \
+    "the replayed grouped close left its record behind"
+  pass "session start finishes an interrupted grouped close for every member"
+}
+
+test_single_item_dispatch_and_close_are_unchanged() {
+  local case_dir id out
+  id=atomic-single-g7
+  case_dir=$(make_home single-unchanged "$id")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
+  assert_no_grep '^delivers=' "$(home_of "$case_dir")/state/$id.meta" \
+    "an ordinary dispatch recorded a membership"
+  # Complete it the way a shipped worker leaves it, against an absent local
+  # copy so the case stays about the backlog rather than landed-work checks.
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-single-g7" \
+    "pr=https://github.com/example/repo/pull/45"
+  printf 'done: PR https://github.com/example/repo/pull/45 checks green run=r1\n' \
+    > "$(home_of "$case_dir")/state/$id.status"
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "an ordinary completed dispatch was left $(row_state "$case_dir" "$id")"
+  assert_contains "$(row_links "$case_dir" "$id")" "pull/45" \
+    "an ordinary completed dispatch lost its PR"
+  pass "an ordinary single-item dispatch and its close are unchanged"
+}
+
+test_spawn_refuses_a_harness_whose_command_is_missing() {
+  local case_dir id out rc=0 harness='' h dir clean_path=''
+  id=atomic-missing-harness-h1
+  case_dir=$(make_home missing-harness "$id")
+  add_item "$case_dir" "$id"
+  record_endpoint_creation "$case_dir"
+  # Choose a bare-name adapter this host really lacks; if every one is
+  # installed, hide codex by dropping the PATH entries that hold it.
+  for h in codex opencode grok gemini; do
+    if ! command -v "$h" >/dev/null 2>&1; then harness=$h; break; fi
+  done
+  if [ -z "$harness" ]; then
+    harness=codex
+    IFS=: read -r -a dirs <<< "$PATH"
+    for dir in "${dirs[@]}"; do
+      [ -x "$dir/codex" ] || clean_path="${clean_path:+$clean_path:}$dir"
+    done
+  else
+    clean_path=$PATH
+  fi
+  PATH="$clean_path" command -v "$harness" >/dev/null 2>&1 \
+    && fail "fixture: $harness is still resolvable, so this case would prove nothing"
+
+  out=$(mkdir -p "$case_dir/user-home"
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
+    PATH="$case_dir/fakebin:$clean_path" \
+    "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off --harness "$harness" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn reported success for $harness, which is not installed: $out"
+  assert_contains "$out" "$harness executable not found" "the refusal did not name the missing harness"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "the refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" "the refusal created an endpoint"
+  assert_absent "$case_dir/local-copy-requested" "the refusal requested a local copy"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the refusal changed the backlog item to $(row_state "$case_dir" "$id")"
+  pass "spawn refuses a harness whose command is missing, before creating anything"
+}
+
+test_cleanup_of_an_unstarted_task_requeues_it_instead_of_closing() {
+  local case_dir id out
+  id=atomic-unstarted-h2
+  case_dir=$(make_home unstarted)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # A worker that died at launch: a record, but no status line, no PR, and no
+  # local copy holding a commit.
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-unstarted"
+  rm -f "$(home_of "$case_dir")/state/$id.status"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "cleanup recorded work nobody started as $(row_state "$case_dir" "$id")"
+  assert_contains "$(row_body "$case_dir" "$id")" "no commit, no status line, and no pull request" \
+    "the requeued item does not say why it was not closed"
+  assert_contains "$out" "back in Queued" "teardown did not report the requeue"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "teardown kept the task record"
+  pass "cleanup of a task nothing shows was started requeues it instead of closing it"
+}
+
+test_cleanup_of_an_unstarted_grouped_dispatch_requeues_every_member() {
+  local case_dir unit id
+  unit=atomic-unstarted-group-h3
+  case_dir=$(make_home unstarted-group)
+  grouped_unit_in_flight "$case_dir" "$unit" group-a-h3,group-b-h3
+  rm -f "$(home_of "$case_dir")/state/$unit.status"
+
+  run_teardown "$case_dir" "$unit" >/dev/null || fail "teardown failed"
+  for id in "$unit" group-a-h3 group-b-h3; do
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "cleanup of an unstarted grouped dispatch left $id $(row_state "$case_dir" "$id")"
+  done
+  assert_contains "$(row_body "$case_dir" group-a-h3)" "cleanup of $unit" \
+    "a requeued member does not name the dispatch that did not deliver it"
+  pass "cleanup of an unstarted grouped dispatch requeues the unit and every member"
+}
+
+test_recovery_replays_an_interrupted_requeue() {
+  local case_dir id out
+  id=atomic-unstarted-replay-h4
+  case_dir=$(make_home unstarted-replay)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-h4\ncleanup_incomplete=0\nmode=requeue\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$(home_of "$case_dir")/state/$id.backlog-close"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "session start left an interrupted requeue at $(row_state "$case_dir" "$id"): $out"
+  assert_contains "$out" "returned the unstarted backlog item for $id to Queued" \
+    "session start did not report the replayed requeue"
+  pass "session start finishes an interrupted requeue without closing the item"
+}
+
+
 test_backend_resolution_preserves_config_errors
 test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
@@ -3092,3 +3425,14 @@ test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item
+test_grouped_dispatch_records_members_and_moves_them_in_flight
+test_grouped_dispatch_refuses_a_member_it_cannot_deliver
+test_grouped_close_closes_every_delivered_member
+test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason
+test_handback_refuses_an_item_the_unit_does_not_deliver
+test_recovery_replays_an_interrupted_grouped_close_for_every_member
+test_single_item_dispatch_and_close_are_unchanged
+test_spawn_refuses_a_harness_whose_command_is_missing
+test_cleanup_of_an_unstarted_task_requeues_it_instead_of_closing
+test_cleanup_of_an_unstarted_grouped_dispatch_requeues_every_member
+test_recovery_replays_an_interrupted_requeue

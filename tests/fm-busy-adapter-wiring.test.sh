@@ -16,6 +16,11 @@ set -u
 . "$ROOT/bin/fm-busy-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
+# bin/fm-spawn.sh refuses a bare-name harness missing from PATH; these cases
+# are about what happens past that preflight, so every one is installed here.
+HARNESS_FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-clis")
+fm_fake_harness_clis "$HARNESS_FAKEBIN"
+export PATH="$HARNESS_FAKEBIN:$PATH"
 
 make_spawn_case() {  # <name> <harness> <id>
   local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
