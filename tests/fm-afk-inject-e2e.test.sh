@@ -29,6 +29,13 @@
 #     while text the captain typed is never submitted or changed (the
 #     2026-09-18 overnight wedge).
 #
+#   Scenario F (unprovable stranded digest past max-defer): captain text sits
+#     after the stranded digest, so the daemon cannot prove the composer holds
+#     only its own text. A daemon running as the harness's tracked background
+#     job must hand the undelivered events back to firstmate through its own
+#     exit and clear the daemon flag, never touching the composer; a daemon
+#     launched into its own terminal keeps the wedge alarm as its floor.
+#
 # Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
 # A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
 # private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
@@ -722,10 +729,114 @@ test_scenario_e() {
   pass "Scenario E: captain text, appended to the stranded digest or in its place, is never submitted or changed"
 }
 
+# --- Scenario F: a stranded digest the daemon cannot prove its own, past max-defer
+# The residual of the 2026-09-18 wedge fix. With captain text typed after the
+# stranded digest, the ownership proof fails, so every flush defers and only
+# the wedge alarm fires; nothing reaches firstmate while it sits idle. A daemon
+# running as the harness's own tracked background job (the launch record reads
+# `none - native`) has one path back to firstmate that does not touch the
+# composer: its own exit, which the harness delivers as a job completion.
+# Past max-defer it must take that path - hand the undelivered events back on
+# stdout, clear the daemon flag so the ordinary cycle owns supervision, and
+# exit - while the composer stays untouched. A daemon launched into its own
+# terminal has no such path, and keeps the wedge alarm as its floor.
+claude_daemon_start() {  # <stdout-file>
+  PATH="$TMUX_SHIM_DIR:$PATH" \
+  FM_STATE_OVERRIDE="$STATE_DIR" \
+  FM_SUPERVISOR_TARGET="$CLAUDE_PANE" \
+  FM_SUPERVISOR_BACKEND=tmux \
+  FM_DAEMON_PRIMARY_HARNESS=claude \
+  FM_ESCALATE_BATCH_SECS=0 \
+  FM_MAX_DEFER_SECS=2 \
+  FM_HOUSEKEEPING_TICK=1 \
+  FM_POLL=1 \
+  FM_SIGNAL_GRACE=1 \
+  FM_HEARTBEAT=999999 \
+  FM_CHECK_INTERVAL=999999 \
+  FM_INJECT_CONFIRM_SLEEP=0.3 \
+  FM_INJECT_CONFIRM_RETRIES=3 \
+  FM_STALE_ESCALATE_SECS=999999 \
+  nohup "$DAEMON" >"$1" 2>"$STATE_DIR/daemon-f.err" &
+  DAEMON_PID=$!
+}
+
+# Strand the daemon's own digest, then type captain text after it, so the
+# composer cannot be proven to hold only the daemon's text; the buffer has
+# waited well past max-defer.
+claude_strand_unprovable() {
+  local text
+  claude_fixture_restart
+  claude_buffer_three
+  echo $(( $(date +%s) - 60 )) > "$STATE_DIR/.subsuper-escalations.since"
+  text=$(claude_digest_text)
+  claude_strand "$text"
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l " and one more thing"
+  sleep 0.5
+  printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
+}
+
+test_scenario_f() {
+  local out composer i
+
+  # F1: a natively tracked daemon hands supervision back through its own exit.
+  reset_state
+  afk_enter "$STATE_DIR"
+  claude_strand_unprovable
+  composer=$(cat "$CLAUDE_LOG.composer")
+  printf 'none\t-\tnative\n' > "$STATE_DIR/.afk-daemon-terminal"
+  out="$STATE_DIR/daemon-f1.out"
+  claude_daemon_start "$out"
+  i=0
+  while kill -0 "$DAEMON_PID" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+  if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    fail "Scenario F: a natively tracked daemon kept deferring an unprovable stranded digest past max-defer instead of handing supervision back (stdout: $(cat "$out"); log: $(tail -5 "$STATE_DIR/.supervise-daemon.log" 2>/dev/null))"
+  fi
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+  grep -F "HANDED SUPERVISION BACK" "$out" >/dev/null \
+    || fail "Scenario F: the daemon exited without a handback report on stdout: $(cat "$out")"
+  grep -F "demo-beta.status: done: PR https://example.test/pr/501 checks green run=01DEMO" "$out" >/dev/null \
+    || fail "Scenario F: the handback report did not carry the undelivered events: $(cat "$out")"
+  [ ! -e "$STATE_DIR/.afk" ] || fail "Scenario F: the handback left the daemon flag set, so nothing owns supervision"
+  [ ! -s "$CLAUDE_LOG" ] || fail "Scenario F: the handback submitted composer text: $(cat "$CLAUDE_LOG")"
+  [ "$(cat "$CLAUDE_LOG.composer")" = "$composer" ] || fail "Scenario F: the handback changed the composer"
+  [ "$(wc -l < "$STATE_DIR/.subsuper-escalations" | tr -d ' ')" = 3 ] \
+    || fail "Scenario F: the handback did not retain the undelivered events for the return brief"
+  [ -e "$STATE_DIR/.subsuper-inject-wedged" ] || fail "Scenario F: the wedge alarm floor did not fire before the handback"
+  [ ! -e "$STATE_DIR/.supervise-daemon.pid" ] || fail "Scenario F: the handback exit left the daemon pid file"
+  pass "Scenario F: a natively tracked daemon hands an unprovable stranded digest back to firstmate through its own exit"
+
+  # F2: a daemon launched into its own terminal has no path back to firstmate
+  # but the composer, so it keeps supervising and keeps the wedge alarm.
+  reset_state
+  afk_enter "$STATE_DIR"
+  claude_strand_unprovable
+  printf 'tmux\t%%0\t-\n' > "$STATE_DIR/.afk-daemon-terminal"
+  out="$STATE_DIR/daemon-f2.out"
+  claude_daemon_start "$out"
+  i=0
+  while [ ! -e "$STATE_DIR/.subsuper-inject-wedged" ] && [ "$i" -lt 100 ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+  [ -e "$STATE_DIR/.subsuper-inject-wedged" ] || fail "Scenario F: the terminal-launched daemon never raised the wedge alarm"
+  sleep 4
+  kill -0 "$DAEMON_PID" 2>/dev/null || fail "Scenario F: a terminal-launched daemon exited, although nothing would deliver its exit to firstmate: $(cat "$out")"
+  [ -e "$STATE_DIR/.afk" ] || fail "Scenario F: a terminal-launched daemon cleared the daemon flag"
+  [ ! -s "$out" ] || fail "Scenario F: a terminal-launched daemon printed a handback nobody reads: $(cat "$out")"
+  stop_daemon
+  rm -f "$STATE_DIR/.afk-daemon-terminal"
+  pass "Scenario F: a terminal-launched daemon keeps supervising behind the wedge alarm"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
 test_scenario_d
 test_scenario_e
+test_scenario_f
 
 echo "all e2e injection tests passed"
