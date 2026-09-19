@@ -1,0 +1,9 @@
+== holder status
+note: holding the machine-wide build lock for 2s with 1 waiting, past the 2s ceiling; not being killed: labelled hold for X [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63]
+== waiter status
+== holder stderr
+fm-build-lock: WARNING: this command has held the machine-wide build lock for 2s and is blocking every other local build: labelled hold for X [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63]
+fm-build-lock: WARNING: this command has held the machine-wide build lock for 4s and is blocking every other local build: labelled hold for X [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63]
+fm-build-lock: WARNING: this command has held the machine-wide build lock for 6s and is blocking every other local build: labelled hold for X [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63]
+paused: waiting 1s for the machine-wide build lock to run true [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63] - held by pid 31053 for 1s running: sleep 4 [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M2XK5SSFDYH9D0SWDBYK0D63]
+working: acquired the machine-wide build lock after 4s
