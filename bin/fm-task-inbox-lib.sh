@@ -27,7 +27,10 @@
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
-#   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
+#   <task>.inbox/.ring-state   watcher re-ring ladder:
+#                              "<msg>\t<count>\t<epoch>\t<stuck>", where <stuck>
+#                              counts the latest consecutive attempts that found
+#                              the composer holding unsent text
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -51,6 +54,13 @@
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
+# When EVERY attempt of a spent budget found the composer provably holding
+# unsent text - skipped for it, or left with it after the submit - the
+# escalation is `stuck` rather than `escalate`: the agent is alive and idle
+# (the caller's checks), text sits in its composer that never submits, and
+# another doorbell would only queue behind it, so the worker cannot receive
+# messages until someone clears that composer. The ladder only names that
+# condition; it never interrupts or clears anything itself.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
@@ -274,8 +284,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
+# record), 4 rang but the composer still provably holds unsent text after the
+# submit on a pane not busy with a turn. 1 and 4 are the ladder's stuck-attempt
+# evidence (fm_task_inbox_record_ring). No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -301,9 +313,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
+  # The verdict is never delivery proof. Beyond a failed keystroke, only an
+  # exact `pending` counts: the submit core already converted a busy pane's
+  # queued Enter to `empty`, so `pending` here means the text is still sitting
+  # unsent in an idle composer.
   [ "$verdict" != send-failed ] || return 2
+  [ "$verdict" != pending ] || return 4
   return 0
 }
 
@@ -342,10 +357,13 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #                             or already escalated for the current oldest)
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
+#   stuck <record-path> <count>      attempt budget spent and every attempt
+#                             found the composer holding unsent text; surface
+#                             as a worker that cannot receive messages
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last stuck
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -360,8 +378,9 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   fi
   count=0
   last=0
+  stuck=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck <<EOF
 $ladder
 EOF
   if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
@@ -371,17 +390,23 @@ EOF
     # a marker naming some other message).
     count=0
     last=0
+    stuck=0
     rm -f "$dir/.escalated" 2>/dev/null || true
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  case "$stuck" in ''|*[!0-9]*) stuck=0 ;; esac
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
     printf 'quiet'
     return 0
   fi
   max=$(fm_task_inbox_ring_max)
   if [ "$count" -ge "$max" ]; then
-    printf 'escalate %s %s' "$oldest" "$count"
+    if [ "$count" -gt 0 ] && [ "$stuck" -ge "$count" ]; then
+      printf 'stuck %s %s' "$oldest" "$count"
+    else
+      printf 'escalate %s %s' "$oldest" "$count"
+    fi
     return 0
   fi
   now=$(date +%s)
@@ -394,24 +419,36 @@ EOF
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither an unreadable pane nor a
-# permanently blocked composer can retry silently forever. A positively dead or
-# missing endpoint never enters the ladder: the watcher escalates it directly.
-# A concurrently removed inbox is a successful no-op; otherwise failure means
-# the caller must surface the unwritable ladder while the record remains
-# unhandled.
-fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
-  local dir base ladder rec_base count last
+# permanently blocked composer can retry silently forever. <stuck> is 1 when
+# the attempt found the composer holding unsent text (fm_task_inbox_ring's 1
+# or 4); it extends the consecutive stuck count, and any other attempt resets
+# it. A positively dead or missing endpoint never enters the ladder: the
+# watcher escalates it directly. A concurrently removed inbox is a successful
+# no-op; otherwise failure means the caller must surface the unwritable ladder
+# while the record remains unhandled.
+fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [stuck]
+  local dir base ladder rec_base count last stuck
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
+  stuck=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck <<EOF
 $ladder
 EOF
-  [ "$rec_base" = "$base" ] || count=0
+  if [ "$rec_base" != "$base" ]; then
+    count=0
+    stuck=0
+  fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  case "$stuck" in ''|*[!0-9]*) stuck=0 ;; esac
+  if [ "${4:-0}" = 1 ]; then
+    stuck=$((stuck + 1))
+  else
+    stuck=0
+  fi
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" "$stuck" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

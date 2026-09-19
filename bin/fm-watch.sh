@@ -70,6 +70,10 @@
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
+#   stale: <window> (worker cannot receive messages: ...)
+#                          every attempt of that budget found the live, idle
+#                          worker's composer holding unsent text, so no
+#                          doorbell could submit; reported, never cleared
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
@@ -464,9 +468,10 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
-inbox_steer_escalate_unavailable() {  # <window> <task> <record>
-  local w=$1 task=$2 rec=$3 reason
-  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+# Surface an unacknowledged instruction as one stale wake, exactly once: the
+# escalation marker written after the wake suppresses it on later polls.
+inbox_steer_escalate() {  # <window> <task> <record> <reason>
+  local w=$1 task=$2 rec=$3 reason=$4
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
@@ -477,6 +482,11 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     exit 1
   fi
   wake "$reason"
+}
+
+inbox_steer_escalate_unavailable() {  # <window> <task> <record>
+  inbox_steer_escalate "$1" "$2" "$3" \
+    "stale: $1 (unread firstmate instruction: $3 is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
@@ -492,18 +502,20 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
 # still makes the race quiet. The attempt is data-plane typing or a
 # composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking. Runs for secondmates
+# blocking. A budget whose every attempt found the composer holding unsent text
+# surfaces as a worker that cannot receive messages instead of the generic
+# unacknowledged-instruction wake. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state stuck
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
   rec=${action#* }
   count=
   case "$verb" in
-    escalate)
+    escalate|stuck)
       count=${rec##* }
       rec=${rec% *}
       ;;
@@ -528,7 +540,9 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      stuck=0
+      case "$ring_rc" in 1|4) stuck=1 ;; esac
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$stuck"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
@@ -542,17 +556,12 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
-      if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
-        fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
-        return 0
-      fi
-      fm_wake_append stale "$w" "$reason" || exit 1
-      if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
-        echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
-        exit 1
-      fi
-      wake "$reason"
+      inbox_steer_escalate "$w" "$task" "$rec" \
+        "stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      ;;
+    stuck)
+      inbox_steer_escalate "$w" "$task" "$rec" \
+        "stale: $w (worker cannot receive messages: its agent is alive and idle, but every one of $count doorbell attempts found its composer holding unsent text that never submits, so $rec never reached it and further doorbells would only queue behind that text; clear the composer, then re-send)"
       ;;
   esac
 }

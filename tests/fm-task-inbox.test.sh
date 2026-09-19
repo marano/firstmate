@@ -26,6 +26,11 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Stuck composers: a live, idle worker whose composer holds unsent text
+#      through every attempt of the budget surfaces as a worker that cannot
+#      receive messages - named as that, never as the generic unread-instruction
+#      wake - while a busy worker whose queued text will still submit is never
+#      alarmed on.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -57,6 +62,8 @@ inbox_lib() {  # <state> <function> [args...]
 # FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
 # #{pane_current_command} answers with that value, so `zsh` makes
 # fm_backend_tmux_agent_state read the pane as a dead bare shell.
+# FM_FAKE_TMUX_CURSOR moves the cursor row off 1, and once any literal is typed
+# the pane shows FM_FAKE_TMUX_CAPTURE_TYPED instead, when that is set.
 make_watch_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -76,6 +83,7 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
+      [ -z "${FM_FAKE_TMUX_CAPTURE_TYPED:-}" ] || cp "$FM_FAKE_TMUX_CAPTURE_TYPED" "$FM_FAKE_TMUX_CAPTURE"
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
@@ -84,7 +92,7 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
+        *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR:-1}"; exit 0 ;;
         *pane_current_command*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '%s\n' "$FM_FAKE_TMUX_AGENT"; exit 0; } ;;
         *pane_tty*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '\n'; exit 0; } ;;
       esac
@@ -277,6 +285,30 @@ test_ring_skips_dead_agent() {
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
+}
+
+# fm_task_inbox_ring against a live agent whose idle composer still holds the
+# doorbell after the submit: a distinct return code, so the ladder can tell an
+# attempt that found the composer stuck from one that merely went unanswered.
+test_ring_reports_doorbell_left_unsent() {
+  local dir state rec log rc capture
+  dir="$TMP_ROOT/ring-unsent"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; : > "$log"
+  capture="$dir/pane.capture"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$capture"
+  printf '╭──────────────╮\n│ : Firstmate  │\n╰──────────────╯\n' > "$dir/typed.capture"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_TYPED="$dir/typed.capture" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 4 ] || fail "a doorbell left unsent in an idle composer should return 4 from the ring, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" || fail "the doorbell should have been typed once"
+  [ -f "$rec" ] || fail "an unsent doorbell must leave the durable record in place"
+  pass "inbox: the ring reports a doorbell the idle composer never submitted"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -479,6 +511,30 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+test_ladder_names_a_composer_stuck_through_the_budget() {
+  local state rec action
+  state="$TMP_ROOT/ladder-stuck/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "do the thing")
+  age_path "$rec"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck $rec 2" ] || fail "a budget whose every attempt found the composer stuck should say so, got: $action"
+  # One attempt that did not find the composer stuck breaks the run: the
+  # budget then escalates as the ordinary unanswered instruction.
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 0
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $rec 2" ] || fail "a budget with a clean attempt should escalate generically, got: $action"
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 0
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $rec 2" ] || fail "a stuck run shorter than the budget should escalate generically, got: $action"
+  pass "inbox: the ladder names a composer stuck through the whole budget, and only that"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -491,6 +547,32 @@ setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
 idle_capture() {  # <dir>
   printf '╭────╮\n│    │\n╰────╯\n' > "$1/idle.capture"
   printf '%s\n' "$1/idle.capture"
+}
+
+# claude_queued_capture <busy>: claude 2.1.278 holding a queued doorbell above
+# its composer, escape sequences as captured live
+# (docs/verification/runtime-backends.md "Queued claude input"). <busy> 1 keeps
+# the turn's spinner row. The composer is row 9.
+claude_queued_capture() {  # <busy>
+  local esc rule
+  esc=$(printf '\033')
+  rule="${esc}[38;5;244m────────────────────────────────────────${esc}[39m"
+  printf '%s\n' "⏺ Bash(python3 -c 'import time; time.sleep(40)')"
+  printf '%s\n' "  ⎿  Running… (9s)"
+  if [ "$1" = 1 ]; then
+    printf '%s\n' "${esc}[38;5;174m✶${esc}[39m ${esc}[38;5;174mGerminating… ${esc}[38;5;246m(11s · ↓${esc}[39m ${esc}[38;5;246m97 tokens)${esc}[39m"
+  else
+    printf '\n'
+  fi
+  printf '\n'
+  printf '%s\n' "${esc}[38;5;239m${esc}[48;5;237m❯ ${esc}[38;5;246m: Firstmate instruction waiting: list '/work/t1.inbox'/*.msg and, ${esc}[39m"
+  printf '%s\n' "  ${esc}[38;5;246min numeric order, read and act on each, then mv each handled file to ${esc}[39m"
+  printf '%s\n' "  ${esc}[38;5;246m'/work/t1.inbox'/handled/.${esc}[39m"
+  printf '%s\n' "${esc}[49m  ${esc}[38;5;246mctrl+x ctrl+s to send now${esc}[39m"
+  printf '%s\n' "$rule"
+  printf '%s\n' "${esc}[38;5;246m❯ ${esc}[2m${esc}[39mPress up to edit queued messages${esc}[0m"
+  printf '%s\n' "$rule"
+  printf '%s\n' "  ${esc}[38;5;211m⏵⏵ bypass permissions on${esc}[39m"
 }
 
 test_watcher_rerings_idle_pane_quietly() {
@@ -641,6 +723,98 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+# A live, idle worker whose composer holds text that never submits: every
+# attempt is a composer-protected skip, so nothing is typed behind the text,
+# and the spent budget names the condition rather than the generic unanswered
+# instruction.
+test_watcher_names_a_worker_that_cannot_receive_messages() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case stuck-composer)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n' > "$dir/stuck.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/stuck.capture" \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=2
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced a composer stuck through the budget"; }
+  [ ! -s "$log" ] || fail "a doorbell was typed behind text that never submits:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'worker cannot receive messages' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a stuck composer should surface exactly one wake naming that the worker cannot receive messages:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  assert_no_grep 'doorbell delivery attempts with an idle pane' "$state/.wake-queue" \
+    "a stuck composer must not surface as the generic unanswered-instruction wake"
+  grep -qF "$rec" "$state/.wake-queue" || fail "the wake should name the unread record"
+  [ -f "$rec" ] || fail "the durable record must survive for whoever clears the composer"
+  [ "$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = quiet ] \
+    || fail "a surfaced stuck composer must stay quiet on later polls"
+  pass "watcher: a live idle worker whose composer never submits is named as unable to receive messages"
+}
+
+# The incident's own screen: claude idle with the doorbell queued above its
+# composer. The queue is the only thing that says the text never submitted.
+test_watcher_names_claude_holding_a_stranded_queue() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case stuck-claude-queue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  claude_queued_capture 0 > "$dir/queued.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/queued.capture" FM_FAKE_TMUX_CURSOR=9 \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=2
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced claude's stranded queue"; }
+  [ ! -s "$log" ] || fail "a doorbell was queued behind claude's stranded queue:"$'\n'"$(cat "$log")"
+  grep -qF 'worker cannot receive messages' "$state/.wake-queue" \
+    || fail "claude's stranded queue should surface as a worker that cannot receive messages:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  pass "watcher: claude idle with a stranded queued doorbell is named as unable to receive messages"
+}
+
+# The refusal that must stay green: a worker mid-turn whose queued text WILL
+# submit when the turn ends. Claude's own busy record says busy, and its
+# composer really does read pending, yet the watcher neither rings nor alarms.
+test_watcher_never_alarms_on_a_busy_worker_with_queued_text() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case busy-queue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" t1 >/dev/null \
+    || fail "could not arm a busy turn for the fixture"
+  claude_queued_capture 1 > "$dir/queued.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/queued.capture" FM_FAKE_TMUX_CURSOR=9 \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  sleep 5
+  kill -0 "$pid" 2>/dev/null || fail "a busy worker with queued text woke firstmate:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a busy worker's queue was rung into:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy worker with queued text was alarmed on:"$'\n'"$(cat "$state/.wake-queue")"
+  # The same pending composer on a busy pane of another harness - OpenCode
+  # keeps queued text visible while it works - stays just as quiet.
+  dir=$(setup_watch_case busy-visible-queue)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'some output\nBUSYTOKEN active\n╭──────────────╮\n│ queued steer │\n╰──────────────╯\n' > "$dir/busy.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" FM_FAKE_TMUX_CURSOR=3 \
+    FM_FAKE_TMUX_AGENT=grok FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  sleep 5
+  kill -0 "$pid" 2>/dev/null || fail "a busy pane with visible queued text woke firstmate:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a busy pane with visible queued text was rung into:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy pane with visible queued text was alarmed on:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a busy worker whose queued text will still submit is never rung into or alarmed on"
+}
+
 test_watcher_dead_pane_escalates_once_without_ringing() {
   local dir state out log pid rec
   dir=$(setup_watch_case dead-pane)
@@ -696,6 +870,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_reports_doorbell_left_unsent
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -704,11 +879,15 @@ test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
+test_ladder_names_a_composer_stuck_through_the_budget
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_watcher_names_a_worker_that_cannot_receive_messages
+test_watcher_names_claude_holding_a_stranded_queue
+test_watcher_never_alarms_on_a_busy_worker_with_queued_text
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
