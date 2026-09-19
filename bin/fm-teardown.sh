@@ -1439,7 +1439,7 @@ work_is_landed() {  # <branch> [<work-ref> [by-branch]]
 # names no further branch, leaving the checked-out branch as the only one read.
 # Returns non-zero when the epoch or the history cannot be read.
 task_other_checked_out_branches() {  # <current>
-  local current=$1 since history line stamp subject rest name names=''
+  local current=$1 since history line stamp subject rest name branch_names=''
   since=$(meta_value "$META" first_spawn_epoch)
   [ -n "$since" ] || return 0
   case "$since" in
@@ -1459,16 +1459,16 @@ task_other_checked_out_branches() {  # <current>
     case "$subject" in
       'checkout: moving from '*' to '*)
         rest=${subject#checkout: moving from }
-        names="$names ${rest%% to *} ${rest#* to }"
+        branch_names="$branch_names ${rest%% to *} ${rest#* to }"
         ;;
       'Branch: renamed refs/heads/'*' to refs/heads/'*)
-        names="$names ${subject##* to refs/heads/}"
+        branch_names="$branch_names ${subject##* to refs/heads/}"
         ;;
     esac
   done <<EOF
 $history
 EOF
-  for name in $names; do
+  for name in $branch_names; do
     [ "$name" != "$current" ] && [ "$name" != HEAD ] || continue
     git -C "$WT" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null || continue
     printf '%s\n' "$name"
