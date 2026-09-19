@@ -355,8 +355,9 @@ case "${1:-}" in
       exit 0
     fi
     if [ -e "$spawned" ]; then
+      # The respawned secondmate reads as a running Pi agent, as a real Pi pane does.
       case "$format" in
-        *pane_current_command*) printf '%s\n' node ;;
+        *pane_current_command*) printf '%s\n' pi-launcher ;;
         *) printf '%%1\n' ;;
       esac
       exit 0

@@ -208,7 +208,11 @@ test_relaunch_clears_a_poisoned_prompt() {
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "firstmate:fm-$id" Enter
   sleep 0.5
   tail_before=$(pane_tail "$id")
-  assert_contains "$tail_before" "cmdsubst>" "the case must leave the shell at a continuation prompt"
+  # zsh names the open construct (`dquote cmdsubst>`); bash shows a bare `>`.
+  case "$(printf '%s\n' "$tail_before" | tail -1)" in
+    *'>'|*'> ') ;;
+    *) fail "the case must leave the shell at a continuation prompt"$'\n'"$tail_before" ;;
+  esac
   [ "$(window_state "$id")" = dead ] || fail "the poisoned endpoint must read agent-free"
   garble_next 0
   out=$(run_fm fm-control.sh "$id" relaunch --note "the first launch was cut short"); rc=$?
