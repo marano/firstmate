@@ -239,6 +239,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_harness_clis "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
