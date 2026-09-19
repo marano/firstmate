@@ -80,15 +80,41 @@ mkws() {  # <label> -> "<workspace_id> <tab_id> <pane_id>"
   lab workspace create --cwd "$ROOT" --label "$1" --no-focus \
     | jq -er '"\(.result.workspace.workspace_id) \(.result.tab.tab_id) \(.result.root_pane.pane_id)"'
 }
-focus_snapshot() {
-  local list workspace tab tabs
-  list=$(lab workspace list) || return 1
-  workspace=$(printf '%s' "$list" | jq -er '[.result.workspaces[] | select(.focused == true)] | select(length == 1) | .[0].workspace_id') || return 1
-  tab=$(printf '%s' "$list" | jq -er --arg workspace "$workspace" '[.result.workspaces[] | select(.workspace_id == $workspace)] | select(length == 1) | .[0].active_tab_id') || return 1
-  tabs=$(lab tab list --workspace "$workspace") || return 1
-  printf '%s' "$tabs" | jq -e --arg tab "$tab" '([.result.tabs[] | select(.focused == true)] | length) == 1 and ([.result.tabs[] | select(.focused == true)][0].tab_id == $tab)' >/dev/null || return 1
-  printf '%s\t%s' "$workspace" "$tab"
-}
+# One implementation of the focus snapshot, as a script rather than a function,
+# because the in-operation observation below runs inside the separate shell that
+# hosts the production adapter call and cannot inherit this shell's functions.
+FOCUS_SNAPSHOT_BIN="$TMP_ROOT/focus-snapshot.sh"
+cat > "$FOCUS_SNAPSHOT_BIN" <<'SH'
+#!/usr/bin/env bash
+set -u
+lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+list=$(lab workspace list) || exit 1
+workspace=$(printf '%s' "$list" | jq -er '[.result.workspaces[] | select(.focused == true)] | select(length == 1) | .[0].workspace_id') || exit 1
+tab=$(printf '%s' "$list" | jq -er --arg workspace "$workspace" '[.result.workspaces[] | select(.workspace_id == $workspace)] | select(length == 1) | .[0].active_tab_id') || exit 1
+tabs=$(lab tab list --workspace "$workspace") || exit 1
+printf '%s' "$tabs" | jq -e --arg tab "$tab" '([.result.tabs[] | select(.focused == true)] | length) == 1 and ([.result.tabs[] | select(.focused == true)][0].tab_id == $tab)' >/dev/null || exit 1
+printf '%s\t%s' "$workspace" "$tab"
+SH
+chmod +x "$FOCUS_SNAPSHOT_BIN"
+
+# Wait until a workspace is gone, for the same removal proof wait_ws_gone makes,
+# from inside that separate shell.
+WS_GONE_BIN="$TMP_ROOT/await-workspace-gone.sh"
+cat > "$WS_GONE_BIN" <<'SH'
+#!/usr/bin/env bash
+set -u
+i=0
+while [ "$i" -lt 80 ]; do
+  env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace get "$1" >/dev/null 2>&1 || exit 0
+  sleep 0.1
+  i=$((i + 1))
+done
+exit 1
+SH
+chmod +x "$WS_GONE_BIN"
+export FOCUS_SNAPSHOT_BIN WS_GONE_BIN
+
+focus_snapshot() { "$FOCUS_SNAPSHOT_BIN"; }
 ws_order() { lab workspace list | jq -er '[.result.workspaces[].workspace_id] | join(",")'; }
 wait_ws_gone() {  # <workspace_id>
   local i=0
@@ -296,14 +322,38 @@ done
 # A short proof budget keeps the exhausted-proof path fast; the count below is
 # what proves the proof was exhausted rather than skipped.
 C_PROOF_POLLS=3
+# The polling sampler can only catch the wrong-focus window if a sample happens
+# to land inside it, and on a loaded runner it does not: CI observed zero
+# wrong-focus samples on a release Part A had just measured as focus-stealing,
+# which proves nothing about the release either way. So the in-window focus is
+# ALSO observed deterministically, from inside the shim that carries the
+# production close: once the explicit close has removed the doomed workspace -
+# the same removal proof Part A waits for - and before the adapter's restore
+# backstop runs. The polling sampler stays as the measurement of how wide that
+# exposure is.
+C_POST_CLOSE_FOCUS="$TMP_ROOT/post-close-c.focus"
 C_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$C_CALL_LOG" \
+  FM_FLASH_POST_CLOSE_FOCUS="$C_POST_CLOSE_FOCUS" FM_FLASH_DOOMED_WS="$C_DOOMED_WS" \
   FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$C_PROOF_POLLS" bash -c '
   . "$1/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
-    local session=$1
+    local session=$1 cli_status sample
     shift
     printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
     HERDR_SESSION="$session" herdr "$@" --session "$session"
+    cli_status=$?
+    if [ "${1:-}" = pane ] && [ "${2:-}" = close ]; then
+      if "$WS_GONE_BIN" "$FM_FLASH_DOOMED_WS"; then
+        if sample=$("$FOCUS_SNAPSHOT_BIN"); then
+          printf "%s\n" "$sample" > "$FM_FLASH_POST_CLOSE_FOCUS"
+        else
+          printf "%s\n" UNREADABLE > "$FM_FLASH_POST_CLOSE_FOCUS"
+        fi
+      else
+        printf "%s\n" WORKSPACE-SURVIVED > "$FM_FLASH_POST_CLOSE_FOCUS"
+      fi
+    fi
+    return "$cli_status"
   }
   fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
 ' _ "$ROOT" "$HERDR_LAB_SESSION" "$C_DOOMED_PANE" 2>&1)
@@ -333,6 +383,21 @@ pass 'fallback: a doomed pane holding a persistent child exhausts the proof and 
 C_AFTER=$(focus_snapshot) || fail 'could not capture the Part C post-close focus'
 [ "$C_AFTER" = "$C_BEFORE" ] \
   || fail "the fallback close left focus off the anchor ($C_BEFORE -> $C_AFTER)"
+# Account for the instruments BEFORE reading anything into what they saw: an
+# observation that was never taken is a harness failure, and it must say so by
+# its own name rather than reading as a verdict about the release.
+[ -s "$C_POST_CLOSE_FOCUS" ] \
+  || fail 'the Part C in-operation focus was never observed: the shim recorded nothing after the explicit close, so nothing below can be concluded about this release'
+C_POST_CLOSE=$(cat "$C_POST_CLOSE_FOCUS")
+case "$C_POST_CLOSE" in
+  WORKSPACE-SURVIVED)
+    fail 'the Part C explicit close did not remove the doomed workspace within the observation window, so the in-operation focus was never observable' ;;
+  UNREADABLE)
+    fail 'the Part C in-operation focus was unreadable immediately after the explicit close, so nothing below can be concluded about this release' ;;
+esac
+C_SAMPLES=$(grep -c . "$C_FOCUS_SAMPLES" || true)
+[ "$C_SAMPLES" -ge 1 ] \
+  || fail 'the Part C polling sampler recorded no focus sample at all inside the close window, so it can measure no exposure'
 C_WRONG=$(grep -Fvxc -- "$C_BEFORE" "$C_FOCUS_SAMPLES" || true)
 if [ "$STEAL_LIVE" = 1 ]; then
   # A defective release cannot make this path focus-safe, which is precisely why
@@ -340,13 +405,18 @@ if [ "$STEAL_LIVE" = 1 ]; then
   # explicitly accepted here, but only as a BOUNDED one: the restore backstop
   # must have put the anchor back exactly, and the whole exposure must end with
   # the operation rather than parking the captain somewhere else.
-  [ "$C_WRONG" -ge 1 ] \
-    || fail 'Part C reached the fallback on a defective release but observed no wrong-focus sample at all, so the sampler proved nothing'
-  pass "fallback on a defective release: a bounded wrong-focus window of $C_WRONG samples was fully restored to the anchor"
+  # The deterministic observation is what decides that the window existed; the
+  # sampler only says how wide it was, so a sampler that missed it can no longer
+  # be mistaken for a release that kept focus.
+  [ "$C_POST_CLOSE" != "$C_BEFORE" ] \
+    || fail "Part A measured this release as focus-stealing, but the fallback close left focus on the anchor ($C_BEFORE) when the doomed workspace was gone, across $C_SAMPLES polled samples: the two measurements contradict each other"
+  pass "fallback on a defective release: the wrong-focus window was observed directly ($C_BEFORE -> $C_POST_CLOSE), measured at $C_WRONG of $C_SAMPLES polled samples, and fully restored to the anchor"
 else
+  [ "$C_POST_CLOSE" = "$C_BEFORE" ] \
+    || fail "a focus-preserving release moved focus to $C_POST_CLOSE immediately after the explicit close on the fallback path"
   [ "$C_WRONG" -eq 0 ] \
     || fail "a focus-preserving release exposed $C_WRONG wrong-focus samples on the fallback path"
-  pass 'fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout'
+  pass "fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout, across $C_SAMPLES polled samples and the observation taken when the doomed workspace was gone"
 fi
 
 # The live guard on the version floor itself: Part A measured whether THIS
