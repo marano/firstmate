@@ -77,9 +77,8 @@
 # this pull request and its head branch, its head_sha equals the verified live
 # head exactly, and its steps table lists review and test with every step other
 # than ci completed; ci is covered by the live green check above. A task that
-# records a mode other than no-mistakes (direct-PR, local-only) has no run
-# behind it by definition, and a task that records no mode is held to the
-# no-mistakes proof. An unproven head is refused, naming the missing evidence
+# records mode direct-PR or local-only has no run behind it by definition, and
+# every other recorded mode, or none, is held to the no-mistakes proof. An unproven head is refused, naming the missing evidence
 # per candidate, unless --unvalidated is passed for an explicit captain
 # instruction to merge this pull request without a validation run. That waiver
 # is refused while the away-posture record exists, and it is deliberately
@@ -1396,8 +1395,7 @@ ROWS
 require_validation_run() {  # <head-branch>
   local branch=$1 source run seen='' reasons=''
   case "$TASK_MODE" in
-    no-mistakes|'') ;;
-    *)
+    direct-PR|local-only)
       if [ "$UNVALIDATED" = true ]; then
         printf 'notice: task %s ships %s, so no validation run stands behind %s; merging on the explicit captain instruction passed as --unvalidated\n' \
           "$ID" "$TASK_MODE" "$URL" >&2

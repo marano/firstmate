@@ -2540,7 +2540,20 @@ test_task_without_a_mode_needs_the_validation_proof() {
   assert_grep 'no validation run is proven for its head' "$case_dir/stderr" \
     "no-mode-no-run: the refusal did not name the missing run"
   assert_no_grep 'pr merge' "$case_dir/gh.log" "no-mode-no-run: gh pr merge ran without a run"
-  pass "fm-pr-merge holds a task with no recorded mode to the validation proof"
+
+  # A mode firstmate does not know is no licence to skip the proof either.
+  case_dir=$(make_case unknown-mode-no-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  sed 's/^mode=no-mistakes$/mode=ship/' "$case_dir/state/task-x1.meta" > "$case_dir/meta.new"
+  mv "$case_dir/meta.new" "$case_dir/state/task-x1.meta"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 127
+  expect_code 1 "$(cat "$case_dir/rc")" "unknown-mode-no-run: an unknown mode must still need a run"
+  assert_grep 'no validation run is proven for its head' "$case_dir/stderr" \
+    "unknown-mode-no-run: the refusal did not name the missing run"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "unknown-mode-no-run: gh pr merge ran without a run"
+  pass "fm-pr-merge holds a task with no recorded or an unknown mode to the validation proof"
 }
 
 test_gitlab_merge_request_needs_the_validation_proof() {
