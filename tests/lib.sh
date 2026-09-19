@@ -52,6 +52,10 @@ export FM_GATE_REFUSE_BYPASS=1
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
+# Its companion FM_TASK_STATUS names the worker's REAL status file, where
+# bin/fm-build-lock.sh appends ceiling lines; a case crossing a ceiling must never
+# wake firstmate through it, so a case that wants those lines sets its own.
+unset FM_TASK_STATUS
 
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
