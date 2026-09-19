@@ -382,6 +382,8 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# A first dispatch also records first_spawn_epoch=, when the task first took its
+# local copy, which a relaunch carries forward (bin/fm-teardown.sh reads it).
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -397,6 +399,9 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Taken before any local copy is prepared, so every branch the worker later
+# checks out in it is recorded after this moment (first_spawn_epoch below).
+SPAWN_START_EPOCH=$(date +%s)
 
 usage() {
   # The whole leading comment block, ending at the first line that is not a
@@ -4274,6 +4279,10 @@ preserve_relaunch_meta() {
   # Not spawn-owned: a relaunch carries the unit's membership forward through
   # preserve_relaunch_meta, and bin/fm-tasks-axi.sh handback rewrites it.
   [ "${#SPAWN_MEMBERS[@]}" -eq 0 ] || echo "delivers=$DELIVERS_ARG"
+  # Not spawn-owned either, and written at first dispatch only: when this task
+  # first took its local copy. A relaunch carries it forward, and
+  # bin/fm-teardown.sh reads the copy's branch history from it on.
+  [ "$RELAUNCH" -eq 1 ] || echo "first_spawn_epoch=$SPAWN_START_EPOCH"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

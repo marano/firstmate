@@ -651,6 +651,97 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# A task record holds one PR and one merge poll, so recording a second PR used
+# to replace the first silently and drop its merge watch: the first PR could
+# then merge with nothing watching it. Recording a different PR is now refused
+# until the recorded one's merge has been reported, or --replace says it was
+# superseded.
+test_registering_a_second_pr_never_drops_a_live_merge_watch() {
+  local dir state before after rc
+  dir=$(make_case second-pr-refused)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > /dev/null 2> "$dir/first.err" \
+    || fail "the first PR could not be recorded: $(cat "$dir/first.err")"
+  before=$(poll_artifact_snapshot "$state" task-a)
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a second PR replaced an unmerged recorded PR"
+  assert_grep 'https://github.com/o/r/pull/1' "$dir/stderr" \
+    "the refusal did not name the recorded PR whose watch it protects"
+  assert_grep '--replace' "$dir/stderr" "the refusal did not name the superseded-PR escape"
+  after=$(poll_artifact_snapshot "$state" task-a)
+  [ "$after" = "$before" ] || fail "a refused second PR changed the first PR's record or merge poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the first PR's merge poll no longer authenticates after the refusal"
+  ! ls "$state"/.fm-pr-* >/dev/null 2>&1 || fail "a refused second PR left temporary poll files behind"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > /dev/null 2> "$dir/again.err" \
+    || fail "re-recording the same PR was refused: $(cat "$dir/again.err")"
+  pass "recording a second PR never silently drops the first PR's merge watch"
+}
+
+test_a_merged_pr_may_be_followed_by_the_next() {
+  local dir state rc
+  dir=$(make_case merged-then-next)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > /dev/null 2> "$dir/first.err" \
+    || fail "the first PR could not be recorded: $(cat "$dir/first.err")"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the merged watcher cycle failed: $(cat "$dir/watch.err")"
+  ack_watcher_cycle "$state" || fail "the merge notification could not be acknowledged"
+  fm_pr_poll_merge_already_notified "$state" task-a github github.com o/r 1 \
+    || fail "the first PR's merge was not recorded as reported"
+
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > /dev/null 2> "$dir/next.err" \
+    || fail "the next PR was refused after the recorded PR merged: $(cat "$dir/next.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/2' "$state/task-a.meta" \
+    || fail "the next PR was not recorded"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the next PR's merge poll was not armed"
+  pass "once the recorded PR's merge is reported, the next PR records and is watched"
+}
+
+test_replace_supersedes_an_unmerged_pr() {
+  local dir state rc
+  dir=$(make_case replace-superseded-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > /dev/null 2> "$dir/first.err" \
+    || fail "the first PR could not be recorded: $(cat "$dir/first.err")"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 --replace > /dev/null 2> "$dir/replace.err" \
+    || fail "--replace did not supersede an unmerged PR: $(cat "$dir/replace.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/2' "$state/task-a.meta" \
+    || fail "--replace did not record the superseding PR"
+  [ "$(grep -c '^pr=' "$state/task-a.meta")" -eq 1 ] || fail "--replace left two PR lines"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "--replace did not re-arm the merge poll for the superseding PR"
+  [ "$(sed -n 2p "$state/task-a.pr-poll")" = https://github.com/o/r/pull/2 ] \
+    || fail "--replace left the poll watching the superseded PR"
+
+  dir=$(make_case unreadable-recorded-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'pr=https://example.invalid/not-a-pr\n' >> "$state/task-a.meta"
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 > /dev/null 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a recorded PR that could not be read was replaced without --replace"
+  grep -qxF 'pr=https://example.invalid/not-a-pr' "$state/task-a.meta" \
+    || fail "a refused recording changed the unreadable recorded PR"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 --replace > /dev/null 2> "$dir/replace.err" \
+    || fail "--replace did not supersede an unreadable recorded PR: $(cat "$dir/replace.err")"
+  pass "--replace supersedes an unmerged or unreadable recorded PR, and nothing else does"
+}
+
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
@@ -2281,9 +2372,11 @@ test_authority_persistence_refuses_rebound_metadata() {
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
     || fail "rebind: could not arm the original poll"
+  # An unmerged recorded PR is replaced only through --replace, so that is the
+  # rebinding a concurrent recording can still perform mid-merge.
   cat > "$dir/rebind.sh" <<SH
 #!/usr/bin/env bash
-"$PR_CHECK" task-a "$url_b" >/dev/null
+"$PR_CHECK" task-a "$url_b" --replace >/dev/null
 SH
   chmod +x "$dir/rebind.sh"
   set +e
@@ -2637,6 +2730,9 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_registering_a_second_pr_never_drops_a_live_merge_watch
+test_a_merged_pr_may_be_followed_by_the_next
+test_replace_supersedes_an_unmerged_pr
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

@@ -3087,6 +3087,29 @@ test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   pass "grouped dispatch records its members and takes them out of the ready count"
 }
 
+# Cleanup reads the branches a task checked out in its copy from this moment on
+# (bin/fm-teardown.sh), so a first dispatch records it, taken before the copy is
+# prepared; a relaunch carries it forward (tests/fm-control-relaunch.test.sh).
+test_a_first_dispatch_records_when_it_took_its_copy() {
+  local case_dir id out before after value
+  id=atomic-first-epoch-e1
+  case_dir=$(make_home first-epoch "$id")
+  add_item "$case_dir" "$id"
+  before=$(date +%s)
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) \
+    || fail "first dispatch failed: $out"
+  after=$(date +%s)
+  value=$(grep '^first_spawn_epoch=' "$(home_of "$case_dir")/state/$id.meta" | cut -d= -f2-)
+  [ "$(grep -c '^first_spawn_epoch=' "$(home_of "$case_dir")/state/$id.meta")" -eq 1 ] \
+    || fail "a first dispatch did not record exactly one first_spawn_epoch"
+  case "$value" in
+    ''|*[!0-9]*) fail "first_spawn_epoch is not an epoch: '$value'" ;;
+  esac
+  [ "$value" -ge "$before" ] && [ "$value" -le "$after" ] \
+    || fail "first_spawn_epoch $value is outside the dispatch window $before-$after"
+  pass "a first dispatch records when the task took its local copy"
+}
+
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
   local case_dir unit out rc=0
   unit=atomic-group-unit-g2
@@ -3440,6 +3463,7 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
 test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item
 test_grouped_dispatch_records_members_and_moves_them_in_flight
+test_a_first_dispatch_records_when_it_took_its_copy
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver
 test_grouped_close_closes_every_delivered_member
 test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason

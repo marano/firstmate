@@ -420,6 +420,7 @@ test_relaunch_preserves_durable_task_metadata() {
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' 'first_spawn_epoch=1700000000'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -432,6 +433,9 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  [ "$(grep -c '^first_spawn_epoch=' "$dir/home/state/rl19.meta")" -eq 1 ] \
+    && [ "$(meta_field "$dir" rl19 first_spawn_epoch)" = 1700000000 ] \
+    || fail "the first dispatch's epoch must survive relaunch unchanged, once"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 

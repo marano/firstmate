@@ -5,7 +5,16 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# A task record holds one PR and one merge poll, so recording a DIFFERENT PR is
+# refused while the recorded one's merge has not been reported: replacing it
+# would drop the only watch on a PR that can still merge. The recorded PR's merge
+# counts as reported once the task's merge-notification marker names it
+# (bin/fm-pr-lib.sh; bin/fm-merge-outcome-lib.sh writes it for a merge this home
+# performed and for one its poll detected alike). Re-recording the same PR is
+# always allowed. --replace records the new PR anyway, for a recorded PR that
+# was superseded (closed without merging) or that cannot be read. The refusal
+# happens under the record lock and before any poll artifact or record changes.
+# Usage: fm-pr-check.sh <task-id> <pr-url> [--replace]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +29,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
-if [ "$#" -ne 2 ]; then
+REPLACE=0
+if [ "$#" -eq 3 ] && [ "$3" = --replace ]; then
+  REPLACE=1
+elif [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
 fi
@@ -104,6 +116,25 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+# Read under the record lock, so no other recording can slip in between this
+# verdict and the rewrite below.
+RECORDED_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$RECORDED_URL" ] && [ "$REPLACE" = 0 ]; then
+  RECORDED_REPORTED=0
+  if fm_pr_url_parse "$RECORDED_URL"; then
+    if [ "$FM_PR_URL" = "$URL" ]; then
+      RECORDED_REPORTED=same
+    elif fm_pr_poll_merge_already_notified "$STATE" "$ID" \
+      "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; then
+      RECORDED_REPORTED=1
+    fi
+  fi
+  if [ "$RECORDED_REPORTED" = 0 ]; then
+    echo "error: task $ID already records PR $RECORDED_URL, and no merge of it has been reported; recording $URL would drop the merge watch on a PR that can still merge" >&2
+    echo "error: record $URL after that merge is reported, or pass --replace if $RECORDED_URL was superseded (closed without merging)" >&2
+    exit 1
+  fi
+fi
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
