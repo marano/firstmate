@@ -111,8 +111,9 @@
 #
 # Build lock:
 #   Every executing mode runs each script under bin/fm-build-lock.sh, one hold
-#   per script (one per phase for concurrent phases), so other workers' builds
-#   can go between two scripts. Do not wrap this runner in `mutex`: that holds
+#   per serial script, or one hold for a whole concurrent phase. Other workers'
+#   builds can go between serial scripts and between concurrent phases, not
+#   inside a concurrent phase. Do not wrap this runner in `mutex`: that holds
 #   the lock around the whole loop, the pattern measured in
 #   docs/verification/build-lock-contention.md. Lock waits are excluded from
 #   script durations and per-script bounds; see build_lock_hold below.
