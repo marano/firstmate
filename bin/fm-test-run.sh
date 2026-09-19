@@ -105,7 +105,9 @@
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
-#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
+#   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n> [lock_wait_ms=<n>]
+#                   (only with --max-wall-ms; duration_ms excludes lock_wait_ms,
+#                   the time spent in line for the build lock)
 #
 # Build lock:
 #   Every executing mode runs each script under bin/fm-build-lock.sh, one hold
@@ -3008,7 +3010,8 @@ if [ -n "$MAX_WALL_MS" ]; then
   # this run's, so the budget measures the run without it.
   BUDGET_DURATION=$((RUN_DURATION - BUILD_LOCK_WAIT_MS))
   [ "$BUDGET_DURATION" -ge 0 ] || BUDGET_DURATION=0
-  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s\n' "$MAX_WALL_MS" "$BUDGET_DURATION"
+  printf 'FM_TEST_BUDGET max_wall_ms=%s duration_ms=%s lock_wait_ms=%s\n' \
+    "$MAX_WALL_MS" "$BUDGET_DURATION" "$BUILD_LOCK_WAIT_MS"
   if [ "$BUDGET_DURATION" -gt "$MAX_WALL_MS" ]; then
     log "wall-clock budget exceeded: ${BUDGET_DURATION}ms > ${MAX_WALL_MS}ms for $SELECTION_DESC"
     AGG_RC=1

@@ -1525,7 +1525,7 @@ SH
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
 test_max_wall_ms_is_a_result_not_advice() {
-  local tmp repo runner fast rc summary_duration budget_duration
+  local tmp repo runner fast rc summary_duration budget_duration lock_wait holder
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -1546,7 +1546,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "a run inside its budget must pass, got $rc: $(cat "$tmp/under.err")"
-  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+$' "$tmp/under" \
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+ lock_wait_ms=[0-9]+$' "$tmp/under" \
     || fail "an inside-budget run did not report the budget: $(cat "$tmp/under")"
 
   # Same green script, budget it cannot meet: the run must FAIL.
@@ -1561,12 +1561,34 @@ SH
     || fail "an over-budget run omitted its family summary: $(cat "$tmp/over")"
   grep -Eq '^FM_TEST_SLOWEST rank=1 .+$' "$tmp/over" \
     || fail "an over-budget run omitted its slowest result: $(cat "$tmp/over")"
-  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+$' "$tmp/over" \
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+ lock_wait_ms=[0-9]+$' "$tmp/over" \
     || fail "an over-budget run omitted its budget result: $(cat "$tmp/over")"
   summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
   budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
-  [ "$budget_duration" = "$summary_duration" ] \
-    || fail "budget verdict used a different duration than the summary: $(cat "$tmp/over")"
+  lock_wait=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^lock_wait_ms=/) { sub(/^lock_wait_ms=/, "", $i); print $i } }' "$tmp/over")
+  # The verdict is the summary's wall clock less only the time spent in line for
+  # the build lock, which is other workers' work rather than this run's.
+  [ "$((budget_duration + lock_wait))" = "$summary_duration" ] \
+    || fail "budget verdict used a different duration than the summary less its lock wait: $(cat "$tmp/over")"
+
+  # A healthy run that first waits in line behind another build must not fail
+  # its budget for that wait: this is how a fixed step cap once reported a
+  # healthy run as a failure of the change under test.
+  # Mutant: compare the budget against the whole wall clock, wait included.
+  # shellcheck disable=SC2016 # The child sh expands its own positional argument.
+  "$ROOT/bin/fm-build-lock.sh" sh -c ': >"$1"; sleep 5' _ "$tmp/held" >/dev/null 2>&1 &
+  holder=$!
+  rc=0
+  while [ ! -e "$tmp/held" ] && [ "$rc" -lt 300 ]; do sleep 0.1; rc=$((rc + 1)); done
+  [ -e "$tmp/held" ] || fail "the build-lock holder fixture never started"
+  set +e
+  "$runner" --max-wall-ms 4000 "$fast" >"$tmp/queued" 2>"$tmp/queued.err"
+  rc=$?
+  set -e
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "a run that met its budget after waiting for the build lock failed: $(cat "$tmp/queued" "$tmp/queued.err")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=4000 duration_ms=[0-9]+ lock_wait_ms=([4-9][0-9]{3}|[0-9]{5,})$' "$tmp/queued" \
+    || fail "the queued run did not report its lock wait apart from its duration: $(cat "$tmp/queued")"
 
   # A malformed budget is refused rather than silently ignored.
   set +e
