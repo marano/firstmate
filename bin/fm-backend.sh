@@ -930,6 +930,21 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_launch_confirmable: 0 when <backend>'s fm_backend_agent_state can
+# prove a just-launched agent for every verified harness from the pane's own
+# process table, which is what lets bin/fm-spawn.sh require that proof before
+# reporting a launch. tmux reads the pane's foreground process group directly.
+# Herdr's `alive` additionally needs Herdr's own registration of the agent,
+# which is not established for every harness, so a harness Herdr never
+# registers would read agent-free while it runs; zellij, orca, and cmux have no
+# classifier at all.
+fm_backend_launch_confirmable() {  # <backend>
+  case "${1-}" in
+    tmux) return 0 ;;
+  esac
+  return 1
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

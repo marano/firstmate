@@ -775,11 +775,22 @@ test_spawn_fast_forwards_before_launch() {
   c2=$(head_of "$w/main")
   [ "$(head_of "$w/sm")" = "$c1" ] || fail "precondition: home should start behind the primary"
 
-  # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
+  # tmux stub: accept every subcommand, print nothing until the task is
+  # recorded (so no window pre-exists), then report its launched agent.
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  list-windows*)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+  *'#{pane_current_command}'*) printf 'codex\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -814,6 +825,16 @@ test_spawn_warns_when_sync_skipped_before_launch() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  list-windows*)
+    for meta in "${FM_STATE_OVERRIDE:-${FM_HOME:-/nonexistent}/state}"/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+  *'#{pane_current_command}'*) printf 'codex\n' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"

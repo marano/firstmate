@@ -55,6 +55,27 @@
 #   the new incarnation. The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#   Before typing anything, a relaunch clears whatever the adopted shell still
+#   holds with Ctrl+C, so a previous launch that never landed - a partial line
+#   or an open quote - cannot swallow the replacement's.
+# Launch confirmation: a typed launch is never its own proof that an agent
+#   started. A line longer than the terminal's canonical-input limit (1024
+#   bytes on macOS) that arrives before the pane shell's line editor is running
+#   is cut short, which can leave the shell at a continuation prompt with no
+#   agent at all. On a backend whose agent-state classifier proves a launched
+#   agent from the pane's own processes (bin/fm-backend.sh's
+#   fm_backend_launch_confirmable: tmux) every launch, fresh or relaunch,
+#   reports success only after fm_backend_agent_state reads the agent alive -
+#   for a raw launch command, whose process no classifier names, once anything
+#   but a shell holds the foreground - polling FM_SPAWN_LAUNCH_POLLS times
+#   (default 60) every FM_SPAWN_LAUNCH_POLL_INTERVAL seconds (default 0.5).
+#   An endpoint that still reads agent-free gets one in-place retry: Ctrl+C
+#   clears the shell's pending input and the launch is typed again. A second
+#   miss, or any other state, fails the spawn and appends a failed: status
+#   line. A fresh spawn then closes its endpoint and rolls back its record; a
+#   relaunch keeps its endpoint and record for bin/fm-control.sh to reconcile.
+#   Every other backend launches unconfirmed here; bin/fm-control.sh still
+#   confirms a Herdr relaunch.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -3452,7 +3473,7 @@ rovo_wait_for_delivery() {
 rovo_spawn_fail() { # <detail>
   printf 'failed: %s\n' "$1" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_launch_endpoint_cleanup
 }
 
 # The launch-then-confirm gates run after the task record is published, when
@@ -3462,7 +3483,7 @@ rovo_spawn_fail() { # <detail>
 # task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
 # the exact terminal is closed: that stops the CLI while its worktree stays
 # for the record's own teardown, which owns worktree deletion.
-rovo_endpoint_cleanup() {
+spawn_launch_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null || true
     return 0
@@ -3525,7 +3546,71 @@ agy_wait_for_working() {
 agy_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  spawn_launch_endpoint_cleanup
+}
+
+# Launch confirmation and the pending-input clear; the header's "Launch
+# confirmation" paragraph owns the contract.
+spawn_clear_shell_input() {
+  # Ctrl+C discards a partial line or a whole continuation prompt in every
+  # supported shell. Called only on an endpoint proven agent-free, so the
+  # interrupt can only reach a shell sitting at its prompt.
+  spawn_send_key "$T" C-c || return 1
+  sleep 0.3
+}
+
+spawn_type_launch() {
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+}
+
+spawn_launch_started() {  # prints the last endpoint state read
+  local state i=0 max=${FM_SPAWN_LAUNCH_POLLS:-60} interval=${FM_SPAWN_LAUNCH_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    state=$(fm_backend_agent_state "$BACKEND" "$T")
+    case "$state" in
+    alive) printf '%s' "$state"; return 0 ;;
+    ambiguous) [ "$RAW_LAUNCH" -eq 0 ] || { printf '%s' "$state"; return 0; } ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  printf '%s' "$state"
+  return 1
+}
+
+SPAWN_LAUNCH_STATE=
+spawn_confirm_launch() {
+  fm_backend_launch_confirmable "$BACKEND" || return 0
+  SPAWN_LAUNCH_STATE=$(spawn_launch_started) && return 0
+  [ "$SPAWN_LAUNCH_STATE" = dead ] || return 1
+  spawn_clear_shell_input || return 1
+  spawn_type_launch
+  SPAWN_LAUNCH_STATE=$(spawn_launch_started)
+}
+
+# A fresh endpoint holds nothing but this failed launch, so it is closed with
+# the record the abort path rolls back. A relaunch endpoint is the task's own
+# and is never closed; its caller reconciles the retained record.
+spawn_launch_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  [ "$RELAUNCH" -eq 1 ] || spawn_launch_endpoint_cleanup
+}
+
+SPAWN_RELAUNCH_INPUT_CLEARED=0
+# A relaunch adopts a shell proven agent-free above, but that shell may still
+# hold a previous launch that never landed - a partial line or an open quote -
+# that would swallow everything typed next. Clear it once, immediately before
+# the first line is typed, so a relaunch refused earlier sends nothing at all.
+spawn_relaunch_clear_input() {
+  [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_RELAUNCH_INPUT_CLEARED" -eq 0 ] || return 0
+  spawn_clear_shell_input || {
+    echo "error: task $ID's endpoint $T could not be cleared before relaunch; refusing to type into input that may still be pending" >&2
+    exit 1
+  }
+  SPAWN_RELAUNCH_INPUT_CLEARED=1
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -3546,6 +3631,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
     relaunch_cd_path=${WT//\'/\'\\\'\'}
+    spawn_relaunch_clear_input
     spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
@@ -4442,6 +4528,7 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+spawn_relaunch_clear_input
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
@@ -4496,6 +4583,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if ! spawn_confirm_launch; then
+  spawn_launch_fail "no agent started in window $T after the launch command was typed (the endpoint reads '$SPAWN_LAUNCH_STATE')"
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
