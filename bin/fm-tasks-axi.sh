@@ -508,8 +508,9 @@ chunk_verb() {  # <unit> <title> <member>...
       || verb_fail 1 "$unit was planned, but $member could not be parked behind it: ${FM_BACKLOG_TRANSITION_ERROR:-block failed}"
   done
 
-  if fm_grouping_posture "$GROUPING_CONFIG" && [ -n "$FM_GROUPING_MEMBER_CAP" ] \
-    && [ "${#members[@]}" -gt "$FM_GROUPING_MEMBER_CAP" ]; then
+  if ! fm_grouping_posture "$GROUPING_CONFIG"; then
+    printf 'fm-tasks-axi: cannot tell this home"s soft member cap, so no size warning was made: %s\n' "$FM_GROUPING_ERROR" >&2
+  elif [ -n "$FM_GROUPING_MEMBER_CAP" ] && [ "${#members[@]}" -gt "$FM_GROUPING_MEMBER_CAP" ]; then
     printf 'fm-tasks-axi: %s has %s members, above this home"s soft cap of %s; that is a warning, not a refusal\n' \
       "$unit" "${#members[@]}" "$FM_GROUPING_MEMBER_CAP" >&2
   fi
@@ -610,7 +611,14 @@ join_verb() {  # <unit> <member>
     verb_fail 1 "$member's backlog item could not be read: $FM_BACKLOG_ROW_ERROR"
   }
   case "$FM_BACKLOG_ROW_STATE" in
-    in_flight\ no\ *) ;;
+    in_flight\ no\ *)
+      if [ -e "$GROUPING_STATE/$member.meta" ] || [ -L "$GROUPING_STATE/$member.meta" ] \
+        || [ -e "$GROUPING_STATE/$member.backlog-close" ] || [ -L "$GROUPING_STATE/$member.backlog-close" ] \
+        || grep -qsE "^delivers=(.*,)?$member(,.*)?\$" "$GROUPING_STATE"/*.meta; then
+        fm_lock_release "$lock"
+        verb_fail 1 "$member is already In flight under another worker or unit, so $unit cannot also deliver it"
+      fi
+      ;;
     *)
       if ! fm_backlog_member_joinable "$DATA" "$GROUPING_STATE" "$unit" "$member"; then
         fm_lock_release "$lock"
@@ -681,16 +689,16 @@ plan_verb() {
     line=${line#  }
     id=${line%%,*}
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    fm_backlog_row_probe "$DATA" "$id" || continue
+    fm_backlog_row_probe "$DATA" "$id" || { printf 'cannot-tell - - %s\n' "$id"; continue; }
     case "$FM_BACKLOG_ROW_STATE" in
       queued\ no\ no) ;;
       *) continue ;;
     esac
     grouping_read_body "$id"
-    plan=$(fm_grouping_plan_of_body "$GROUPING_BODY") || plan=
+    plan=$(fm_grouping_plan_of_body "$GROUPING_BODY") || { printf 'cannot-tell - - %s\n' "$id"; continue; }
     [ -z "$plan" ] || continue
-    key=$(fm_grouping_key_of_body "$GROUPING_BODY") || key=
-    fm_grouping_repo_of_row "$DATA" "$id" || continue
+    key=$(fm_grouping_key_of_body "$GROUPING_BODY") || { printf 'cannot-tell - - %s\n' "$id"; continue; }
+    fm_grouping_repo_of_row "$DATA" "$id" || { printf 'cannot-tell - - %s\n' "$id"; continue; }
     repo=$FM_GROUPING_REPO
     printf '%s %s %s\n' "${repo:-none}" "${key:-none}" "$id"
   done <<ROWS
