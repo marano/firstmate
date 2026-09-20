@@ -3159,6 +3159,215 @@ test_a_chunk_dispatches_and_closes_through_delivers() {
   pass "a planned chunk dispatches through --delivers and closes every member with the job's link"
 }
 
+# The guard that prevents the miss this whole contract exists for: a dispatch
+# that would start work beside related work is refused at the one point every
+# worker starts, before anything exists to unwind, and every refusal prints the
+# command that resolves it. The mutants each case kills are named in its body.
+grouping_home() {  # <name> [task-id...]; a home with the posture on
+  local case_dir name=$1
+  shift
+  case_dir=$(make_home "$name" "$@")
+  printf 'enforce 6\n' > "$(home_of "$case_dir")/config/grouping"
+  printf '%s\n' "$case_dir"
+}
+
+keyed_item() {  # <case-dir> <id> <repo> <key>
+  tasks-axi add "$2" "item for $2" --kind ship --repo "$3" --file "$(backlog_of "$1")" >/dev/null
+  FM_HOME="$(home_of "$1")" "$ROOT/bin/fm-tasks-axi.sh" group "$2" "$4" >/dev/null \
+    || fail "fixture: could not key $2"
+}
+
+test_enforce_refuses_a_lone_dispatch_beside_a_ready_sibling() {
+  local case_dir id out rc=0
+  id=guard-lone-h1
+  case_dir=$(grouping_home guard-lone "$id")
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-sibling-h1 app-web blu-3156
+  record_endpoint_creation "$case_dir"
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  # Mutant: drop the ready-sibling check.
+  [ "$rc" -ne 0 ] || fail "a lone dispatch beside a ready sibling was accepted"
+  assert_contains "$out" "guard-sibling-h1" "the refusal did not name the sibling"
+  assert_contains "$out" "--delivers guard-sibling-h1" "the refusal did not print the command that groups them"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "the refusal published a task record"
+  assert_absent "$case_dir/task-endpoint-created" "the refusal created an endpoint"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the refusal moved the row to $(row_state "$case_dir" "$id")"
+
+  # Delivering the sibling in the same job is the resolution, and it launches.
+  # A fresh home, because the fixture above deliberately cannot confirm a live
+  # agent: proving "nothing was created" and proving a launch need different fakes.
+  case_dir=$(grouping_home guard-lone-resolved "$id")
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-sibling-h1 app-web blu-3156
+  rc=0
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers guard-sibling-h1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "grouping the sibling into the job did not resolve the refusal: $out"
+  assert_grep "delivers=guard-sibling-h1" "$(home_of "$case_dir")/state/$id.meta" \
+    "the resolved dispatch did not record its membership"
+  pass "a dispatch beside a ready sibling is refused, and delivering it in the same job resolves that"
+}
+
+test_enforce_refuses_a_second_worker_beside_a_live_sibling() {
+  local case_dir id out rc=0
+  id=guard-live-h2
+  case_dir=$(grouping_home guard-live "$id")
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-unit-h2 app-web blu-3156
+  start_item "$case_dir" guard-unit-h2
+  write_task_meta "$case_dir" guard-unit-h2 ship no-mistakes "spawn_gen=spawn-guard-unit-h2"
+  record_endpoint_creation "$case_dir"
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  # Mutant: consider ready siblings only. This is the case that reproduces the
+  # miss where two workers reworked one component in parallel.
+  [ "$rc" -ne 0 ] || fail "a second worker was accepted beside a live sibling"
+  assert_contains "$out" "guard-unit-h2 is already working" "the refusal did not name the live worker"
+  assert_contains "$out" "join guard-unit-h2 $id" "the refusal did not print the command that hands it over"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "the refusal published a task record"
+  pass "a dispatch beside a live worker on the same group is refused, naming the worker to hand it to"
+}
+
+test_an_apart_reason_is_recorded_in_the_record_and_the_backlog() {
+  local case_dir id out rc=0 body
+  id=guard-apart-h3
+  case_dir=$(grouping_home guard-apart "$id")
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-sibling-h3 app-web blu-3156
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
+    --apart-reason "ships on its own release train") || rc=$?
+  # Mutant: accept the flag without recording it.
+  [ "$rc" -eq 0 ] || fail "a recorded reason did not clear the refusal: $out"
+  assert_grep "apart_reason=ships on its own release train" "$(home_of "$case_dir")/state/$id.meta" \
+    "the reason is not on the task record"
+  body=$(FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" body "$id")
+  assert_contains "$body" "Dispatched apart: ships on its own release train" \
+    "the reason is not on the item, so it would vanish with the record"
+  assert_contains "$body" "Group key: blu-3156" "appending the reason dropped the item's key"
+  pass "a dispatch apart records its reason on the task and on the item"
+}
+
+test_a_unit_cannot_launch_without_its_planned_members() {
+  local case_dir unit out rc=0
+  unit=guard-plan-h4
+  case_dir=$(grouping_home guard-plan "$unit")
+  keyed_item "$case_dir" plan-a-h4 app-web blu-3156
+  keyed_item "$case_dir" plan-b-h4 app-web blu-3156
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" \
+    chunk "$unit" "web children" plan-a-h4 plan-b-h4 >/dev/null \
+    || fail "fixture: could not plan the chunk"
+
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers plan-a-h4) || rc=$?
+  # Mutant: drop the planned-members check. Without it the unit closes, the
+  # forgotten member unblocks, and it surfaces later as a lone ticket.
+  [ "$rc" -ne 0 ] || fail "a chunk launched without one of its planned members"
+  assert_contains "$out" "plan-b-h4" "the refusal did not name the forgotten member"
+  assert_contains "$out" "--delivers plan-a-h4,plan-b-h4" "the refusal did not print the full membership"
+  pass "a planned chunk cannot launch while leaving one of its own members behind"
+}
+
+test_warn_reports_and_proceeds() {
+  local case_dir id out rc=0
+  id=guard-warn-h5
+  case_dir=$(grouping_home guard-warn "$id")
+  printf 'warn\n' > "$(home_of "$case_dir")/config/grouping"
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-sibling-h5 app-web blu-3156
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  # Mutant: warn refuses.
+  [ "$rc" -eq 0 ] || fail "the warn posture refused a dispatch: $out"
+  assert_contains "$out" "guard-sibling-h5" "the warn posture reported no finding"
+  assert_contains "$out" "posture is warn" "the warn posture did not say why it proceeded"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" "the warn posture did not publish the record"
+  pass "the warn posture reports the same findings and lets the dispatch through"
+}
+
+test_grouping_is_inert_when_the_posture_is_absent() {
+  local case_dir id out rc=0
+  id=guard-off-h6
+  case_dir=$(make_home guard-off "$id")
+  keyed_item "$case_dir" "$id" app-web blu-3156
+  keyed_item "$case_dir" guard-sibling-h6 app-web blu-3156
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  # Mutant: absent means warn. With no posture file the dispatch says nothing
+  # about grouping at all, which is what keeps every other home unchanged.
+  [ "$rc" -eq 0 ] || fail "an unconfigured home refused a dispatch: $out"
+  assert_not_contains "$out" "grouping:" "an unconfigured home reported a grouping finding"
+  pass "a home with no grouping posture dispatches exactly as before"
+}
+
+test_a_malformed_grouping_posture_refuses_a_dispatch() {
+  local case_dir id out rc=0
+  id=guard-bad-h7
+  case_dir=$(grouping_home guard-bad "$id")
+  printf 'enfroce\n' > "$(home_of "$case_dir")/config/grouping"
+  keyed_item "$case_dir" "$id" app-web blu-3156
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  # Mutant: an unknown token falls back to off, which would silently restore the
+  # behaviour the posture was set to change.
+  [ "$rc" -ne 0 ] || fail "a malformed posture dispatched anyway"
+  assert_contains "$out" "enfroce" "the refusal did not name the bad token"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "the refusal published a task record"
+  pass "a malformed grouping posture refuses a dispatch instead of defaulting to off"
+}
+
+test_spawn_refuses_a_brief_whose_members_differ_from_the_dispatch() {
+  local case_dir unit out rc=0 brief
+  unit=guard-brief-h8
+  # No pre-seeded brief here: this case scaffolds the chunk brief itself, which
+  # is the artifact under test.
+  case_dir=$(grouping_home guard-brief)
+  keyed_item "$case_dir" "$unit" app-web blu-3156
+  keyed_item "$case_dir" brief-a-h8 app-web blu-3156
+  keyed_item "$case_dir" brief-b-h8 app-web blu-3156
+  brief="$(home_of "$case_dir")/data/$unit/brief.md"
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-brief.sh" "$unit" firstmate \
+    --mode no-mistakes --delivers brief-a-h8,brief-b-h8 >/dev/null \
+    || fail "fixture: could not scaffold the chunk brief"
+  assert_contains "$(cat "$brief")" "### brief-a-h8" "the chunk brief carries no slot per member"
+  assert_contains "$(cat "$brief")" "### brief-b-h8" "the chunk brief carries no slot per member"
+
+  # A brief with its slots still empty never launches, whatever the dispatch says.
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers brief-a-h8,brief-b-h8) || rc=$?
+  # Mutant: the leftover check compares the whole intent body, which a
+  # two-slot body never equals, so a half-filled chunk brief would launch.
+  [ "$rc" -ne 0 ] || fail "a chunk brief with unfilled slots launched"
+  assert_contains "$out" "{TASK" "the refusal did not name the unfilled slots"
+
+  # Fill one slot only: still refused, now for the empty one.
+  perl -0pi -e 's/\{TASK:brief-a-h8\}/the first card asks for this/' "$brief"
+  rc=0
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers brief-a-h8,brief-b-h8) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a half-filled chunk brief launched"
+  perl -0pi -e 's/\{TASK:brief-b-h8\}/the second card asks for this/' "$brief"
+  perl -0pi -e 's/\{FIRSTMATE_SPEC\}/build both/' "$brief"
+
+  # Filled, but dispatched with a different membership than it records.
+  rc=0
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers brief-a-h8) || rc=$?
+  # Mutant: skip the cross-check.
+  [ "$rc" -ne 0 ] || fail "a dispatch whose membership differs from its brief launched"
+  assert_contains "$out" "membership mismatch" "the refusal did not say what disagreed"
+  assert_absent "$(home_of "$case_dir")/state/$unit.meta" "the refusal published a task record"
+
+  # And the agreeing dispatch launches.
+  rc=0
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers brief-a-h8,brief-b-h8) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the agreeing chunk dispatch was refused: $out"
+  pass "a chunk brief must carry a filled slot per member and the membership the dispatch names"
+}
+
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
   local case_dir unit out rc=0
   unit=atomic-group-unit-g2
@@ -3514,6 +3723,14 @@ test_a_persistent_secondmate_is_never_a_backlog_item
 test_grouped_dispatch_records_members_and_moves_them_in_flight
 test_a_first_dispatch_records_when_it_took_its_copy
 test_a_chunk_dispatches_and_closes_through_delivers
+test_enforce_refuses_a_lone_dispatch_beside_a_ready_sibling
+test_enforce_refuses_a_second_worker_beside_a_live_sibling
+test_an_apart_reason_is_recorded_in_the_record_and_the_backlog
+test_a_unit_cannot_launch_without_its_planned_members
+test_warn_reports_and_proceeds
+test_grouping_is_inert_when_the_posture_is_absent
+test_a_malformed_grouping_posture_refuses_a_dispatch
+test_spawn_refuses_a_brief_whose_members_differ_from_the_dispatch
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver
 test_grouped_close_closes_every_delivered_member
 test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason

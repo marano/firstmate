@@ -132,6 +132,7 @@ NO_PROJECTS=0
 MODE=
 MODE_SET=0
 POS=()
+DELIVERS=
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
@@ -140,6 +141,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      delivers) DELIVERS=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -152,6 +154,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --delivers) want_value=delivers ;;
+    --delivers=*) DELIVERS=${a#--delivers=} ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -179,6 +183,11 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+if [ -n "$DELIVERS" ] && [ "$KIND" != ship ]; then
+  echo "error: --delivers applies only to ship briefs; a scout delivers a report and a secondmate charter delivers no backlog items" >&2
+  exit 1
+fi
+
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -363,6 +372,36 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# A job delivering several items carries one intent slot per item instead of a
+# single one. The reviewer treats "## Captain's intent" as acceptance criteria,
+# so merging several tickets into one unattributed paragraph either widens an
+# ask or loses it; a slot per item keeps each ticket's own words its own.
+# bin/fm-spawn.sh refuses a brief with a slot still unfilled, the same way it
+# refuses the single placeholder.
+if [ -n "$DELIVERS" ]; then
+  DELIVERS_SLOTS=""
+  IFS=, read -r -a DELIVERS_IDS <<< "$DELIVERS"
+  for DELIVERS_ID in ${DELIVERS_IDS[@]+"${DELIVERS_IDS[@]}"}; do
+    case "$DELIVERS_ID" in
+      ''|*[!A-Za-z0-9._-]*)
+        echo "error: --delivers takes backlog item ids separated by commas (got '$DELIVERS_ID')" >&2
+        exit 1
+        ;;
+    esac
+    DELIVERS_SLOTS="$DELIVERS_SLOTS### $DELIVERS_ID"$'\n'"{TASK:$DELIVERS_ID}"$'\n\n'
+  done
+  DELIVERS_SLOTS=${DELIVERS_SLOTS%$'\n\n'}
+  IFS= read -r -d '' TASK_SECTION <<EOF || true
+# Task
+## Captain's intent
+$DELIVERS_SLOTS
+
+## Firstmate spec
+{FIRSTMATE_SPEC}
+EOF
+  TASK_SECTION=${TASK_SECTION%$'\n'}
+fi
+
 # The before-you-wait declaration, rendered into rule 4 of every ship and scout
 # scaffold and stated here exactly once. It is phrased as a step in the waiting
 # flow, not as a definition of the verb: the definition form ("use `paused:`
@@ -493,7 +532,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$DELIVERS") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -562,4 +601,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+if [ -n "$DELIVERS" ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE, delivers=$DELIVERS; replace one {TASK:<id>} slot per delivered item and {FIRSTMATE_SPEC})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+fi

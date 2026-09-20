@@ -411,6 +411,24 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 
+# A restart is not a new dispatch: the worker, its membership and its recorded
+# reason already exist, and the grouping guard has nothing left to decide. If it
+# ran here it would refuse exactly the workers that are already grouped - the
+# unit is In flight, its own members are its siblings - and stuck-worker
+# recovery, which restarts through this same path, would be blocked by it.
+test_the_grouping_guard_never_runs_on_a_relaunch() {
+  local dir out rc
+  dir=$(new_case relaunch-grouping rl44)
+  add_ship_task "$dir" rl44 claude
+  mkdir -p "$dir/home/config"
+  printf 'enforce\n' > "$dir/home/config/grouping"
+
+  out=$(run_control "$dir" rl44 relaunch --note "continuing after a stuck agent"); rc=$?
+  expect_code 0 "$rc" "a relaunch under the enforce posture should not be guarded"$'\n'"$out"
+  assert_not_contains "$out" "grouping:" "a relaunch reported a grouping finding"
+  pass "fm-control relaunch: the grouping guard never runs on a restart"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -421,6 +439,7 @@ test_relaunch_preserves_durable_task_metadata() {
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
     printf '%s\n' 'first_spawn_epoch=1700000000'
+    printf '%s\n' 'apart_reason=ships on its own release train'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -436,6 +455,9 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(grep -c '^first_spawn_epoch=' "$dir/home/state/rl19.meta")" -eq 1 ] \
     && [ "$(meta_field "$dir" rl19 first_spawn_epoch)" = 1700000000 ] \
     || fail "the first dispatch's epoch must survive relaunch unchanged, once"
+  [ "$(grep -c '^apart_reason=' "$dir/home/state/rl19.meta")" -eq 1 ] \
+    && [ "$(meta_field "$dir" rl19 apart_reason)" = "ships on its own release train" ] \
+    || fail "the recorded reason a grouping refusal was cleared must survive relaunch unchanged, once"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
@@ -1748,6 +1770,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
+test_the_grouping_guard_never_runs_on_a_relaunch
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_of_a_recorded_pr_keeps_the_merge_watch_armed
 test_relaunch_serializes_concurrent_durable_metadata_publication
