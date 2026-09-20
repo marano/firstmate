@@ -173,5 +173,69 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+# --- Phase 3: shutdown cannot be held hostage by its own watcher ------------
+# The daemon stops its watcher with one SIGTERM and then waits for it. A trapped
+# signal is not always delivered to its trap - on bash 5.2 the trap action can
+# fail to parse when the signal lands while the shell is expanding a command
+# substitution - and the wait then never returns: the daemon hangs on shutdown
+# and leaves a polling watcher behind. The stand-in watcher here ignores SIGTERM
+# outright, which from the daemon's side is the same thing. This case runs the
+# real daemon as a child, because its shutdown lives in its main loop rather
+# than in the functions the rest of this suite sources.
+test_daemon_shutdown_kills_a_watcher_that_ignores_its_stop_signal() {
+  local dir state bin ready daemon_pid watcher_pid i
+  dir=$(make_supercase wd-stop-backstop)
+  state="$dir/state"
+  bin="$dir/bin"
+  ready="$dir/watcher.pid"
+  # The daemon runs the watcher from its OWN directory, so the stand-in goes
+  # beside a copy of it rather than being injected through the environment.
+  cp -R "$ROOT/bin" "$bin"
+  cat > "$bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+trap "" TERM
+printf '%s\n' "$$" > "${FM_TEST_WATCHER_PID_FILE:?}"
+while :; do sleep 0.2; done
+SH
+  chmod +x "$bin/fm-watch.sh"
+  date '+%s' > "$state/.afk"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SUPERVISOR_TARGET='%fm-test-supervisor-pane' FM_TEST_WATCHER_PID_FILE="$ready" \
+    FM_DAEMON_WATCHER_STOP_TICKS=10 bash "$bin/fm-supervise-daemon.sh" > "$dir/daemon.out" 2>&1 &
+  daemon_pid=$!
+  i=0
+  while [ ! -s "$ready" ] && [ "$i" -lt 200 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { term_and_reap "$daemon_pid"; fail "the daemon never started its watcher: $(cat "$dir/daemon.out")"; }
+  watcher_pid=$(cat "$ready")
+
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  i=0
+  while is_live_non_zombie "$daemon_pid" && [ "$i" -lt 200 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$daemon_pid"; then
+    kill -KILL "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    kill -KILL "$watcher_pid" 2>/dev/null || true
+    fail "the daemon hung on shutdown waiting for a watcher that ignores SIGTERM"
+  fi
+  wait "$daemon_pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$watcher_pid" 2>/dev/null; then
+    kill -KILL "$watcher_pid" 2>/dev/null || true
+    fail "the daemon exited but left behind the watcher that ignored SIGTERM"
+  fi
+  pass "lifecycle: daemon shutdown kills a watcher that ignores its stop signal instead of waiting on it forever"
+}
+
 test_routine_then_terminal_after_restart
 test_stale_pane_transient_persistent_resume
+test_daemon_shutdown_kills_a_watcher_that_ignores_its_stop_signal
