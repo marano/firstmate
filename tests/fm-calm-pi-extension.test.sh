@@ -2189,8 +2189,8 @@ TS
   }
 
   wait_for_geometry_text() {
-    local file=$1 text=$2 attempt=0
-    while [ "$attempt" -lt 120 ]; do
+    local file=$1 text=$2 attempts=${3:-120} attempt=0
+    while [ "$attempt" -lt "$attempts" ]; do
       capture_geometry_viewport "$file" || true
       grep -Fq "$text" "$file" 2>/dev/null && return 0
       sleep 0.05
@@ -2275,13 +2275,31 @@ TS
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
+  # One press, and a failure that names which of the two causes it was. A second
+  # press here would hide a dropped keypress, which is a defect this case exists
+  # to catch, so instead the pane recording above decides: Pi writes to the pane
+  # whenever it acts on Ctrl+T, so no bytes at all means the key never arrived,
+  # while bytes followed by no row means the expansion itself did not happen.
+  # Measured on this host over 8 runs, Pi first writes to the pane 11-17ms after
+  # the key and the row is up by 17-24ms. The bound is 20s rather than 6s not
+  # because the expansion is ever slow, but so that a runner slow enough to be
+  # the real cause cannot be misreported as one of the two failures below.
+  ct_bytes_before=$(wc -c <"$reload_stream" | tr -d ' ')
+  i=0
+  while [ "$i" -lt 20 ]; do
+    sleep 0.3
+    ct_bytes_now=$(wc -c <"$reload_stream" | tr -d ' ')
+    [ "$ct_bytes_now" -eq "$ct_bytes_before" ] && break
+    ct_bytes_before=$ct_bytes_now
+    i=$((i + 1))
+  done
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  # A key sent while Pi is still repainting after /reload can be dropped; the
-  # toggle did not apply then, so pressing it once more is safe.
-  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
-    || { tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-         wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE"; } \
-    || fail "thinking expansion did not restore Calm-hidden reasoning"
+  if ! wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" 400; then
+    ct_bytes_after=$(wc -c <"$reload_stream" | tr -d ' ')
+    [ "$ct_bytes_after" -gt "$ct_bytes_before" ] \
+      || fail "thinking expansion did not restore Calm-hidden reasoning, and Pi wrote nothing to the pane after the keypress, so the key never reached it"
+    fail "thinking expansion did not restore Calm-hidden reasoning, though Pi did repaint after the keypress"
+  fi
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   i=0
@@ -2291,7 +2309,7 @@ TS
     sleep 0.05
     i=$((i + 1))
   done
-  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
+  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking did not hide the thinking row again"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
