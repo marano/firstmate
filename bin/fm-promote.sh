@@ -24,7 +24,13 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Promotion is the other way a ship worker starts, so where config/grouping is
+# on it faces the same guard bin/fm-spawn.sh applies: a scout that becomes a
+# ship worker beside related ready or live work is refused, naming what it found
+# and the command that groups it, and --apart-reason "<one line>" clears it and
+# is recorded exactly as at dispatch. Scouts themselves are never guarded; this
+# fires only at the moment the task stops being one.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--apart-reason <one line>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +49,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-grouping-lib.sh
+. "$SCRIPT_DIR/fm-grouping-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -54,6 +62,8 @@ MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+APART_REASON=
+APART_REASON_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -64,6 +74,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      apart_reason) APART_REASON=$a; APART_REASON_SET=1 ;;
     esac
     want_value=
     continue
@@ -73,6 +84,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --apart-reason) want_value=apart_reason ;;
+    --apart-reason=*) APART_REASON=${a#--apart-reason=}; APART_REASON_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -86,6 +99,12 @@ done
   echo "error: promotion requires --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
   exit 1
 }
+if [ "$APART_REASON_SET" -eq 1 ]; then
+  [ -n "$APART_REASON" ] || { echo "error: --apart-reason requires a non-empty value" >&2; exit 1; }
+  case "$APART_REASON" in
+    *$'\n'*|*$'\r'*) echo "error: --apart-reason must be one line" >&2; exit 1 ;;
+  esac
+fi
 case "$MODE" in
   no-mistakes|direct-PR|local-only) ;;
   no-mistakes-prod-only)
@@ -143,6 +162,35 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+# Promotion is where this task stops being a scout, so it is where the grouping
+# guard applies: a scout is never guarded, a ship worker always is, and without
+# this the promotion path would be the way around the dispatch guard. It runs
+# before the record is rewritten, so a refusal leaves the scout exactly as it
+# was. bin/fm-grouping-lib.sh owns what it finds.
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PROMOTE_DELIVERS=$(grep '^delivers=' "$META" | tail -1 | cut -d= -f2- || true)
+# Captured rather than called plainly: this script runs under set -e, and the
+# finder returns non-zero to MEAN "there are findings", which would otherwise
+# end the run before the posture is even consulted.
+PROMOTE_GROUPING_STATUS=0
+fm_grouping_dispatch_findings "$DATA" "$STATE" "$CONFIG" "$ID" "$PROMOTE_DELIVERS" \
+  || PROMOTE_GROUPING_STATUS=$?
+if [ "$PROMOTE_GROUPING_STATUS" -eq 2 ]; then
+  echo "error: $FM_GROUPING_ERROR; fix it or unset it before promoting" >&2
+  exit 1
+fi
+if [ "$PROMOTE_GROUPING_STATUS" -eq 1 ]; then
+  fm_grouping_report_findings "$ID" >&2
+  if [ "$APART_REASON_SET" -eq 1 ]; then
+    printf 'grouping: promoting apart on the recorded reason: %s\n' "$APART_REASON" >&2
+  elif [ "$FM_GROUPING_POSTURE" = warn ]; then
+    printf 'grouping: the posture is warn, so this promotion proceeds\n' >&2
+  else
+    printf 'grouping: resolve one of the above, or promote apart with --apart-reason "<one line>"; the task is still a scout\n' >&2
+    exit 1
+  fi
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -258,11 +306,15 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^apart_reason=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  # The recorded reason a grouping refusal was cleared, written here for the
+  # same reason bin/fm-spawn.sh writes it at dispatch: an ungrouped worker stays
+  # auditable after the fact, on the record while it lives and on the item after.
+  [ "$APART_REASON_SET" -eq 0 ] || echo "apart_reason=$APART_REASON"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
@@ -271,6 +323,10 @@ if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE";
   exit 1
 fi
 TMP=
+if [ "$APART_REASON_SET" -eq 1 ] \
+  && ! fm_backlog_body_append_line "$DATA" "$ID" "Dispatched apart: $APART_REASON"; then
+  echo "warning: $ID was promoted, but its apart reason could not be appended to the item (${FM_BACKLOG_TRANSITION_ERROR:-write failed}); the record still carries it" >&2
+fi
 rm -f -- "$BRIEF_ORIGINAL" 2>/dev/null || true
 BRIEF_ORIGINAL=
 fm_lock_release "$META_LOCK"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--delivers <id>[,<id>...]] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--delivers <id>[,<id>...]] [--apart-reason <one line>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -34,6 +34,17 @@
 #   --relaunch (which carries the record forward), batch dispatch, and a home
 #   without automatic backlog transitions. bin/fm-backlog-transition-lib.sh
 #   MEMBERSHIP owns the contract, including handing a member back.
+#   Where config/grouping is on, a ship dispatch is also guarded against
+#   starting work beside RELATED work: another ready item under the same
+#   repository and group key, a live worker already on that group, planned
+#   members this dispatch does not name, or an item carrying no key while other
+#   ready or live ship work shares its repository. Each finding prints the
+#   command that resolves it, and the whole guard is cleared in one recorded
+#   command with --apart-reason "<one line>", which lands in the task record and
+#   on the item itself so an ungrouped dispatch stays auditable. Under the warn
+#   posture the findings print and the dispatch proceeds; a restart, a scout and
+#   a secondmate are never guarded. bin/fm-grouping-lib.sh owns what related
+#   means, and a read that cannot answer is reported rather than passed.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -424,6 +435,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-grouping-lib.sh
+. "$SCRIPT_DIR/fm-grouping-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -566,6 +579,8 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 DELIVERS_ARG=
 DELIVERS_SET=0
+APART_REASON=
+APART_REASON_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -609,6 +624,10 @@ for a in "$@"; do
     delivers)
       DELIVERS_ARG=$a
       DELIVERS_SET=1
+      ;;
+    apart_reason)
+      APART_REASON=$a
+      APART_REASON_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -663,6 +682,11 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --apart-reason) want_value=apart_reason ;;
+  --apart-reason=*)
+    APART_REASON=${a#--apart-reason=}
+    APART_REASON_SET=1
+    ;;
   --delivers) want_value=delivers ;;
   --delivers=*)
     DELIVERS_ARG=${a#--delivers=}
@@ -707,6 +731,31 @@ done
   echo "error: --delivers requires a non-empty value" >&2
   exit 1
 }
+# The one-line reason that clears a grouping refusal. It is recorded on the task
+# record and appended to the item, so a fleet review can list every dispatch
+# that deliberately went alone and why; a value carrying a newline would write a
+# second record line, which is how a record gets a key its producer never wrote.
+if [ "$APART_REASON_SET" -eq 1 ]; then
+  [ -n "$APART_REASON" ] || {
+    echo "error: --apart-reason requires a non-empty value" >&2
+    exit 1
+  }
+  case "$APART_REASON" in
+    *$'\n'*|*$'\r'*)
+      echo "error: --apart-reason must be one line" >&2
+      exit 1
+      ;;
+  esac
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --relaunch keeps the task's recorded reason; --apart-reason applies only to a first dispatch" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || {
+    echo "error: --apart-reason clears a grouping refusal, and only a ship dispatch is guarded" >&2
+    exit 1
+  }
+fi
+
 # A grouped dispatch's membership is recorded once, at the unit's first spawn
 # (bin/fm-backlog-transition-lib.sh MEMBERSHIP). A relaunch carries the record
 # forward unchanged, and only a ship delivers backlog items.
@@ -1359,6 +1408,10 @@ fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
   if [ "$DELIVERS_SET" -eq 1 ]; then
     echo "error: --delivers names the items ONE dispatch delivers, so it cannot be shared across a batch; spawn the grouped task on its own" >&2
+    exit 1
+  fi
+  if [ "$APART_REASON_SET" -eq 1 ]; then
+    echo "error: --apart-reason clears the grouping refusal of ONE dispatch and is recorded on that task, so it cannot be shared across a batch; spawn the task it applies to on its own" >&2
     exit 1
   fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
@@ -2700,6 +2753,33 @@ if [ "$KIND" = ship ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi
+  # The membership recorded in the brief must be the membership this dispatch
+  # was given, for the same reason the delivery mode must: the worker's
+  # instructions and the task record would otherwise describe different jobs,
+  # and the reviewer treats each item's slot as that item's acceptance criteria.
+  # First dispatch only - a relaunch refuses --delivers and carries the record's
+  # own membership forward, which `handback` and `join` may since have changed.
+  if [ "$RELAUNCH" -eq 0 ]; then
+    BRIEF_DELIVERS=$(fm_brief_delivers_line "$BRIEF")
+    if [ -n "$BRIEF_DELIVERS" ] && [ -z "$DELIVERS_ARG" ]; then
+      echo "error: $BRIEF records Delivers: $BRIEF_DELIVERS, but this spawn passed no --delivers; pass it so the record moves those items with this job, or re-scaffold the brief without them" >&2
+      exit 1
+    fi
+    if [ -n "$BRIEF_DELIVERS" ] && [ "$BRIEF_DELIVERS" != "$DELIVERS_ARG" ]; then
+      echo "error: membership mismatch for $ID: the brief says Delivers: $BRIEF_DELIVERS but this spawn passed --delivers $DELIVERS_ARG; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+      exit 1
+    fi
+    if [ -z "$BRIEF_DELIVERS" ] && [ -n "$DELIVERS_ARG" ]; then
+      echo "warning: $BRIEF records no Delivers line (scaffolded before chunk briefs recorded one); launching on the explicit --delivers $DELIVERS_ARG - confirm the brief carries each delivered item's own ask" >&2
+    fi
+    if BRIEF_EMPTY_SLOTS=$(fm_brief_empty_intent_slots "$BRIEF"); then
+      :
+    else
+      echo "error: $BRIEF leaves the intent slot empty for: $BRIEF_EMPTY_SLOTS; fill each delivered item's own ask before dispatching, since the reviewer reads that slot as that item's acceptance criteria" >&2
+      exit 1
+    fi
+  fi
+
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
@@ -3005,6 +3085,39 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# THE GROUPING GUARD at this entry point. Every worker starts through one of two
+# commands - this one and bin/fm-promote.sh - which is why the guard lives at
+# both and nowhere else: a rule re-made from memory at each dispatch, under a
+# standing instruction to fill lanes immediately, loses to that instruction,
+# while a refusal here cannot be forgotten. It runs after member validation and
+# before any endpoint, local copy or record exists, so a refusal costs nothing
+# to unwind. bin/fm-grouping-lib.sh owns what it finds; this decides what to do
+# about it, and --apart-reason clears it in one recorded command so a wrongly
+# refused dispatch costs seconds rather than anyone's decision.
+spawn_grouping_guard() {
+  local status
+  [ "$KIND" = ship ] || return 0
+  [ "$RELAUNCH" -eq 0 ] || return 0
+  fm_grouping_dispatch_findings "$DATA" "$STATE" "$CONFIG" "$ID" "$DELIVERS_ARG"
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "error: $FM_GROUPING_ERROR; fix it or unset it before dispatching" >&2
+    return 1
+  fi
+  [ "$status" -eq 1 ] || return 0
+  fm_grouping_report_findings "$ID" >&2
+  if [ "$APART_REASON_SET" -eq 1 ]; then
+    printf 'grouping: dispatching apart on the recorded reason: %s\n' "$APART_REASON" >&2
+    return 0
+  fi
+  if [ "$FM_GROUPING_POSTURE" = warn ]; then
+    printf 'grouping: the posture is warn, so this dispatch proceeds\n' >&2
+    return 0
+  fi
+  printf 'grouping: resolve one of the above, or dispatch apart with --apart-reason "<one line>"; nothing was created\n' >&2
+  return 1
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3033,6 +3146,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       exit 1
     fi
   done
+  spawn_grouping_guard || exit 1
 else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
@@ -3101,10 +3215,10 @@ else
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
     HERDR_LABEL_HOME=$FM_HOME
-    HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+    HERDR_LAUNCHER_RELATIONSHIP="launcher-home"
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      HERDR_LAUNCHER_RELATIONSHIP="other-home"
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -4278,6 +4392,10 @@ preserve_relaunch_meta() {
   # first took its local copy. A relaunch carries it forward, and
   # bin/fm-teardown.sh reads the copy's branch history from it on.
   [ "$RELAUNCH" -eq 1 ] || echo "first_spawn_epoch=$SPAWN_START_EPOCH"
+  # Also first-dispatch-only and carried forward by a relaunch: the recorded
+  # reason a grouping refusal was cleared, which is what makes an ungrouped
+  # dispatch auditable rather than merely allowed.
+  [ "$APART_REASON_SET" -eq 0 ] || echo "apart_reason=$APART_REASON"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4352,6 +4470,14 @@ fi
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
   fm_backlog_members_start "$DATA" "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}" || return 1
+  # The recorded reason goes on the item too, before the row moves. The record
+  # carries it while the worker lives; the item carries it afterwards, which is
+  # what lets a fleet review weeks later still see why this work went alone.
+  # Appending is idempotent, so the commit's own retry never doubles the line.
+  if [ "$APART_REASON_SET" -eq 1 ] \
+    && ! fm_backlog_body_append_line "$DATA" "$ID" "Dispatched apart: $APART_REASON"; then
+    return 1
+  fi
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
 }
 

@@ -77,7 +77,10 @@ FM_GROUPING_READY_SIBLINGS=
 FM_GROUPING_LIVE_SIBLINGS=
 FM_GROUPING_ROWS=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_GROUPING_PLAN=
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_GROUPING_ERROR=
+FM_GROUPING_FINDINGS=
 
 # The posture of <config-dir>: one line holding `off`, `warn`, or `enforce`,
 # optionally followed by a soft member cap (`enforce 6`). An absent file is off,
@@ -327,6 +330,55 @@ EOF
   FM_GROUPING_ROWS=$found
 }
 
+# The members a chunk recorded on <unit> before anyone was dispatched, in
+# FM_GROUPING_PLAN (empty when the row carries no plan). This is the PLAN, an
+# earlier statement of intent kept in the unit row's own body; the membership a
+# dispatch records is owned by bin/fm-backlog-transition-lib.sh's MEMBERSHIP and
+# is never derived from here.
+# Status: 0 read, 1 the body carries two plan lines, 2 cannot tell, 3 no row.
+fm_grouping_plan_of_row() {  # <data-dir> <id>
+  local data=$1 id=$2 status
+  FM_GROUPING_PLAN=
+  FM_GROUPING_ERROR=
+  fm_backlog_row_field "$data" "$id" body
+  status=$?
+  case "$status" in
+    0) ;;
+    3) FM_GROUPING_ERROR="$id has no backlog item in this home"; return 3 ;;
+    *)
+      FM_GROUPING_ERROR="${FM_BACKLOG_TRANSITION_ERROR:-cannot read the body of $id}"
+      return 2
+      ;;
+  esac
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_GROUPING_PLAN=$(fm_grouping_plan_of_body "$FM_BACKLOG_ROW_FIELD_VALUE") || {
+    FM_GROUPING_ERROR="$id carries more than one '${FM_GROUPING_PLAN_PREFIX%% *}' line; leave exactly one"
+    return 1
+  }
+}
+
+# Does <id> still need a planning decision? True when this home holds other
+# ready or live SHIP work in the same repository and <id> carries no key, so
+# nobody has yet said whether it belongs with that work or stands alone. A key -
+# including the reserved one that records "belongs with nothing" - answers the
+# question either way, so a keyed item never needs planning again. The dispatch
+# guard's unkeyed case and the idle alarm's unplanned count both ask THIS
+# predicate, so an item the alarm counts is exactly an item the guard stops.
+# Status: 0 needs planning, 1 does not, 2 cannot tell.
+fm_grouping_needs_planning() {  # <data-dir> <state-dir> <id> <repo> <key>
+  local data=$1 state=$2 id=$3 repo=$4 key=$5 status other
+  FM_GROUPING_ERROR=
+  [ -n "$repo" ] || return 1
+  [ -z "$key" ] || return 1
+  for other in queued in_flight; do
+    fm_grouping_repo_rows "$data" "$state" "$repo" "$other" "$id"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    [ -z "$FM_GROUPING_ROWS" ] || return 0
+  done
+  return 1
+}
+
 # The ready siblings of <unit>: Queued, unheld, blocked by nothing except <unit>,
 # same repository, same key. Sets FM_GROUPING_READY_SIBLINGS to a space-separated
 # list. Status 2 with FM_GROUPING_ERROR when any read could not tell.
@@ -426,6 +478,134 @@ $rows
 EOF
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_LIVE_SIBLINGS=$found
+}
+
+# WHAT A DISPATCH OF <id> WOULD START BESIDE. This is the whole question the
+# guard at each entry point asks, answered once here so the two commands that
+# start a ship worker - bin/fm-spawn.sh and bin/fm-promote.sh - cannot drift
+# apart on it. Findings land in FM_GROUPING_FINDINGS, one per line, each naming
+# what was found and the command that resolves it; a read that cannot answer is
+# a finding too, never a silent pass. <delivers> is the membership the dispatch
+# already names, so work it is about to deliver is not reported against it.
+# Status: 0 nothing found, 1 findings, 2 the posture itself is unreadable.
+fm_grouping_dispatch_findings() {  # <data-dir> <state-dir> <config-dir> <id> <delivers-csv>
+  local data=$1 state=$2 config=$3 id=$4 delivers=${5-}
+  local repo key status plan planned missing extra sibling
+  local -a wanted=()
+  FM_GROUPING_FINDINGS=
+  fm_grouping_posture "$config" || return 2
+  [ "$FM_GROUPING_POSTURE" != off ] || return 0
+
+  fm_grouping_repo_of_row "$data" "$id"
+  status=$?
+  # An item with no backlog row of its own is refused by the dispatch gate
+  # itself, which is a better error than anything this could say about it.
+  [ "$status" -ne 3 ] || return 0
+  if [ "$status" -ne 0 ]; then
+    fm_grouping_add_finding "cannot tell what repository $id belongs to: $FM_GROUPING_ERROR"
+    repo=
+  else
+    repo=$FM_GROUPING_REPO
+  fi
+  fm_grouping_key_of_row "$data" "$id"
+  status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    fm_grouping_add_finding "cannot tell what group $id belongs to: $FM_GROUPING_ERROR"
+    key=
+  else
+    key=$FM_GROUPING_KEY
+  fi
+
+  # The plan a chunk recorded on this unit. Membership stays explicit - the
+  # dispatch names what it delivers - and this only stops the OMISSION, because
+  # a forgotten member unblocks when the unit closes and surfaces later as the
+  # lone ticket this contract exists to prevent.
+  if fm_grouping_plan_of_row "$data" "$id"; then
+    plan=$FM_GROUPING_PLAN
+    if [ -n "$plan" ]; then
+      missing=''
+      for planned in ${plan//,/ }; do
+        case ",$delivers," in
+          *",$planned,"*) continue ;;
+        esac
+        # A planned member the captain has since held cannot be delivered at
+        # all, so naming it is not the resolution; releasing it is.
+        if fm_backlog_row_probe "$data" "$planned"; then
+          case "$FM_BACKLOG_ROW_STATE" in
+            *' yes '*)
+              fm_grouping_add_finding "$id plans to deliver $planned, which is held: release it first, or dispatch without it"
+              continue
+              ;;
+          esac
+        fi
+        missing="${missing:+$missing,}$planned"
+      done
+      if [ -n "$missing" ]; then
+        extra=$delivers
+        for planned in ${missing//,/ }; do
+          extra="${extra:+$extra,}$planned"
+        done
+        fm_grouping_add_finding "$id plans to deliver $missing, which this dispatch does not name; name them at dispatch (bin/fm-spawn.sh --delivers $extra)"
+      fi
+    fi
+  elif [ -n "$FM_GROUPING_ERROR" ]; then
+    fm_grouping_add_finding "cannot tell what $id plans to deliver: $FM_GROUPING_ERROR"
+  fi
+
+  if fm_grouping_relatable "$repo" "$key"; then
+    if fm_grouping_ready_siblings "$data" "$state" "$id" "$repo" "$key"; then
+      for sibling in $FM_GROUPING_READY_SIBLINGS; do
+        case ",$delivers," in
+          *",$sibling,"*) continue ;;
+        esac
+        wanted+=("$sibling")
+      done
+      if [ "${#wanted[@]}" -gt 0 ]; then
+        extra=$delivers
+        for sibling in "${wanted[@]}"; do
+          extra="${extra:+$extra,}$sibling"
+        done
+        fm_grouping_add_finding "${wanted[*]} is ready work in $repo under the same group key ($key); deliver it in the same job (bin/fm-spawn.sh --delivers $extra), or plan a chunk with bin/fm-tasks-axi.sh chunk"
+      fi
+    else
+      fm_grouping_add_finding "cannot tell whether $id has ready siblings: $FM_GROUPING_ERROR"
+    fi
+    if fm_grouping_live_siblings "$data" "$state" "$id" "$repo" "$key"; then
+      for sibling in $FM_GROUPING_LIVE_SIBLINGS; do
+        fm_grouping_add_finding "$sibling is already working $repo's $key group; hand this item to it with bin/fm-tasks-axi.sh join $sibling $id"
+      done
+    else
+      fm_grouping_add_finding "cannot tell whether $id has a live sibling: $FM_GROUPING_ERROR"
+    fi
+  else
+    fm_grouping_needs_planning "$data" "$state" "$id" "$repo" "$key"
+    case "$?" in
+      0)
+        fm_grouping_add_finding "$id carries no group key while this home holds other ready or live ship work in $repo; record what it belongs with (bin/fm-tasks-axi.sh group $id <key>), or that it belongs with nothing (bin/fm-tasks-axi.sh group $id --solo)"
+        ;;
+      2)
+        fm_grouping_add_finding "cannot tell whether $id needs a group key: $FM_GROUPING_ERROR"
+        ;;
+    esac
+  fi
+
+  [ -n "$FM_GROUPING_FINDINGS" ] || return 0
+  return 1
+}
+
+fm_grouping_add_finding() {  # <line>
+  FM_GROUPING_FINDINGS="${FM_GROUPING_FINDINGS}$1"$'\n'
+}
+
+# The findings as an operator reads them, one indented line each under the id.
+fm_grouping_report_findings() {  # <id>
+  local id=$1 line
+  printf 'grouping: %s\n' "$id"
+  while IFS= read -r line; do
+    [ -z "$line" ] || printf 'grouping:   %s\n' "$line"
+  done <<FINDINGS
+$FM_GROUPING_FINDINGS
+FINDINGS
 }
 
 # A body with the <prefix> line removed, along with the blank line that

@@ -83,7 +83,50 @@ fm_brief_task_placeholders_present() {  # <file>
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
+  # A chunk brief carries one slot per delivered item, so the whole-body
+  # comparison above cannot see a brief where only SOME slots were filled: a
+  # body of two slots is never equal to one placeholder. Each slot is therefore
+  # searched for on its own, which is what keeps a half-filled chunk brief from
+  # launching a worker with one item's ask missing.
+  printf '%s\n' "$intent" | grep -q '{TASK:[A-Za-z0-9._-]*}' && return 0
   return 1
+}
+
+# Return 0 when every `### <id>` slot under "## Captain's intent" has a body,
+# printing the ids of the empty ones otherwise. A slot whose placeholder was
+# deleted without putting the item's ask in its place is the other half of the
+# half-filled brief: the token search above no longer sees it, and the reviewer
+# would treat the heading alone as that item's acceptance criteria.
+fm_brief_empty_intent_slots() {  # <file>
+  local file=$1 intent line slot='' body='' empty=''
+  [ -f "$file" ] || return 0
+  intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
+  while IFS= read -r line; do
+    case "$line" in
+      '### '*)
+        if [ -n "$slot" ] && [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+          empty="${empty:+$empty }$slot"
+        fi
+        slot=${line#### }
+        body=''
+        ;;
+      *) [ -z "$slot" ] || body="$body$line" ;;
+    esac
+  done <<EOF
+$intent
+EOF
+  if [ -n "$slot" ] && [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+    empty="${empty:+$empty }$slot"
+  fi
+  [ -z "$empty" ] || { printf '%s\n' "$empty"; return 1; }
+}
+
+# The membership a ship brief records on its fixed `Delivers:` line, empty when
+# it carries none. bin/fm-spawn.sh checks it against the membership the dispatch
+# was given, exactly as it checks the delivery-contract line.
+fm_brief_delivers_line() {  # <file>
+  [ -f "$1" ] || return 0
+  sed -n 's/^Delivers: \(.*\)$/\1/p' "$1" | head -n 1
 }
 
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
@@ -232,14 +275,35 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+# The fixed line a chunk brief records its membership on, beside the delivery
+# contract, and the rules a worker delivering several items needs. It sits in
+# the Definition of done rather than under "## Captain's intent", because that
+# subsection is the captain's own words and the no-mistakes intent overlay
+# copies it verbatim.
+fm_dod_delivers_block() {  # <delivers-csv>
+  local members=${1-}
+  [ -n "$members" ] || return 0
+  cat <<EOF
+Delivers: $members
+This job delivers several backlog items as one piece of work, and each item's own ask is a slot under \`## Captain's intent\` above.
+Ship one pull request per coherent contract, not one per item and not one for everything: split when one part could need reverting without the rest, and keep together what one reviewer has to read as a whole.
+Ship those pull requests ONE AT A TIME: take a contract to green, report it, and wait for firstmate before starting the next on a branch freshly taken from the updated default branch.
+If you cannot deliver one of the items, do not silently drop it: append one status line naming it, \`working: undelivered=<id> <why>\`, and carry on with the rest. Firstmate returns it to the queue.
+
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id> [<delivers-csv>]
+  local mode=$1 id=$2 delivers=${3-} delivers_block=''
+  if [ -n "$delivers" ]; then
+    delivers_block=$(fm_dod_delivers_block "$delivers")$'\n'
+  fi
   case "$mode" in
     direct-PR)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+${delivers_block}This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -249,7 +313,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
+${delivers_block}This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
@@ -260,7 +324,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+${delivers_block}The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 

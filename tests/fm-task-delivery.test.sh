@@ -275,6 +275,53 @@ test_promote_requires_and_records_the_delivery_contract() {
 
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
+# Promotion is the other door into ship work: a scout that becomes a ship worker
+# never passes through the dispatch command, so without this it would be the way
+# around the grouping guard. A scout itself stays unguarded; the guard fires at
+# the moment the task stops being one.
+test_promotion_faces_the_grouping_guard() {
+  local home data out status
+  command -v tasks-axi >/dev/null 2>&1 || {
+    echo "skip: tasks-axi not found; promotion grouping guard not run"
+    return 0
+  }
+  home="$TMP_ROOT/promote-grouping/home"
+  data="$home/data"
+  mkdir -p "$home/state" "$home/config" "$data"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$data/backlog.md"
+  printf 'enforce\n' > "$home/config/grouping"
+  write_brief "$home" promote-g1
+  printf 'window=fm-promote-g1\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/promote-g1.meta"
+
+  tasks-axi add promote-g1 "the scout" --kind ship --repo app-web --file "$data/backlog.md" >/dev/null
+  tasks-axi add promote-sibling-g1 "a ready sibling" --kind ship --repo app-web --file "$data/backlog.md" >/dev/null
+  for id in promote-g1 promote-sibling-g1; do
+    FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$home/state" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-tasks-axi.sh" group "$id" blu-3156 >/dev/null \
+      || fail "fixture: could not key $id"
+  done
+
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" "$PROMOTE" promote-g1 --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  # Mutant: promote without the guard, which leaves the dispatch guard with a
+  # door beside it.
+  [ "$status" -ne 0 ] || fail "promotion started a ship worker beside a ready sibling: $out"
+  assert_contains "$out" "promote-sibling-g1" "the refusal did not name the sibling"
+  assert_grep 'kind=scout' "$home/state/promote-g1.meta" "the refused promotion still flipped the record"
+
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" "$PROMOTE" promote-g1 --mode no-mistakes --yolo off \
+    --apart-reason "the report's fix is unrelated to the sibling" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a recorded reason did not clear the promotion refusal: $out"
+  assert_grep 'kind=ship' "$home/state/promote-g1.meta" "the promotion did not take"
+  assert_grep "apart_reason=the report's fix is unrelated to the sibling" \
+    "$home/state/promote-g1.meta" "promotion did not record the reason"
+  pass "promotion faces the same grouping guard, and its recorded reason clears it"
+}
+
 test_promote_refuses_a_symlinked_task_record() {
   local home meta target original out status leftover
   home="$TMP_ROOT/promote-symlink/home"
@@ -889,6 +936,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promotion_faces_the_grouping_guard
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy

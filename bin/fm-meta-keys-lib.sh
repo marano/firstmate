@@ -57,11 +57,15 @@ FM_META_APPEND_ONLY_KEYS="decisions_reviewed decision_keys"
 #                     by bin/fm-tasks-axi.sh handback; not spawn-owned, so a
 #                     relaunch carries it forward (bin/fm-backlog-transition-lib.sh
 #                     MEMBERSHIP owns the contract)
+#   apart_reason      bin/fm-spawn.sh --apart-reason at first dispatch only: the
+#                     one line that cleared a grouping refusal, so a fleet
+#                     review can list every dispatch that went alone and why;
+#                     not spawn-owned, so a relaunch carries it forward
 #   first_spawn_epoch bin/fm-spawn.sh at first dispatch only, when the task
 #                     first took its local copy; not spawn-owned, so a relaunch
 #                     carries it forward; bin/fm-teardown.sh bounds the copy's
 #                     branch history by it
-FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery delivers first_spawn_epoch"
+FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery delivers first_spawn_epoch apart_reason"
 
 # The same lists as delimited lookup sets, built once so recognising a key
 # costs no process.
