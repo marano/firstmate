@@ -1578,7 +1578,7 @@ test_interruption_before_and_after_raw_commit() {
   printf 'done: interruption fixture\n' > "$state/task.status"
   append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
 
-  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=60 "$DRAIN" > "$before_out" &
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
   pid=$!
   i=0
   while [ "$i" -lt 100 ] && [ ! -e "$state/.wake-queue.lock" ]; do
