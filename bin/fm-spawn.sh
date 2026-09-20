@@ -3028,12 +3028,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     exit 1
   fi
   for SPAWN_MEMBER in "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}"; do
-    if [ -e "$STATE/$SPAWN_MEMBER.meta" ] || [ -L "$STATE/$SPAWN_MEMBER.meta" ] \
-       || [ -e "$STATE/$SPAWN_MEMBER.backlog-close" ] || [ -L "$STATE/$SPAWN_MEMBER.backlog-close" ]; then
-      echo "error: $SPAWN_MEMBER has its own worker record in this home, so $ID cannot also deliver it; refusing before creating its endpoint or local copy" >&2
-      exit 1
-    fi
-    if ! fm_backlog_member_dispatchable "$DATA" "$ID" "$SPAWN_MEMBER"; then
+    if ! fm_backlog_member_joinable "$DATA" "$STATE" "$ID" "$SPAWN_MEMBER"; then
       echo "error: $ID cannot deliver $SPAWN_MEMBER: $FM_BACKLOG_TRANSITION_ERROR; refusing before creating its endpoint or local copy" >&2
       exit 1
     fi

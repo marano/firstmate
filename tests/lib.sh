@@ -57,6 +57,12 @@ unset FM_TASK_ID
 # wake firstmate through it, so a case that wants those lines sets its own.
 unset FM_TASK_STATUS
 
+# Clear the grouping posture override. An operator shell that exports
+# FM_GROUPING=enforce to run its own fleet that way would otherwise make every
+# fixture dispatch under a posture the case never asked for; a case that
+# exercises the override sets it itself.
+unset FM_GROUPING
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that

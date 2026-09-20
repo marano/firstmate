@@ -767,15 +767,23 @@ fm_backlog_requeue() {  # <data-dir> <id> <reason>
 
 # MEMBERSHIP. A grouped dispatch is one worker delivering several backlog items
 # in one job. The dispatch unit is the task that owns the worker and its record;
-# the items it delivers are its members. Membership is recorded exactly once,
-# at dispatch, as `delivers=<id>[,<id>...]` in the unit's own task record
-# (bin/fm-spawn.sh --delivers), and it is the only membership source: nothing
-# here derives it from a brief's or a pull request's prose, which drifts. Spawn
+# the items it delivers are its members. Membership is recorded at dispatch as
+# `delivers=<id>[,<id>...]` in the unit's own task record (bin/fm-spawn.sh
+# --delivers) and changed afterwards only by `bin/fm-tasks-axi.sh handback`,
+# which removes a member, and `bin/fm-tasks-axi.sh join`, which adds one to a
+# live worker. It is the only membership source: nothing here derives it from a
+# brief's or a pull request's prose, which drifts. A chunk's PLAN - the members
+# a `chunk` recorded on the unit row before anyone was dispatched - is a
+# separate, earlier statement of intent kept in that row's own body
+# (bin/fm-grouping-lib.sh), never a second membership source. Spawn
 # moves every member In flight in the same commit as the unit, so neither a
 # later dispatch nor the ready count sees a member as waiting work while its
 # unit is under way. A member the worker hands back is removed from the record
 # by `bin/fm-tasks-axi.sh handback`, which also returns it to Queued with the
-# reason in its body. Teardown carries the remaining members into its pending
+# reason in its body; a sibling that becomes ready while the worker is still
+# live is added by `join`, which moves that row In flight before it records the
+# member, so an interruption strands a visible orphan rather than a member
+# recorded for a close it never earned. Teardown carries the remaining members into its pending
 # transition record (one `member=<id>` line each) and moves them with the unit:
 # a close closes every member with the unit's own completion link, and a
 # requeue returns every member to Queued. A member is therefore closed only by
@@ -873,6 +881,26 @@ fm_backlog_member_dispatchable() {  # <data-dir> <unit-id> <member>
   esac
   FM_BACKLOG_TRANSITION_ERROR="member $member is not dispatchable in state $FM_BACKLOG_ROW_STATE"
   return 1
+}
+
+# Can <member> be taken into <unit>'s membership right now? This is
+# fm_backlog_member_dispatchable plus the two records that prove the item is
+# nobody else's work in flight: its own worker record, and the pending close a
+# crashed cleanup leaves behind (a member joined after that marker was written
+# would never be closed by the replay). bin/fm-spawn.sh applies it at dispatch,
+# and bin/fm-tasks-axi.sh's chunk and join verbs apply the same one, so a member
+# accepted by one is accepted by all three.
+fm_backlog_member_joinable() {  # <data-dir> <state-dir> <unit-id> <member>
+  local data=$1 state=$2 unit=$3 member=$4
+  if [ -e "$state/$member.meta" ] || [ -L "$state/$member.meta" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$member has its own worker record in this home, so $unit cannot also deliver it"
+    return 1
+  fi
+  if [ -e "$state/$member.backlog-close" ] || [ -L "$state/$member.backlog-close" ]; then
+    FM_BACKLOG_TRANSITION_ERROR="$member has a pending backlog close in this home, so $unit cannot also deliver it"
+    return 1
+  fi
+  fm_backlog_member_dispatchable "$data" "$unit" "$member"
 }
 
 # Move every member In flight. A member already In flight is left there, so the

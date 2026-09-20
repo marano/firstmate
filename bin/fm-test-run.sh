@@ -376,7 +376,7 @@ family_for_basename() {
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
-    fm-backlog-atomicity.test.sh|\
+    fm-backlog-atomicity.test.sh|fm-grouping.test.sh|\
     fm-bootstrap.test.sh|fm-bootstrap-network-parallel.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-startup-network.test.sh|\
     fm-tangle-guard.test.sh|fm-update.test.sh)
@@ -905,6 +905,7 @@ tests/fm-fleet-sync.test.sh 39727
 tests/fm-gate-refuse.test.sh 6208
 tests/fm-gemini-harness.test.sh 1175
 tests/fm-gitignore-config.test.sh 64
+tests/fm-grouping.test.sh 54000
 tests/fm-gotmp.test.sh 1409
 tests/fm-grok-continuity-live-e2e.test.sh 72
 tests/fm-grok-stop-live-e2e.test.sh 73
