@@ -306,9 +306,76 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  term_and_reap "$pid"
   return 124
+}
+
+# term_until_exit <pid>: stop a process this shell started with SIGTERM and
+# return ITS exit status, for a caller that asserts on HOW it ended rather than
+# only that it is gone. Same lost-signal problem as term_and_reap below: one
+# SIGTERM is not enough on bash 5.2, where a trap action can fail to parse when
+# the signal lands mid command substitution. A process that survives every
+# resend inside the bound is killed and the caller FAILS by name, because
+# "killed after ignoring SIGTERM" is not evidence that an interruption worked.
+term_until_exit() {  # <pid>
+  local pid=$1 started=$SECONDS resend=${FM_TEST_REAP_RESEND_SECS:-10}
+  local bound=${FM_TEST_REAP_BOUND_SECS:-30} next elapsed status state
+  next=$resend
+  kill -TERM "$pid" 2>/dev/null || true
+  while is_live_non_zombie "$pid"; do
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -ge "$bound" ]; then
+      state=$(ps -o pid=,stat=,etime=,command= -p "$pid" 2>/dev/null || true)
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "process $pid ignored SIGTERM for ${bound}s and had to be killed, so it was never interrupted: ${state:-gone}"
+    fi
+    if [ "$elapsed" -ge "$next" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      next=$((next + resend))
+    fi
+    sleep 0.1
+  done
+  status=0
+  wait "$pid" 2>/dev/null || status=$?
+  return "$status"
+}
+
+# term_and_reap <pid>: stop a watcher (or any child) this shell started and reap
+# it, without ever waiting on it unboundedly.
+# One SIGTERM is not enough. Bash 5.2 - 5.2.21 is what CI's Ubuntu image ships -
+# can fail to run a trap action when the signal lands while the shell is
+# expanding a command substitution: it prints a spurious
+# "trap: line 2: unexpected EOF while looking for matching `)'" and carries on,
+# so bin/fm-watch.sh's `exit 1` TERM trap never runs and the watcher keeps
+# polling. A bare `kill; wait` then blocks until that watcher exits on its own,
+# which was forever in one CI shard and about 1000s in others. Bash 3.2 and 5.3
+# honor the signal, which is why no local run reproduced it.
+# So TERM is re-sent every FM_TEST_REAP_RESEND_SECS (default 10) while the
+# process lives - far past the one poll plus cleanup a watcher needs to act on
+# it, so a second TERM never interrupts a cleanup already under way - and past
+# FM_TEST_REAP_BOUND_SECS (default 30) the process is killed and the caller
+# fails naming it and what it was running, instead of going silent.
+term_and_reap() {  # <pid>
+  local pid=$1 started=$SECONDS resend=${FM_TEST_REAP_RESEND_SECS:-10}
+  local bound=${FM_TEST_REAP_BOUND_SECS:-30} next elapsed state
+  next=$resend
+  kill "$pid" 2>/dev/null || true
+  while is_live_non_zombie "$pid"; do
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -ge "$bound" ]; then
+      state=$(ps -o pid=,stat=,etime=,command= -p "$pid" 2>/dev/null || true)
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "process $pid did not exit within ${bound}s of repeated SIGTERM and was killed: ${state:-gone}"
+    fi
+    if [ "$elapsed" -ge "$next" ]; then
+      kill "$pid" 2>/dev/null || true
+      next=$((next + resend))
+    fi
+    sleep 0.1
+  done
+  wait "$pid" 2>/dev/null || true
 }
 
 is_live_non_zombie() {
