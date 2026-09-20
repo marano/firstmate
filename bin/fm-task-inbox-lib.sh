@@ -115,9 +115,15 @@
 #                              call with a steer queued behind it is healthy,
 #                              and alarming on it is what would make this wake
 #                              worthless. The CEILING is the failure being
-#                              answered: on 2026-09-20 the record went unread
-#                              for 51 minutes before a human noticed the lane,
-#                              and BUSY_TURN_MAX_SECS's hour would never have
+#                              answered: on 2026-09-20 a worker sat on a
+#                              blocking permission dialog for about 75
+#                              minutes, and the oldest instruction in its
+#                              steering inbox went unaccepted for 51 of them,
+#                              measured from that record's own write and
+#                              acknowledgement times (the other, written
+#                              later, waited 34). This bound gates that
+#                              per-instruction span, not the pane's dwell.
+#                              BUSY_TURN_MAX_SECS's hour would never have
 #                              fired at all. Being wrong is cheap in one
 #                              direction only, which is why the bound sits
 #                              nearer the floor than the middle: .escalated
