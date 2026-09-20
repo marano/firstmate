@@ -30,7 +30,7 @@ install_runner() {  # <destination-bin-dir-or-path>
     *) dir=$dest; dest="$dir/fm-test-run.sh" ;;
   esac
   cp "$RUNNER" "$dest"
-  cp "$ROOT/bin/fm-build-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/"
+  cp "$ROOT/bin/fm-build-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/"
 }
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
@@ -149,7 +149,6 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
-  : >"$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
@@ -487,7 +486,6 @@ test_changed_uses_bounded_automatic_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   for script in fm-backend-herdr-smoke.test.sh fm-daemon.test.sh fm-pi-watch-extension.test.sh; do
     cat >"$repo/tests/$script" <<'SH'
 #!/usr/bin/env bash
@@ -536,7 +534,7 @@ PY
   cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
-  [ "$1" -eq 900 ] || return 99
+  [ "$1" -eq 1800 ] || return 99
   return 124
 }
 SH
@@ -610,15 +608,15 @@ SH
 
 # A local verification round names the subjects it cares about. Exercise begin/end
 # markers from real fixture processes to prove that a plain list of script paths
-# gets bounded automatic scheduling without changing its per-script timeout
-# contract, so verifying several subjects is one bounded concurrent run rather
-# than a serial chain of separate `bash tests/X.test.sh` invocations.
+# gets bounded automatic scheduling, so verifying several subjects is one bounded
+# concurrent run rather than a serial chain of separate `bash tests/X.test.sh`
+# invocations. Its per-script bound is the runner-wide default, pinned by
+# test_default_per_script_bound_names_a_stall_and_moves_on.
 test_script_list_uses_bounded_automatic_concurrency() {
   local tmp repo script parallel_shape serial_shape mixed_shape expected_jobs
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  rm -f "$repo/bin/fm-timeout-lib.sh"
   # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
   # fm-backend-orca is not, so it must still land in the serial tail.
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
@@ -669,14 +667,8 @@ assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
 assert serial["selection"].split(";")[-1] == "jobs=1"
 PYJSON
 
-  (cd "$repo" && bin/fm-test-run.sh tests/fm-backend-orca.test.sh) \
-    >"$tmp/named.out" 2>"$tmp/named.err" \
-    || fail "a named script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
-  grep -Eq '^FM_TEST_END .+ tests/fm-backend-orca\.test\.sh exit=0 ' "$tmp/named.out" \
-    || fail "a named script did not run without an automatic bound: $(cat "$tmp/named.out")"
-
   rm -rf "$tmp"
-  pass "a plain script list defaults to bounded automatic concurrency without an automatic timeout"
+  pass "a plain script list defaults to bounded automatic concurrency"
 }
 
 test_family_proofs_run_in_separate_concurrent_phases() {
@@ -1514,6 +1506,112 @@ SH
   pass "--per-script-timeout-secs turns a hung script into a bounded failure"
 }
 
+# A caller that names no bound still gets one. A stalled exec with no bound is
+# indistinguishable from a slow suite from inside the run: a blocked fixture once
+# sat at 0% CPU for 18 minutes with nothing on its output, and the only evidence
+# came from outside the worktree. The stub stands in for a script whose exec
+# never returns, so the case proves which bound the runner asked for and what it
+# does with a script that outran it, without spending that bound.
+test_default_per_script_bound_names_a_stall_and_moves_on() {
+  local tmp repo stall after rc mode
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-default-bound.XXXXXX")
+  repo="$tmp/repo"
+  stall=tests/fm-stall-fixture.test.sh
+  after=tests/fm-after-stall-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  install_runner "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  printf '%s\n' "$1" >>"$FM_TIMED_BOUNDS"
+  case " $* " in
+    *fm-stall-fixture*) return 124 ;;
+  esac
+  shift
+  "$@"
+}
+SH
+  cat >"$repo/$stall" <<'SH'
+#!/usr/bin/env bash
+echo "ok - the stalled fixture ran with no bound"
+SH
+  cat >"$repo/$after" <<'SH'
+#!/usr/bin/env bash
+echo "ok - the script after the stall still ran"
+SH
+  chmod +x "$repo/bin/fm-test-run.sh" "$repo/$stall" "$repo/$after"
+
+  for mode in scripts all; do
+    : >"$tmp/bounds"
+    set +e
+    if [ "$mode" = scripts ]; then
+      (cd "$repo" && FM_TIMED_BOUNDS="$tmp/bounds" bin/fm-test-run.sh --jobs 1 "$stall" "$after") \
+        >"$tmp/out" 2>"$tmp/err"
+    else
+      (cd "$repo" && FM_TIMED_BOUNDS="$tmp/bounds" bin/fm-test-run.sh --all) \
+        >"$tmp/out" 2>"$tmp/err"
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || fail "$mode: a stalled script under the default bound must fail the run, got $rc: $(cat "$tmp/out" "$tmp/err")"
+    grep -Eq "^FM_TEST_END .+ $stall exit=124 " "$tmp/out" \
+      || fail "$mode: the default bound did not end the stalled script: $(cat "$tmp/out")"
+    grep -Fxq "not ok - $stall exceeded the per-script bound of 1800s and was terminated" "$tmp/out" \
+      || fail "$mode: the timeout did not name the script and the bound it exceeded: $(cat "$tmp/out")"
+    grep -Eq "^FM_TEST_END .+ $after exit=0 " "$tmp/out" \
+      || fail "$mode: the run did not go on to the script after the stall: $(cat "$tmp/out")"
+    [ "$(sort -u "$tmp/bounds")" = 1800 ] \
+      || fail "$mode: the runner did not apply the 1800s default to every script: $(cat "$tmp/bounds")"
+  done
+
+  # An explicit 0 is how a caller whose own cap is its tripwire opts out.
+  : >"$tmp/bounds"
+  (cd "$repo" && FM_TIMED_BOUNDS="$tmp/bounds" bin/fm-test-run.sh --jobs 1 \
+    --per-script-timeout-secs 0 "$stall") >"$tmp/out" 2>"$tmp/err" \
+    || fail "an explicit 0 did not run the script unbounded: $(cat "$tmp/out" "$tmp/err")"
+  [ ! -s "$tmp/bounds" ] || fail "an explicit 0 still bounded the script: $(cat "$tmp/bounds")"
+  grep -Fq "ok - the stalled fixture ran with no bound" "$tmp/out" \
+    || fail "an explicit 0 did not run the script itself: $(cat "$tmp/out")"
+
+  rm -rf "$tmp"
+  pass "a run that names no bound ends a stalled script at the 1800s default, names it, and moves on"
+}
+
+# Under a bound, a script killed by a signal must still fail the run. The perl
+# mechanism in bin/fm-timeout-lib.sh reports a signal death as 0, so the runner
+# never hands it the script directly; a macOS host without GNU timeout uses perl.
+test_bounded_script_killed_by_a_signal_still_fails() {
+  local tmp repo killed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  install_runner "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  # Two individually proven scripts, so the bounded run takes the concurrent
+  # path that captures output instead of streaming it.
+  killed=tests/fm-cd-pretool-check.test.sh
+  cat >"$repo/$killed" <<'SH'
+#!/usr/bin/env bash
+echo "ok - about to be killed"
+kill -KILL $$
+SH
+  cat >"$repo/tests/fm-pr-merge.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - companion"
+SH
+  chmod +x "$repo/bin/fm-test-run.sh" "$repo/$killed" "$repo/tests/fm-pr-merge.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --jobs 2 --per-script-timeout-secs 60 \
+    "$killed" tests/fm-pr-merge.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a bounded script killed by a signal passed the run (rc=$rc, mechanism $(bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")): $(cat "$tmp/out")"
+  grep -Eq "^FM_TEST_END .+ $killed exit=137 " "$tmp/out" \
+    || fail "a bounded script killed by SIGKILL was not recorded as exit 137: $(cat "$tmp/out")"
+  rm -rf "$tmp"
+  pass "a bounded script killed by a signal is recorded as that signal, not as a pass"
+}
+
 # The duration regression this guard exists for: a suite whose scripts are all
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
@@ -2006,6 +2104,8 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_default_per_script_bound_names_a_stall_and_moves_on
+test_bounded_script_killed_by_a_signal_still_fails
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout

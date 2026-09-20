@@ -139,9 +139,15 @@ done < <(CI=true "$ROOT/bin/fm-lint.sh" --list-files)
 # --require-ok-count keeps exact case counts: exit status alone cannot see a
 # script that stops printing cases while still exiting 0. A per-script bound
 # well clear of the slowest member turns a HUNG script into a named failure
-# instead of an unattributed job cancellation at the cap.
+# instead of an unattributed job cancellation at the cap. The slowest script
+# measured is tests/fm-bearings-snapshot.test.sh: 321.8s in CI (max over 96
+# recent macos-stock-bash job logs) and 197.8s in a full local lane run on
+# 2026-09-19. 1000s is 3.1x over the slowest CI script and still well under the
+# job's 30-minute cap, so a hung script fails by name rather than the job being
+# cancelled with no verdict.
+LANE_SCRIPT_TIMEOUT_SECS=1000
 run_args=(--lane stock-bash
-  --per-script-timeout-secs 600
+  --per-script-timeout-secs "$LANE_SCRIPT_TIMEOUT_SECS"
   --require-ok-count tests/fm-fleet-snapshot-view.test.sh=21
   --require-ok-count tests/fm-bearings-snapshot.test.sh=59)
 [ -z "$JSON" ] || run_args+=(--json "$JSON")
@@ -150,8 +156,15 @@ run_args=(--lane stock-bash
 # The public-followup file is cost-excluded from the lane, but this lane already
 # covered ONE test inside it, so that regression is retained by name rather than
 # dropped with the file.
-pf_output=$("$ROOT/bin/fm-build-lock.sh" -- env FM_TEST_ONLY="$PF_ONLY" bash "$PF_TEST")
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+pf_status=0
+pf_output=$(fm_run_timed "$LANE_SCRIPT_TIMEOUT_SECS" "$ROOT/bin/fm-build-lock.sh" -- env FM_TEST_ONLY="$PF_ONLY" bash "$PF_TEST") || pf_status=$?
 printf '%s\n' "$pf_output"
+if [ "$pf_status" -eq 124 ]; then
+  lane_error "$PF_TEST ($PF_ONLY) exceeded its ${LANE_SCRIPT_TIMEOUT_SECS}s bound"
+  exit 1
+fi
 pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
 [ "$pf_count" -eq 1 ] || {
   lane_error "expected 1 public-followup bash 3.2 register regression, got $pf_count"

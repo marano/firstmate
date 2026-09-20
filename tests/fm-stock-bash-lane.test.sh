@@ -21,6 +21,7 @@ make_fixture() {  # <name>
   local fx="$TMP_ROOT/$1"
   mkdir -p "$fx/bin" "$fx/tests" "$fx/log" "$fx/path"
   cp "$LANE" "$fx/bin/fm-stock-bash-lane.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$fx/bin/fm-timeout-lib.sh"
   chmod +x "$fx/bin/fm-stock-bash-lane.sh"
 
   cat >"$fx/bin/fm-test-run.sh" <<'EOF'
@@ -110,7 +111,7 @@ test_run_executes_the_runner_lane_under_stock_bash() {
   assert_equals "--lane
 stock-bash
 --per-script-timeout-secs
-600
+1000
 --require-ok-count
 tests/fm-fleet-snapshot-view.test.sh=21
 --require-ok-count

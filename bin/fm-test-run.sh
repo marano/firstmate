@@ -80,11 +80,15 @@
 #                   1 (serial) except for plain --changed and a plain list of
 #                   script paths, which use the bounded automatic scheduler.
 #   --per-script-timeout-secs N
-#                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   terminate a script that runs longer than N seconds, record
+#                   it as exit 124, print a `not ok` line naming the script and
+#                   the bound it exceeded, and go on to the remaining scripts.
+#                   Every executing mode defaults to
+#                   DEFAULT_PER_SCRIPT_TIMEOUT_SECS below when this is not
+#                   given, so a stalled script is a named, bounded failure
+#                   rather than a silent unbounded run. 0 disables the bound;
+#                   the CI lanes pass it explicitly because their job caps are
+#                   their hang tripwire. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -211,17 +215,24 @@ JOBS=1
 JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
-PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
-# failure instead of an unbounded suite, which is the shape that silently
-# outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+PER_SCRIPT_TIMEOUT_SECS=
+PER_SCRIPT_TIMEOUT_GIVEN=0
+# Bound applied to every executing mode whose caller names none, derived from
+# measured healthy runtimes with margin rather than picked. The slowest behavior
+# script is tests/fm-watch-triage.test.sh: 588-723s across 28 CI serial runs on
+# 2026-09-19, and 788s on a loaded local machine. 1800s leaves more than 2x
+# headroom over that, so it cannot red-flag a healthy slow script, and it still
+# ends a stall that would otherwise run until someone notices - a blocked exec
+# once sat at 0% CPU for 18 minutes with nothing on its output. It is a guard,
+# not a speed control: a HUNG script becomes a bounded, named failure instead
+# of an unbounded suite, which is the shape that silently outruns a caller's
+# invocation budget.
+#
+# Who reaches this default: local and CI runs that name no bound get 1800s. The
+# CI portable-parallel, portable-serial and real-herdr lanes pass an explicit 0
+# because their job caps are their hang tripwire. The macOS stock-bash lane
+# passes its own bound in bin/fm-stock-bash-lane.sh.
+DEFAULT_PER_SCRIPT_TIMEOUT_SECS=1800
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -2185,10 +2196,12 @@ while [ "$#" -gt 0 ]; do
     --per-script-timeout-secs)
       [ "$#" -gt 1 ] || die "--per-script-timeout-secs requires a whole number of seconds"
       PER_SCRIPT_TIMEOUT_SECS=$2
+      PER_SCRIPT_TIMEOUT_GIVEN=1
       shift 2
       ;;
     --per-script-timeout-secs=*)
       PER_SCRIPT_TIMEOUT_SECS=${1#--per-script-timeout-secs=}
+      PER_SCRIPT_TIMEOUT_GIVEN=1
       shift
       ;;
     --list)
@@ -2334,6 +2347,7 @@ if [ -n "$MAX_WALL_MS" ]; then
   [ "$MAX_WALL_MS" -gt 0 ] || die "--max-wall-ms requires a positive integer"
 fi
 
+[ "$PER_SCRIPT_TIMEOUT_GIVEN" -eq 1 ] || PER_SCRIPT_TIMEOUT_SECS=$DEFAULT_PER_SCRIPT_TIMEOUT_SECS
 case "$PER_SCRIPT_TIMEOUT_SECS" in
   ''|*[!0-9]*) die "--per-script-timeout-secs requires a whole number of seconds (0 disables)" ;;
 esac
@@ -2463,9 +2477,6 @@ done
 # and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
 if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
@@ -2774,7 +2785,12 @@ run_script_bounded() {  # <script> <out> <stream> <id>
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    # The wrapper bash turns a script killed by a signal into an ordinary
+    # 128+signal exit, as the streaming form above already does, because the
+    # perl mechanism in bin/fm-timeout-lib.sh reports a signal death as 0.
+    # shellcheck disable=SC2016
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c 'bash "$1"; exit "$?"' _ "$script" \
+      >"$out" 2>&1
     rc=$?
   else
     bash "$script" >"$out" 2>&1
