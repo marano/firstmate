@@ -69,10 +69,14 @@ FM_GROUPING_SOLO_KEY="solo"
 FM_GROUPING_POSTURE=off
 FM_GROUPING_MEMBER_CAP=
 FM_GROUPING_KEY=
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_GROUPING_REPO=
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_GROUPING_READY_SIBLINGS=
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_GROUPING_LIVE_SIBLINGS=
 FM_GROUPING_ROWS=
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_GROUPING_ERROR=
 
 # The posture of <config-dir>: one line holding `off`, `warn`, or `enforce`,
@@ -129,8 +133,10 @@ fm_grouping_posture() {  # <config-dir>
       FM_GROUPING_ERROR="grouping posture takes at most a posture and a member cap ($source_label)"
       return 1
     fi
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_GROUPING_MEMBER_CAP=$cap
   fi
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_POSTURE=$posture
 }
 
@@ -260,6 +266,7 @@ fm_grouping_repo_of_row() {  # <data-dir> <id>
   case "$value" in
     '-'|'"-"'|none) value= ;;
   esac
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_REPO=$value
 }
 
@@ -361,6 +368,7 @@ fm_grouping_ready_siblings() {  # <data-dir> <state-dir> <unit> <repo> <key>
   done <<EOF
 $rows
 EOF
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_READY_SIBLINGS=$found
 }
 
@@ -372,6 +380,7 @@ EOF
 fm_grouping_live_siblings() {  # <data-dir> <state-dir> <unit> <repo> <key>
   local data=$1 state=$2 unit=$3 repo=$4 key=$5 id rows status found='' owner meta
   FM_GROUPING_LIVE_SIBLINGS=
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_ERROR=
   fm_grouping_relatable "$repo" "$key" || return 0
   fm_grouping_repo_rows "$data" "$state" "$repo" in_flight "$unit"
@@ -415,6 +424,7 @@ fm_grouping_live_siblings() {  # <data-dir> <state-dir> <unit> <repo> <key>
   done <<EOF
 $rows
 EOF
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_GROUPING_LIVE_SIBLINGS=$found
 }
 

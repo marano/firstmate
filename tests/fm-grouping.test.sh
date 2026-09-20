@@ -39,8 +39,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WRAPPER="$ROOT/bin/fm-tasks-axi.sh"
-SPAWN="$ROOT/bin/fm-spawn.sh"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grouping)
 
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND FM_HOME FM_ROOT_OVERRIDE \
