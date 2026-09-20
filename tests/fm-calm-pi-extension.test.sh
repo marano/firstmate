@@ -2285,6 +2285,14 @@ TS
   # because the expansion is ever slow, but so that a runner slow enough to be
   # the real cause cannot be misreported as one of the two failures below.
   ct_bytes_before=$(wc -c <"$reload_stream" | tr -d ' ')
+  i=0
+  while [ "$i" -lt 20 ]; do
+    sleep 0.3
+    ct_bytes_now=$(wc -c <"$reload_stream" | tr -d ' ')
+    [ "$ct_bytes_now" -eq "$ct_bytes_before" ] && break
+    ct_bytes_before=$ct_bytes_now
+    i=$((i + 1))
+  done
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   if ! wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" 400; then
     ct_bytes_after=$(wc -c <"$reload_stream" | tr -d ' ')
@@ -2301,7 +2309,7 @@ TS
     sleep 0.05
     i=$((i + 1))
   done
-  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
+  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking did not hide the thinking row again"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
