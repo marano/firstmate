@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Behavioral tests for bin/fm-ask.sh, the guards behind the captain-invoked /ask
 # skill: it refuses in the away posture, says plainly when nothing is open,
-# refuses to present a new call while an earlier answer is unrecorded, never
-# presents a decision that is firstmate's own, keeps the picker behind every
-# queued wake, and leaves the plain-text default path untouched when /ask is
-# never invoked.
+# spends one picker call per invocation and refuses the second, batches the
+# calls that fit into that single call, refuses to present again while an
+# earlier answer is unrecorded, never presents a decision that is firstmate's
+# own, keeps the picker behind every queued wake, and leaves the plain-text
+# default path untouched when /ask is never invoked.
+#
+# The one-picker-call rule has two halves that fail for different reasons, so
+# each has its own regression here: the skill's declared contract is what the
+# agent reads, and this script's refusal is what holds when the agent forgets.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ASK="$ROOT/bin/fm-ask.sh"
+SKILL="$ROOT/.agents/skills/ask/SKILL.md"
 TMP_ROOT=$(fm_test_tmproot fm-ask)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
@@ -106,7 +112,133 @@ test_empty_inventory_says_so_plainly() {
   pass "presents nothing and says so plainly when the inventory is empty"
 }
 
-test_answer_recorded_before_next_presented() {
+# The skill's text is what the agent acts on, so the contract it declares to the
+# agent must say one picker call per invocation, and must be the number this
+# script actually enforces. Reds if the skill is rewritten to permit a second.
+test_skill_contract_permits_one_picker_call_per_invocation() {
+  local home contract declared_calls declared_max ids i
+  home=$(make_home skill-contract)
+  contract="$home/contract.json"
+  awk '
+    /^```json ask-presentation-contract-v1$/ { capture = 1; next }
+    capture && /^```$/ { exit }
+    capture { print }
+  ' "$SKILL" > "$contract"
+  [ -s "$contract" ] || fail "the ask skill declares no ask-presentation-contract-v1 block"
+  jq -e '.' "$contract" >/dev/null 2>&1 || fail "the ask skill's presentation contract is not valid JSON"
+
+  declared_calls=$(jq -r '.picker_calls_per_invocation' "$contract")
+  assert_equals "1" "$declared_calls" \
+    "the ask skill must declare exactly one picker call per invocation; a second one wedges supervision"
+  declared_max=$(jq -r '.questions_per_picker_call_max' "$contract")
+  case "$declared_max" in
+    ''|*[!0-9]*|0) fail "the ask skill must declare a positive question cap, got '$declared_max'" ;;
+  esac
+
+  # The script must enforce the same two numbers, or the agent's contract and
+  # the guard behind it have drifted.
+  ids=
+  for ((i = 1; i <= declared_max + 1; i++)); do
+    hold_call "$home" "sample-$i" "Choose $i"
+    ids="${ids:+$ids }sample-$i"
+  done
+  # shellcheck disable=SC2086 # One id per presented call, deliberately split.
+  ask "$home" present $ids >/dev/null 2> "$home/over.err"
+  expect_code 8 "$?" "presenting one more call than the skill's declared cap"
+  assert_grep "at most $declared_max" "$home/over.err" \
+    "the refusal must name the same cap the skill declares"
+
+  ids=${ids% sample-$((declared_max + 1))}
+  # shellcheck disable=SC2086 # One id per presented call, deliberately split.
+  ask "$home" present $ids >/dev/null 2> "$home/fit.err" \
+    || fail "the skill's declared cap did not fit in one picker call: $(cat "$home/fit.err")"
+  ask "$home" present "sample-$((declared_max + 1))" >/dev/null 2>&1
+  expect_code 7 "$?" \
+    "the script allowed picker call number 2 while the skill declares $declared_calls per invocation"
+  pass "the skill declares one picker call per invocation and the script enforces it"
+}
+
+# The script's own half: once this invocation has opened its picker call,
+# nothing short of a new invocation opens another - not recording every answer,
+# and not a dismissal. Reds if the present-and-open cycle can run twice.
+test_second_present_and_open_cycle_refused() {
+  local home rc
+  home=$(make_home one-cycle)
+  hold_call "$home" sample-route "Choose route"
+  hold_call "$home" sample-cache "Choose cache"
+  hold_call "$home" sample-name "Choose name"
+
+  ask "$home" inventory >/dev/null || fail "the invocation's inventory failed"
+  ask "$home" present sample-route >/dev/null || fail "the first picker call could not be presented"
+  assert_present "$home/state/.ask-round" "opening the picker did not spend the invocation's round"
+
+  # Recording the answer is exactly what the old loop did next; it must not
+  # buy a second call.
+  answer_call "$home" sample-route "North."
+  ask "$home" present sample-cache > "$home/second.out" 2> "$home/second.err"
+  rc=$?
+  expect_code 7 "$rc" "opening a second picker call after recording the first answer"
+  assert_grep "already opened its picker call" "$home/second.err" \
+    "the refusal must say this invocation's picker call is spent"
+  assert_grep "plain text" "$home/second.err" \
+    "the refusal must route the rest to plain text"
+  assert_grep "/ask again" "$home/second.err" \
+    "the refusal must say the captain can type /ask again for another round"
+  assert_no_grep "sample-cache" "$home/state/.ask-presented" \
+    "a refused second picker call was recorded as presented"
+
+  # A dismissed picker does not earn another one either.
+  ask "$home" dismissed sample-route >/dev/null 2>&1
+  ask "$home" present sample-cache >/dev/null 2>&1
+  expect_code 7 "$?" "opening a second picker call after dismissing the first"
+
+  # Only a new invocation, which starts at the inventory, opens another round.
+  ask "$home" inventory >/dev/null || fail "the next invocation's inventory failed"
+  assert_absent "$home/state/.ask-round" "a new invocation did not clear the spent round"
+  ask "$home" present sample-cache >/dev/null 2> "$home/next.err" \
+    || fail "a new invocation could not open its own picker call: $(cat "$home/next.err")"
+  pass "one invocation spends one picker call and the second is refused"
+}
+
+# The rule the captain restated: several calls go into ONE picker call
+# together. Batching is required, and must never be mistaken for a second call.
+test_calls_are_batched_into_one_picker_call() {
+  local home
+  home=$(make_home batched)
+  hold_call "$home" sample-route "Choose route"
+  hold_call "$home" sample-cache "Choose cache"
+  hold_call "$home" sample-name "Choose name"
+
+  ask "$home" present sample-route sample-cache sample-name > "$home/batch.out" 2> "$home/batch.err" \
+    || fail "several calls could not be presented together: $(cat "$home/batch.err")"
+  assert_grep "sample-route sample-cache sample-name" "$home/batch.out" \
+    "the batched presentation must name every call it recorded"
+  assert_grep "sample-route" "$home/state/.ask-presented" "the first batched call was not recorded"
+  assert_grep "sample-name" "$home/state/.ask-presented" "the last batched call was not recorded"
+
+  ask "$home" inventory > "$home/inv.out" 2>&1
+  assert_grep "PRESENTED AND NOT YET RECORDED: sample-route sample-cache sample-name" "$home/inv.out" \
+    "the inventory must surface every unrecorded call from the batch"
+
+  # A dismissal clears exactly the calls it names, out of the whole batch.
+  ask "$home" dismissed sample-route sample-name >/dev/null \
+    || fail "could not dismiss two calls of the batch"
+  assert_grep "sample-cache" "$home/state/.ask-presented" \
+    "dismissing two of three calls dropped the one still outstanding"
+  assert_no_grep "sample-route" "$home/state/.ask-presented" \
+    "a dismissed call stayed outstanding"
+  ask "$home" dismissed sample-route >/dev/null 2>&1
+  expect_code 2 "$?" "dismissing a call that is no longer outstanding"
+
+  # Asking one decision twice in a single call is a mistake, not a batch.
+  ask "$home" inventory >/dev/null
+  ask "$home" present sample-route sample-route >/dev/null 2> "$home/dup.err"
+  expect_code 2 "$?" "naming the same call twice in one picker call"
+  assert_grep "named twice" "$home/dup.err" "the refusal must say the call was named twice"
+  pass "several calls are presented together as one picker call"
+}
+
+test_unrecorded_batch_blocks_the_next_invocation() {
   local home rc
   home=$(make_home record-first)
   hold_call "$home" sample-route "Choose route"
@@ -114,9 +246,10 @@ test_answer_recorded_before_next_presented() {
   hold_call "$home" sample-name "Choose name"
 
   ask "$home" present sample-route >/dev/null || fail "the first live call could not be presented"
+  ask "$home" inventory >/dev/null || fail "the next invocation's inventory failed"
   ask "$home" present sample-cache > "$home/next.out" 2> "$home/next.err"
   rc=$?
-  expect_code 5 "$rc" "presenting the next call before the first answer is recorded"
+  expect_code 5 "$rc" "presenting again before the earlier answer is recorded"
   assert_grep "sample-route" "$home/next.err" "the refusal must name the unrecorded call"
   ask "$home" inventory > "$home/inv.out" 2>&1
   assert_grep "PRESENTED AND NOT YET RECORDED: sample-route" "$home/inv.out" \
@@ -124,23 +257,27 @@ test_answer_recorded_before_next_presented() {
 
   answer_call "$home" sample-route "North."
   ask "$home" present sample-cache >/dev/null 2> "$home/after.err" \
-    || fail "a recorded answer did not free the next presentation: $(cat "$home/after.err")"
+    || fail "a recorded answer did not free the next invocation: $(cat "$home/after.err")"
 
   # "Later" is an answer: a dated re-hold takes the call out of the live set.
   in_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold sample-cache \
     --reason "captain said later" --until 2099-01-01 >/dev/null \
     || fail "could not defer the call"
-  ask "$home" present sample-name >/dev/null 2>&1 || fail "a deferred call still blocked the next presentation"
+  ask "$home" inventory >/dev/null
+  ask "$home" present sample-name >/dev/null 2>&1 || fail "a deferred call still blocked the next invocation"
 
   # A dismissed picker frees the slot only through the explicit record.
+  ask "$home" inventory >/dev/null
   ask "$home" present sample-cache >/dev/null 2>&1
   expect_code 6 "$?" "presenting a call the captain deferred"
   hold_call "$home" sample-last "Choose last"
+  ask "$home" inventory >/dev/null
   ask "$home" present sample-last >/dev/null 2>&1
   expect_code 5 "$?" "presenting past an unanswered, undismissed call"
   ask "$home" dismissed sample-name >/dev/null || fail "could not record a dismissed picker"
-  ask "$home" present sample-last >/dev/null 2>&1 || fail "a dismissed presentation still blocked the next one"
-  pass "an answered decision is recorded before the next is presented"
+  ask "$home" inventory >/dev/null
+  ask "$home" present sample-last >/dev/null 2>&1 || fail "a dismissed presentation still blocked the next invocation"
+  pass "an unrecorded answer is recorded before anything is presented again"
 }
 
 test_firstmate_own_decision_never_presented() {
@@ -210,7 +347,10 @@ test_plain_text_default_unaffected_without_ask() {
 
 test_refuses_while_away_record_exists
 test_empty_inventory_says_so_plainly
-test_answer_recorded_before_next_presented
+test_skill_contract_permits_one_picker_call_per_invocation
+test_second_present_and_open_cycle_refused
+test_calls_are_batched_into_one_picker_call
+test_unrecorded_batch_blocks_the_next_invocation
 test_firstmate_own_decision_never_presented
 test_queued_wakes_block_the_picker
 test_plain_text_default_unaffected_without_ask
