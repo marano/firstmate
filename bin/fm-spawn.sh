@@ -2772,11 +2772,13 @@ if [ "$KIND" = ship ]; then
     if [ -z "$BRIEF_DELIVERS" ] && [ -n "$DELIVERS_ARG" ]; then
       echo "warning: $BRIEF records no Delivers line (scaffolded before chunk briefs recorded one); launching on the explicit --delivers $DELIVERS_ARG - confirm the brief carries each delivered item's own ask" >&2
     fi
-    if BRIEF_EMPTY_SLOTS=$(fm_brief_empty_intent_slots "$BRIEF"); then
-      :
-    else
-      echo "error: $BRIEF leaves the intent slot empty for: $BRIEF_EMPTY_SLOTS; fill each delivered item's own ask before dispatching, since the reviewer reads that slot as that item's acceptance criteria" >&2
-      exit 1
+    if [ -n "$BRIEF_DELIVERS" ]; then
+      if BRIEF_EMPTY_SLOTS=$(fm_brief_empty_intent_slots "$BRIEF"); then
+        :
+      else
+        echo "error: $BRIEF leaves the intent slot empty for: $BRIEF_EMPTY_SLOTS; fill each delivered item's own ask before dispatching, since the reviewer reads that slot as that item's acceptance criteria" >&2
+        exit 1
+      fi
     fi
   fi
 
