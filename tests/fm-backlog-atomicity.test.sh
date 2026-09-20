@@ -23,6 +23,16 @@
 # deliberately not asserted here.
 set -u
 
+# Outer guard for a call that must not hang: GNU timeout when present, else a
+# perl alarm (stock macOS ships neither timeout nor gtimeout). Both exit 124
+# when the bound fires; -k is accepted and ignored on the perl path.
+outer_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; return; fi
+  [ "$1" = "-k" ] && shift 2
+  local secs=$1; shift
+  perl -e '$s=shift; $SIG{ALRM}=sub{kill "KILL",$p;exit 124}; $p=fork; if(!$p){exec @ARGV;exit 127} alarm $s; waitpid $p,0; exit($?>>8)' "$secs" "$@"
+}
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -321,7 +331,7 @@ if [ "\${1:-}" = start ]; then
     kill -TERM "\$spawn_pid"
     exit 0
   fi
-  sleep 300
+  exec sleep 300
 fi
 exec "$real" "\$@"
 SH
@@ -1508,7 +1518,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    outer_timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
@@ -2805,7 +2815,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    outer_timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \
