@@ -1919,7 +1919,23 @@ fm_super_main() {
     wedge_alarm_stop_active_notifier
     escalate_retain_at_shutdown "$STATE"
     if [ -n "${WATCHER_PID:-}" ]; then
+      # Forced-stop backstop. A trapped SIGTERM is not always delivered to its
+      # trap: on bash 5.2 the trap action can fail to parse when the signal
+      # lands while the shell is expanding a command substitution, and the
+      # process then carries on as if nothing arrived. Waiting on it forever
+      # would hang this shutdown and leave a polling watcher behind, so wait a
+      # bounded while for the ordinary exit and kill what outlives it.
       kill "$WATCHER_PID" 2>/dev/null || true
+      local stop_ticks=0
+      while kill -0 "$WATCHER_PID" 2>/dev/null \
+        && [ "$stop_ticks" -lt "${FM_DAEMON_WATCHER_STOP_TICKS:-100}" ]; do
+        sleep 0.1
+        stop_ticks=$((stop_ticks + 1))
+      done
+      if kill -0 "$WATCHER_PID" 2>/dev/null; then
+        log "watcher $WATCHER_PID did not exit on SIGTERM; killing it"
+        kill -KILL "$WATCHER_PID" 2>/dev/null || true
+      fi
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then

@@ -1277,8 +1277,11 @@ SH
       || fail "$backend watcher did not complete the direct custom check"
     child_pid=$(cat "$child_pid_file")
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
+    # One SIGTERM can be lost on bash 5.2 (a trap action that fails to parse
+    # mid command substitution), so re-send it while the watcher lives.
     i=0
-    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
+    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 500 ]; do
+      [ $((i % 50)) -ne 49 ] || kill -TERM "$watcher_pid" 2>/dev/null || true
       sleep 0.02
       i=$((i + 1))
     done

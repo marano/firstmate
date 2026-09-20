@@ -1513,6 +1513,60 @@ SH
   pass "wake drain: recovery acknowledgement failures are explicit and retryable"
 }
 
+# --- the interruption helper itself ----------------------------------------
+# The case below concludes that an interrupted drain does not report success, so
+# its signal has to actually land: CI lost one to the bash 5.2 trap-parse defect
+# and read the drain's ordinary exit 0 as a failed interruption. Hardening that
+# may only make the signal land - it may never turn "the process ignored every
+# signal" into a pass - so both halves are pinned here.
+
+# A stand-in that swallows its first SIGTERM and exits 143 on the second, as a
+# process whose first trap was lost would.
+test_interruption_resends_a_lost_signal() {
+  local dir pid rc=0 i=0
+  dir="$TMP_ROOT/interruption-lost-signal"
+  mkdir -p "$dir"
+  # shellcheck disable=SC2016 # Expanded by the child shell.
+  bash -c 'seen=0
+    trap '"'"'seen=$((seen + 1)); [ "$seen" -lt 2 ] || exit 143'"'"' TERM
+    : > "$1/ready"
+    while :; do sleep 0.1; done' _ "$dir" &
+  pid=$!
+  while [ ! -e "$dir/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/ready" ] || { kill -KILL "$pid" 2>/dev/null; fail "the lost-signal stand-in never started"; }
+  set +e
+  FM_TEST_REAP_RESEND_SECS=1 term_until_exit "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] \
+    || fail "an interruption whose first signal was lost did not end in the process's own signal exit (rc=$rc)"
+  pass "interruption: a lost first signal is re-sent, and the status the caller asserts on is the process's own"
+}
+
+# The other half: a process that ignores every signal must never be reported as
+# interrupted, however it is finally stopped.
+test_interruption_fails_when_every_signal_is_ignored() {
+  local dir pid rc=0 i=0
+  dir="$TMP_ROOT/interruption-ignored-signal"
+  mkdir -p "$dir"
+  # shellcheck disable=SC2016 # Expanded by the child shell.
+  bash -c 'trap "" TERM; : > "$1/ready"; while :; do sleep 0.1; done' _ "$dir" &
+  pid=$!
+  while [ ! -e "$dir/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/ready" ] || { kill -KILL "$pid" 2>/dev/null; fail "the signal-ignoring stand-in never started"; }
+  set +e
+  ( FM_TEST_REAP_RESEND_SECS=1 FM_TEST_REAP_BOUND_SECS=3 term_until_exit "$pid" ) 2> "$dir/err"
+  rc=$?
+  set -e
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -ne 0 ] \
+    || fail "a process that ignored every SIGTERM was reported as an interruption that worked"
+  grep -Fq "not ok - process $pid ignored SIGTERM for 3s" "$dir/err" \
+    || fail "the refusal did not name the process that ignored every signal: $(cat "$dir/err")"
+  pass "interruption: a process that ignores every signal fails by name instead of passing as interrupted"
+}
+
 test_interruption_before_and_after_raw_commit() {
   local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
   dir=$(make_case interruption)
@@ -1532,9 +1586,15 @@ test_interruption_before_and_after_raw_commit() {
     i=$((i + 1))
   done
   [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
-  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
+  # One SIGTERM is not always delivered to its trap: on bash 5.2 the trap action
+  # can fail to parse when the signal lands mid command substitution, and CI saw
+  # exactly that here - the drain slept out its window, committed, and exited 0,
+  # which read as "the interruption did not work" rather than "the signal was
+  # lost". term_until_exit resends until it lands and fails by its own name if
+  # the drain genuinely ignores every one, so this assertion still means what it
+  # says: an interrupted drain must not report success.
   set +e
-  wait "$pid"
+  term_until_exit "$pid"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
@@ -1553,9 +1613,8 @@ test_interruption_before_and_after_raw_commit() {
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
   [ -s "$state/.wake-queue" ] \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
-  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
   set +e
-  wait "$pid"
+  term_until_exit "$pid"
   set -e
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
     || fail "drain after post-presentation interruption failed"
@@ -2024,4 +2083,6 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_stale_ack_that_consumes_nothing_names_the_current_wake
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
+test_interruption_resends_a_lost_signal
+test_interruption_fails_when_every_signal_is_ignored
 test_interruption_before_and_after_raw_commit

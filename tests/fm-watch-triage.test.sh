@@ -174,7 +174,86 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Stop and reap a watcher this suite started. A bare `kill; wait` hung CI for
+# 27 minutes when bash 5.2 lost the TERM; tests/wake-helpers.sh's
+# term_and_reap owns why and how the stop stays bounded.
+reap() { term_and_reap "$1"; }
+
+# --- stopping a watcher is bounded ------------------------------------------
+# Every case below reaps its watcher, so a reap that can block turns one lost
+# signal into a silent job-long hang that reads as the fault of whatever change
+# was under review. Each case runs its reap under a 20s watchdog, so the old
+# unbounded `kill; wait` fails here by name instead of hanging this suite.
+
+# Arm a 20s watchdog that SIGKILLs <pid> and records that it had to, so a reap
+# that blocks returns and the case fails by name. Its own sleep is killed on
+# stop and its output detached, so it never holds the suite's stdout open.
+REAP_DOG=
+reap_watchdog() {  # <pid> <fired-flag>
+  # shellcheck disable=SC2016 # Expanded by the watchdog subshell.
+  ( trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+    sleep 20 & sleeper=$!
+    wait "$sleeper"
+    kill -KILL "$1" 2>/dev/null && : > "$2" ) >/dev/null 2>&1 &
+  REAP_DOG=$!
+}
+reap_watchdog_stop() {
+  kill "$REAP_DOG" 2>/dev/null || true
+  wait "$REAP_DOG" 2>/dev/null || true
+}
+
+# The bash 5.2 shape: the watcher's first SIGTERM trap never runs, and it keeps
+# polling. A fixture child swallows its first TERM and exits on its second
+# through its own EXIT cleanup, as a watcher would once its trap does run.
+test_reap_recovers_a_watcher_whose_first_sigterm_was_lost() {
+  local dir pid i=0
+  dir="$TMP_ROOT/reap-lost-term"
+  mkdir -p "$dir"
+  # shellcheck disable=SC2016 # Expanded by the child shell.
+  bash -c 'seen=0
+    trap '\''seen=$((seen + 1)); [ "$seen" -lt 2 ] || exit 0'\'' TERM
+    trap '\'': > "$1/cleaned"'\'' EXIT
+    : > "$1/ready"
+    while :; do sleep 0.1; done' _ "$dir" &
+  pid=$!
+  while [ ! -e "$dir/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/ready" ] || { kill -KILL "$pid" 2>/dev/null; fail "the lost-TERM fixture never started"; }
+  reap_watchdog "$pid" "$dir/watchdog-fired"
+  FM_TEST_REAP_RESEND_SECS=1 reap "$pid"
+  reap_watchdog_stop
+  # Never leave the fixture behind: a reap that returned without stopping it
+  # would otherwise leak a process into the rest of the run.
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -e "$dir/watchdog-fired" ] \
+    || fail "reap blocked on a watcher whose first SIGTERM was lost until a 20s watchdog killed it"
+  [ -e "$dir/cleaned" ] \
+    || fail "reap stopped a watcher whose first SIGTERM was lost without letting its own TERM exit run"
+  pass "reap re-sends a lost SIGTERM, so the watcher exits through its own cleanup instead of hanging the suite"
+}
+
+# A watcher that never honors SIGTERM must end the case loudly and by name,
+# within the bound, rather than blocking or vanishing silently.
+test_reap_fails_loudly_on_a_watcher_that_ignores_sigterm() {
+  local dir pid rc=0 i=0
+  dir="$TMP_ROOT/reap-ignored-term"
+  mkdir -p "$dir"
+  # shellcheck disable=SC2016 # Expanded by the child shell.
+  bash -c 'trap "" TERM; : > "$1/ready"; while :; do sleep 0.1; done' _ "$dir" &
+  pid=$!
+  while [ ! -e "$dir/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/ready" ] || { kill -KILL "$pid" 2>/dev/null; fail "the TERM-ignoring fixture never started"; }
+  reap_watchdog "$pid" "$dir/watchdog-fired"
+  ( FM_TEST_REAP_RESEND_SECS=1 FM_TEST_REAP_BOUND_SECS=3 reap "$pid" ) 2> "$dir/reap.err" || rc=$?
+  reap_watchdog_stop
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -e "$dir/watchdog-fired" ] || fail "reap never gave up on a watcher that ignores SIGTERM"
+  [ "$rc" -eq 1 ] || fail "reap let a watcher that ignores SIGTERM pass silently (rc=$rc)"
+  grep -Fq "not ok - process $pid did not exit within 3s of repeated SIGTERM" "$dir/reap.err" \
+    || fail "reap's failure did not name the watcher it gave up on: $(cat "$dir/reap.err")"
+  pass "reap gives up on a watcher that ignores SIGTERM within its bound, kills it, and fails naming it"
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -5100,6 +5179,8 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 
+test_reap_recovers_a_watcher_whose_first_sigterm_was_lost
+test_reap_fails_loudly_on_a_watcher_that_ignores_sigterm
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
