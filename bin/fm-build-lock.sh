@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
-# Machine-wide build/test mutex: run the wrapped command while holding one lock
-# that every local build and test invocation on this machine shares.
+# Machine-wide build/test semaphore: run the wrapped command while holding one
+# of the N slots that every local build and test invocation on this machine
+# shares. N is 1 unless this machine says otherwise, and at N=1 this is one
+# mutex, which is what it has always been.
 #
 # Usage:
-#   fm-build-lock.sh [--label <text>] [--] <command> [args...]
-#                                               acquire, run, release
-#   fm-build-lock.sh --status                   print the current holder
-#   fm-build-lock.sh --lock-path                print the resolved lock path
+#   fm-build-lock.sh [--label <text>] [--exclusive] [--] <command> [args...]
+#                                               acquire a slot, run, release
+#   fm-build-lock.sh --status                   print every slot and its holder
+#   fm-build-lock.sh --lock-path                print the resolved slot 1 path
+#   fm-build-lock.sh --slots-path               print the resolved slot-count file
+#   fm-build-lock.sh --set-slots <n>            set this machine's slot count
 #   fm-build-lock.sh --install-mutex <dir>      link <dir>/mutex at this script
 #   fm-build-lock.sh --help
 #
 # --label names the hold for everyone who reads it - waiters, --status and the
 # task status line below - in place of the rendered command, for a caller whose
 # own command line says nothing useful (bin/fm-test-run.sh's per-script holder).
+#
+# --exclusive names this run as needing the whole machine; see A RUN THAT NEEDS
+# THE WHOLE MACHINE below.
 #
 # Prefix it in front of any local build or test command; no repository is
 # modified to make this work:
@@ -24,11 +31,51 @@
 # unchanged. Everything this script says about the lock goes to stderr prefixed
 # `fm-build-lock:`, so stdout stays exactly the wrapped command's output.
 #
-# ONE LOCK, NOT ONE PER REPOSITORY. A per-repository lock would still let a JVM
-# build and a browser suite run together, which is the pairing that exhausted a
-# 16 GB / 10-core machine and produced false test failures on unmodified code.
-# The lock therefore lives outside every firstmate home so secondmate homes
-# share it.
+# ONE SET OF SLOTS FOR THE MACHINE, NOT ONE PER REPOSITORY. A per-repository
+# lock would still let a JVM build and a browser suite run together, which is
+# the pairing that exhausted a 16 GB / 10-core machine and produced false test
+# failures on unmodified code. The slots therefore live outside every firstmate
+# home so secondmate homes share them.
+#
+# HOW MANY RUN AT ONCE. Each slot is its own instance of the same lockdir mutex
+# - slot 1 at <root>/fm-build-lock, slot k at <root>/fm-build-lock.slot<k> - so
+# there is no counter file and no second locking scheme, and each holder's death
+# stays independently detectable by the liveness test the lock already relies
+# on. The number of holders is never stored; it is derived from which slots a
+# live process owns. A slot a dead holder left behind is retired by the next
+# acquisition, so an idle machine still has no build-lock residue.
+#
+# N is a MACHINE-level setting, read from one file per machine rather than per
+# home: the slots deliberately live outside every home, most callers (pipeline
+# agents, a captain's terminal, a worktree's own copy of this script) have no
+# home to read, and two callers acting on two values of N against one set of
+# slots would stop excluding each other. `--slots-path` prints the file and
+# `--set-slots <n>` writes it. There is deliberately no environment variable for
+# it: an environment value is per process, so it is multi-valued by
+# construction, which is the one property this number must not have.
+#
+# Absent, empty, malformed, unreadable or non-positive means N=1 and warns once
+# on stderr; it never stops the build, because N=1 is the most conservative
+# legal value and a typo that killed every build, lint and pipeline step on the
+# machine would be far worse than one that under-admits. A value above the
+# online core count is clamped to it and says so: a large number is "no lock" by
+# another name, and standing down already has an explicit switch. A waiter picks
+# a raised count up within one poll. Lowering it never touches a running holder:
+# holders above the new count finish normally, and no claim is admitted while as
+# many live holders as the new count allows remain on ANY slot on disk.
+#
+# A RUN THAT NEEDS THE WHOLE MACHINE TAKES EVERY SLOT. A slot is not a share of
+# the machine - build tools size their worker pools from the whole machine, and
+# memory is not divisible by a lock at all - so N caps how many heavy commands
+# run and never how much they use. A run named as needing the whole machine
+# therefore holds all N slots and starts only once nothing else is live, so it
+# never runs beside anything. Name one with --exclusive, or, so that no caller
+# has to know, with one shell glob per line in the pattern file beside the
+# slot-count file, matched against exactly the text --status prints after
+# `running:`. At N=1 neither has any effect and the pattern file is never
+# opened. A pattern file that exists but cannot be read makes EVERY run
+# whole-machine and warns once: that is N=1 behaviour, and the opposite choice
+# would silently drop the protection the file exists to give.
 #
 # LOCK PATH. `FM_BUILD_LOCK_DIR` overrides it. Otherwise this resolves the
 # stable per-user temporary directory (`getconf DARWIN_USER_TEMP_DIR` on macOS)
@@ -37,6 +84,18 @@
 # different roots would take different locks and silently stop excluding each
 # other. Every fleet agent on this machine runs as one user, so a per-user root
 # is machine-wide for the fleet and cannot be hijacked in shared /tmp.
+#
+# SETTINGS PATH. The slot-count file and the whole-machine pattern file live in
+# `<account home>/.config/firstmate/`, or, when `FM_BUILD_LOCK_DIR` is set, in
+# that directory, so a root you chose always carries exactly one count of its
+# own. They are deliberately NOT in the default lock root, which the operating
+# system purges: a setting that silently reverts is not a deliberate switch.
+# The account home is resolved from the account database rather than trusted
+# from `$XDG_CONFIG_HOME`, for the same reason `$TMPDIR` is ignored above, and
+# falls back to `$HOME`. A caller that resolved the wrong file reads "absent"
+# and acts as N=1, which is the safe direction: it only ever uses slot 1, can
+# never push the machine past the real N, and is still excluded by a
+# whole-machine hold, which always includes slot 1.
 #
 # NEVER ON CI. Detected CI environments exec the command straight through
 # without touching the lock: the commands in a project's `.no-mistakes.yaml`
@@ -47,8 +106,13 @@
 # HOLD CEILINGS REPORT, THEY NEVER KILL. A wrongly killed build is worse than a
 # slow one, so passing a ceiling only prints a warning. A holder past its
 # ceiling warns from its own pane even with nobody waiting; a waiter past its
-# ceiling warns too, and every waiting line names the holder so an inspected
-# quiet pane reads as waiting rather than wedged.
+# ceiling warns too, and every waiting line names the longest-running holder so
+# an inspected quiet pane reads as waiting rather than wedged. Neither default
+# moves with N: the hold ceiling is a diagnostic for a broken wrap rule rather
+# than a fairness control, and a wait past the ceiling at N>1 means every slot
+# has been busy that long, which is rarer and more worth acting on. At N>1 a
+# waiting line also says when a slot is free but an earlier arrival goes first,
+# because otherwise an inspected pane reads as wedged for a new reason.
 #
 # A CEILING ALSO REACHES THE SUPERVISOR. Stderr is read by nobody when the
 # command runs in the background, which is where every measured long hold ran.
@@ -65,12 +129,17 @@
 #
 # ARRIVAL ORDER, SO BARGING IS IMPOSSIBLE BY CONSTRUCTION. Acquisition is
 # ticketed: every invocation claims a monotonically increasing ticket on arrival
-# and may try the lock only while its ticket is the oldest outstanding one, so a
-# waiter's wait is bounded by the number of waiters ahead of it rather than by
-# its luck in a race. An unordered retry loop is not merely theoretically
-# unfair: a worker that wrapped each individual test in its own invocation
-# released and re-acquired hundreds of times in a row and starved a fairly
-# waiting worker past its 600s ceiling.
+# and may try only while its ticket is the OLDEST outstanding one, so a waiter's
+# wait is bounded by the number of waiters ahead of it rather than by its luck
+# in a race. N changes only what trying means - take the lowest-numbered free
+# slot - and never who may try. Letting the N oldest try instead is the obvious
+# generalisation and it re-admits exactly this starvation one place down the
+# line: measured with N=2, a fast poller took the freed slot ahead of an earlier
+# arrival in every run, overtaking it 7, 7 and 23 times inside one poll window.
+# An unordered retry loop is not merely theoretically unfair either: a worker
+# that wrapped each individual test in its own invocation released and
+# re-acquired hundreds of times in a row and starved a fairly waiting worker
+# past its 600s ceiling.
 #
 # ONE INVOCATION PER RUN. A run is one build or suite command a caller would
 # otherwise issue once: wrap exactly that. Never split one run into per-unit
@@ -78,23 +147,28 @@
 # cannot make hundreds of handovers cheap. Never put one invocation around a
 # loop, script or chain of several runs either, such as a baseline plus
 # mutants: wrap each run in the loop, so arrival order lets a queued caller's
-# run go between two of them. Every hold longer than ten minutes measured in
-# docs/verification/build-lock-contention.md was one invocation around such a
-# loop, the longest 107 minutes with five callers queued behind it. A long wait
-# is still a wait: running the command outside this lock to leave the line
-# silently breaks exclusion for every build on the machine.
+# run go between two of them. This matters more with slots, not less: a loop
+# inside one hold occupies its slot for the whole length, and N such loops
+# starve everyone exactly as one does at N=1. Every hold longer than ten minutes
+# measured in docs/verification/build-lock-contention.md was one invocation
+# around such a loop, the longest 107 minutes with five callers queued behind
+# it. A long wait is still a wait: running the command outside this lock to
+# leave the line silently breaks exclusion for every build on the machine.
 #
-# A NESTED INVOCATION INSIDE A HOLD RUNS STRAIGHT THROUGH. The lock is not
+# A NESTED INVOCATION INSIDE A HOLD RUNS STRAIGHT THROUGH. A slot is not
 # reentrant, so a wrapped command that itself calls this script - `mutex` around
-# bin/fm-test-run.sh, which takes the lock per script - would wait on its own
+# bin/fm-test-run.sh, which takes a slot per script - would wait on its own
 # ancestor forever. A holder therefore exports FM_BUILD_LOCK_HELD_BY (its pid)
-# and FM_BUILD_LOCK_HELD_LOCK (the lock path) to the wrapped command, and an
-# invocation that finds both naming the lock it resolved, with that pid still
-# the lock's live owner, runs its command without queueing: it is already
-# inside that hold. So does an invocation whose lock owner (LOCK/pid) is a live
-# ANCESTOR process, which covers a hold taken by an older entry point that
-# exported no variables. A stale or foreign value, or a non-ancestor owner,
-# falls back to an ordinary acquire.
+# and FM_BUILD_LOCK_HELD_LOCK (the path of the slot it holds, which is slot 1's
+# path for a whole-machine hold because that always includes slot 1) to the
+# wrapped command, and an invocation that finds both naming a slot of the root
+# it resolved, with that pid still that slot's live owner, runs its command
+# without queueing: it is already inside that hold. So does an invocation whose
+# owner is a live ANCESTOR process holding any slot, which covers a hold taken
+# by an older entry point that exported no variables. Neither test is bounded by
+# the current N, because N can be lowered in the middle of a hold and that hold
+# is still a hold. A stale or foreign value, or a non-ancestor owner, falls back
+# to an ordinary acquire.
 #
 # Ordering never outranks getting builds run. A waiting line that cannot be
 # reached at all - a process STOPPED rather than killed still owns any lock it
@@ -127,11 +201,14 @@
 #   FM_BUILD_LOCK_HELD_BY          set by a holder for its wrapped command;
 #   FM_BUILD_LOCK_HELD_LOCK        see A NESTED INVOCATION above
 #
-# The lock itself is bin/fm-wake-lib.sh's lockdir mutex, the same primitive the
-# wake queue, merges, captain holds and remote handoffs run on; the waiting line
-# is serialized by a second instance of that same primitive, so this script
-# still adds no second locking scheme. macOS ships no flock(1), which is why
-# that lockdir implementation exists in the first place.
+# The slot count has no environment variable on purpose; see HOW MANY RUN AT
+# ONCE. docs/configuration.md owns both machine-level files for operators.
+#
+# Each slot is bin/fm-wake-lib.sh's lockdir mutex, the same primitive the wake
+# queue, merges, captain holds and remote handoffs run on; the waiting line is
+# serialized by a second instance of that same primitive, so this script still
+# adds no second locking scheme. macOS ships no flock(1), which is why that
+# lockdir implementation exists in the first place.
 set -u
 
 # Resolve through symlinks: the `mutex` entry point is a symlink to this script,
@@ -192,6 +269,46 @@ fm_build_lock_root() {
     root=/tmp
   fi
   printf '%s\n' "${root%/}"
+}
+
+# --- machine-level settings -------------------------------------------------
+#
+# See SETTINGS PATH in the header for why this is not the lock root by default
+# and why the account home is not taken from the environment.
+
+fm_build_lock_account_home() {
+  local user home
+  user=$(id -un 2>/dev/null) || user=
+  case "$user" in
+    ''|*[!A-Za-z0-9._-]*) user= ;;
+  esac
+  if [ -n "$user" ]; then
+    # Tilde expansion consults the account database, which is the point: an
+    # agent harness can hand a worker its own $HOME or $XDG_CONFIG_HOME, and two
+    # workers that resolved different settings files would act on two values of
+    # a number that must be single-valued for the machine.
+    eval "home=~$user" 2>/dev/null || home=
+    case "$home" in
+      /*) [ -d "$home" ] && { printf '%s\n' "${home%/}"; return 0; } ;;
+    esac
+  fi
+  case "${HOME:-}" in
+    /*) printf '%s\n' "${HOME%/}"; return 0 ;;
+  esac
+  return 1
+}
+
+# The directory holding the slot count and the whole-machine patterns. A root
+# chosen with FM_BUILD_LOCK_DIR carries its own settings, so one root always has
+# exactly one count by construction - and that is the whole test seam.
+fm_build_lock_settings_dir() {
+  local home
+  if [ -n "${FM_BUILD_LOCK_DIR:-}" ]; then
+    fm_build_lock_root
+    return 0
+  fi
+  home=$(fm_build_lock_account_home) || return 1
+  printf '%s/.config/firstmate\n' "$home"
 }
 
 # --- CI stand-down ----------------------------------------------------------
@@ -263,17 +380,232 @@ fm_build_lock_render_command() {
   printf '%s\n' "$out"
 }
 
+# --- the slot count ---------------------------------------------------------
+#
+# See HOW MANY RUN AT ONCE in the header for why this is a machine-level file
+# with no environment variable, and why every bad value falls back to 1 instead
+# of refusing to run.
+
+FM_BUILD_LOCK_SLOTS=1
+FM_BUILD_LOCK_SLOTS_PROBLEM=
+FM_BUILD_LOCK_SLOTS_WARNED=0
+FM_BUILD_LOCK_CORES=
+
+# Resolved at most once per invocation, and only when the file names a value
+# above 1, so an unconfigured machine forks nothing for it. A count of 0 means
+# "could not tell", which declines to clamp rather than inventing a ceiling.
+fm_build_lock_resolve_cores() {
+  local n
+  [ -z "$FM_BUILD_LOCK_CORES" ] || return 0
+  n=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || n=
+  case "$n" in
+    ''|*[!0-9]*|0) n=$(sysctl -n hw.ncpu 2>/dev/null) || n= ;;
+  esac
+  case "$n" in
+    ''|*[!0-9]*) n=0 ;;
+  esac
+  FM_BUILD_LOCK_CORES=$n
+}
+
+# Stderr only, once per invocation, in the same voice as the order-abandoned
+# warning. Never to FM_TASK_STATUS: one status append per `mutex` call would
+# wake the supervisor on every build on the machine.
+fm_build_lock_slots_warn() {
+  [ "$FM_BUILD_LOCK_SLOTS_WARNED" = 0 ] || return 0
+  FM_BUILD_LOCK_SLOTS_WARNED=1
+  note "WARNING: $FM_BUILD_LOCK_SLOTS_PROBLEM"
+}
+
+fm_build_lock_slots_malformed() {  # <file>
+  FM_BUILD_LOCK_SLOTS=1
+  FM_BUILD_LOCK_SLOTS_PROBLEM="slot count file is malformed, using 1: $1"
+  fm_build_lock_slots_warn
+}
+
+# The head waiter re-reads this on every poll, which is what lets a raised count
+# take effect within one poll interval, so it uses shell builtins only and forks
+# nothing. The grammar is config/fleet-capacity's exactly: one positive base-10
+# integer on one line in a plain regular file, surrounding whitespace ignored.
+fm_build_lock_read_slots() {
+  local file=${SLOTS_FILE:-} first='' second='' had_second=0 value
+  FM_BUILD_LOCK_SLOTS=1
+  FM_BUILD_LOCK_SLOTS_PROBLEM=
+  [ -n "$file" ] || return 0
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
+    fm_build_lock_slots_malformed "$file"
+    return 0
+  fi
+  {
+    IFS= read -r first || true
+    if IFS= read -r second; then
+      had_second=1
+    elif [ -n "$second" ]; then
+      had_second=1
+    fi
+  } < "$file" 2>/dev/null || true
+  if [ "$had_second" = 1 ]; then
+    fm_build_lock_slots_malformed "$file"
+    return 0
+  fi
+  # Trim only the ENDS. Deleting every space instead would read "5 6" as 56,
+  # which is not a typo a reader gets to correct on the operator's behalf.
+  value=${first#"${first%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
+  case "$value" in
+    ''|*[!0-9]*) fm_build_lock_slots_malformed "$file"; return 0 ;;
+  esac
+  if ! [ "$value" -gt 0 ] 2>/dev/null; then
+    fm_build_lock_slots_malformed "$file"
+    return 0
+  fi
+  if [ "$value" -gt 1 ]; then
+    fm_build_lock_resolve_cores
+    if [ "$FM_BUILD_LOCK_CORES" -gt 0 ] && [ "$value" -gt "$FM_BUILD_LOCK_CORES" ]; then
+      FM_BUILD_LOCK_SLOTS=$FM_BUILD_LOCK_CORES
+      FM_BUILD_LOCK_SLOTS_PROBLEM="slot count $value is above this machine's $FM_BUILD_LOCK_CORES online cores, using $FM_BUILD_LOCK_CORES: $file"
+      fm_build_lock_slots_warn
+      return 0
+    fi
+  fi
+  FM_BUILD_LOCK_SLOTS=$value
+}
+
+# --- the slots --------------------------------------------------------------
+#
+# A slot is one instance of the lockdir mutex, so the number of holders is
+# derived from which slot paths a live process owns rather than kept in a
+# counter file that would need its own crash recovery. Slots never reap or steal
+# from one another: each has its own pid record and its own `.steal` guard.
+
+FM_BUILD_LOCK_SLOT_PATH=
+FM_BUILD_LOCK_SLOT_INFO=
+FM_BUILD_LOCK_LIVE_HOLDERS=0
+
+# Slot 1 keeps today's exact lock path and holder record, which is what makes
+# N=1 today's lock in every observable respect.
+fm_build_lock_slot_paths() {  # <index>
+  if [ "$1" = 1 ]; then
+    FM_BUILD_LOCK_SLOT_PATH=$LOCK
+    FM_BUILD_LOCK_SLOT_INFO=$INFO
+  else
+    FM_BUILD_LOCK_SLOT_PATH="$LOCK.slot$1"
+    FM_BUILD_LOCK_SLOT_INFO="$LOCK.slot$1.info"
+  fi
+}
+
+# The slot index a path names, or failure. The suffix is matched anchored at the
+# resolved lock path, so a `.slot` in the lock root cannot be mistaken for one,
+# and a non-numeric suffix keeps the primitive's own siblings - `.info`,
+# `.steal`, `.owner.XXXXXX` - out of every slot scan.
+fm_build_lock_slot_index() {  # <path>
+  local path=$1 suffix
+  if [ "$path" = "$LOCK" ]; then
+    printf '1\n'
+    return 0
+  fi
+  case "$path" in
+    "$LOCK".slot*) suffix=${path#"$LOCK".slot} ;;
+    *) return 1 ;;
+  esac
+  case "$suffix" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$suffix" -gt 1 ] 2>/dev/null || return 1
+  printf '%s\n' "$suffix"
+}
+
+# True when a slot path above <n> exists on disk, which happens only after the
+# count was lowered. Globbing only, because this sits on the poll path: when it
+# is false the claim skips the live-holder count entirely, which is what leaves
+# a steady N=1 with literally today's single acquire.
+fm_build_lock_slot_above_exists() {  # <n>
+  local n=$1 entry suffix
+  for entry in "$LOCK".slot*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    suffix=${entry#"$LOCK".slot}
+    case "$suffix" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$suffix" -gt "$n" ] 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# How many OTHER live processes own a slot, across every slot on disk whatever
+# its index, counting from <min-index> up. Lowering the count relies on this:
+# until the holders above the new count finish, a claim must decline rather than
+# let the head take a low slot and run more than the count allows. Slots this
+# process already holds are skipped, so a whole-machine run draining the machine
+# never counts itself as the reason it may not start.
+fm_build_lock_count_live_holders() {  # [min-index]
+  local min=${1:-1} entry suffix pid n=0
+  FM_BUILD_LOCK_LIVE_HOLDERS=0
+  for entry in "$LOCK" "$LOCK".slot*; do
+    if [ "$entry" = "$LOCK" ]; then
+      suffix=1
+    else
+      suffix=${entry#"$LOCK".slot}
+      case "$suffix" in
+        ''|*[!0-9]*) continue ;;
+      esac
+    fi
+    [ "$suffix" -ge "$min" ] 2>/dev/null || continue
+    fm_build_lock_holds_slot "$suffix" && continue
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    pid=
+    { IFS= read -r pid; } < "$entry/pid" 2>/dev/null || true
+    case "$pid" in
+      ''|*[!0-9]*)
+        # No pid recorded yet is the half-created state the primitive itself
+        # treats as held while it is fresh.
+        fm_lock_mid_acquire_is_fresh "$entry" '' && n=$((n + 1))
+        continue
+        ;;
+    esac
+    fm_pid_alive "$pid" && n=$((n + 1))
+  done
+  FM_BUILD_LOCK_LIVE_HOLDERS=$n
+}
+
+# The highest slot index on disk, so --status can show a slot left above a
+# lowered count instead of pretending it is not there.
+fm_build_lock_highest_slot() {
+  local entry suffix highest=1
+  for entry in "$LOCK".slot*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    suffix=${entry#"$LOCK".slot}
+    case "$suffix" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$suffix" -gt "$highest" ] 2>/dev/null && highest=$suffix
+  done
+  printf '%s\n' "$highest"
+}
+
 # --- holder record ----------------------------------------------------------
 #
-# Only the process holding the lock ever writes this file, and every reader
-# validates its first line against the lock's own authoritative pid record, so a
+# Only the process holding a slot ever writes that slot's file, and every reader
+# validates its first line against the slot's own authoritative pid record, so a
 # record left behind by a killed holder is reported as unavailable rather than
 # as a live holder.
+#
+# A whole-machine hold adds a fourth line, `reserved` while it is still draining
+# the other slots and `running` once it started. The first three lines never
+# move, so an older copy of this script reads such a record exactly as before.
 
-fm_build_lock_write_info() {  # <info-path> <pid> <started> <display>
-  local info=$1 pid=$2 started=$3 display=$4 tmp
+fm_build_lock_write_info() {  # <info-path> <pid> <started> <display> [state]
+  local info=$1 pid=$2 started=$3 display=$4 state=${5:-} tmp
   tmp="$info.$pid.tmp"
-  { printf '%s\n%s\n%s\n' "$pid" "$started" "$display" > "$tmp"; } 2>/dev/null || return 1
+  if [ -n "$state" ]; then
+    { printf '%s\n%s\n%s\n%s\n' "$pid" "$started" "$display" "$state" > "$tmp"; } 2>/dev/null \
+      || { rm -f -- "$tmp" 2>/dev/null; return 1; }
+  else
+    { printf '%s\n%s\n%s\n' "$pid" "$started" "$display" > "$tmp"; } 2>/dev/null \
+      || { rm -f -- "$tmp" 2>/dev/null; return 1; }
+  fi
   mv -f -- "$tmp" "$info" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null; return 1; }
 }
 
@@ -283,25 +615,38 @@ fm_build_lock_write_info() {  # <info-path> <pid> <started> <display>
 # age cannot capture it through a command substitution's subshell.
 FM_BUILD_LOCK_HOLDER_TEXT=
 FM_BUILD_LOCK_HOLDER_SECS=
+FM_BUILD_LOCK_HOLDER_PID=
+FM_BUILD_LOCK_HOLDER_DISPLAY=
+FM_BUILD_LOCK_HOLDER_STATE=
 
 fm_build_lock_read_holder() {  # <lockdir> <info-path>
-  local lockdir=$1 info=$2 pid info_pid started display now age
+  local lockdir=$1 info=$2 pid info_pid started display state now age
   FM_BUILD_LOCK_HOLDER_TEXT=
   FM_BUILD_LOCK_HOLDER_SECS=
+  FM_BUILD_LOCK_HOLDER_PID=
+  FM_BUILD_LOCK_HOLDER_DISPLAY=
+  FM_BUILD_LOCK_HOLDER_STATE=
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*) return 0 ;;
   esac
+  FM_BUILD_LOCK_HOLDER_PID=$pid
   info_pid=
   started=
   display=
+  state=
   if [ -f "$info" ] && [ ! -L "$info" ]; then
-    { read -r info_pid; read -r started; IFS= read -r display; } < "$info" 2>/dev/null || true
+    { read -r info_pid; read -r started; IFS= read -r display; IFS= read -r state; } \
+      < "$info" 2>/dev/null || true
   fi
   if [ "$info_pid" != "$pid" ]; then
     FM_BUILD_LOCK_HOLDER_TEXT="held by pid $pid (no command record)"
     return 0
   fi
+  FM_BUILD_LOCK_HOLDER_DISPLAY=$display
+  case "$state" in
+    reserved|running) FM_BUILD_LOCK_HOLDER_STATE=$state ;;
+  esac
   case "$started" in
     ''|*[!0-9]*)
       FM_BUILD_LOCK_HOLDER_TEXT="held by pid $pid running: $display"
@@ -360,7 +705,16 @@ fm_build_lock_task_status() {  # <status-line>
   { printf '%s\n' "$1" >> "$path"; } 2>/dev/null || true
 }
 
+# A whole-machine hold keeps today's sentence, because for it the sentence is
+# true. An ordinary hold at N>1 must not print it: it is blocking nobody, and a
+# warning that says otherwise sends a reader looking for a contention that is
+# not there.
 fm_build_lock_report_ceiling() {  # <held-secs> <display>
+  if [ "$FM_BUILD_LOCK_MULTI" = 1 ] && [ "$FM_BUILD_LOCK_EXCLUSIVE" = 0 ]; then
+    printf 'fm-build-lock: WARNING: this command has held %s of %s machine-wide build slots for %s: %s\n' \
+      "$(fm_build_lock_held_slot_count)" "$FM_BUILD_LOCK_N" "$(fm_build_lock_elapsed "$1")" "$2" >&2
+    return 0
+  fi
   printf 'fm-build-lock: WARNING: this command has held the machine-wide build lock for %s and is blocking every other local build: %s\n' \
     "$(fm_build_lock_elapsed "$1")" "$2" >&2
 }
@@ -562,23 +916,324 @@ fm_build_lock_queue_position() {
     "$((FM_BUILD_LOCK_QUEUE_AHEAD + 1))" "$FM_BUILD_LOCK_QUEUE_COUNT"
 }
 
+# --- whole-machine runs -----------------------------------------------------
+#
+# See A RUN THAT NEEDS THE WHOLE MACHINE in the header for why a count alone
+# does not bound what N holders cost.
+
+FM_BUILD_LOCK_EXCLUSIVE=0
+FM_BUILD_LOCK_EXCLUSIVE_FLAG=0
+FM_BUILD_LOCK_EXCLUSIVE_RESOLVED=0
+
+# One shell glob per line, `#` comments and blank lines ignored, matched with a
+# plain `case` against exactly the text --status prints after `running:`. That
+# line carries the working directory, so a pattern can name a repository's
+# worktrees as easily as a command. The classification belongs here, with the
+# one person who knows this machine, rather than in each caller's brief: the
+# measured record is that callers misjudge even whether a command is heavy.
+fm_build_lock_matches_exclusive_patterns() {
+  local file=${EXCLUSIVE_FILE:-} line
+  [ -n "$file" ] || return 1
+  [ -e "$file" ] || [ -L "$file" ] || return 1
+  if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
+    note "WARNING: the whole-machine pattern file cannot be read, so every run is treated as needing the whole machine: $file"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    # Unquoted deliberately: the line IS the glob, which is the whole feature.
+    # shellcheck disable=SC2254
+    case "$DISPLAY_LINE" in
+      $line) return 0 ;;
+    esac
+  done < "$file" 2>/dev/null
+  return 1
+}
+
+# Resolved at most once per invocation, and never at N=1, where one slot is
+# every slot so neither the flag nor the file can change anything - which is why
+# the pattern file is not even opened there.
+fm_build_lock_resolve_exclusive() {  # <n>
+  [ "$FM_BUILD_LOCK_EXCLUSIVE_RESOLVED" = 0 ] || return 0
+  [ "$1" -gt 1 ] || return 0
+  FM_BUILD_LOCK_EXCLUSIVE_RESOLVED=1
+  if [ "$FM_BUILD_LOCK_EXCLUSIVE_FLAG" = 1 ] || fm_build_lock_matches_exclusive_patterns; then
+    FM_BUILD_LOCK_EXCLUSIVE=1
+  fi
+}
+
+# --- claiming a slot --------------------------------------------------------
+
+FM_BUILD_LOCK_HELD_SLOTS=
+FM_BUILD_LOCK_N=1
+FM_BUILD_LOCK_SLOT_ABOVE=0
+FM_BUILD_LOCK_MULTI=0
+FM_BUILD_LOCK_NOUN='the machine-wide build lock'
+
+fm_build_lock_holds_slot() {  # <index>
+  case " $FM_BUILD_LOCK_HELD_SLOTS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_build_lock_held_slot_count() {
+  local k n=0
+  for k in $FM_BUILD_LOCK_HELD_SLOTS; do
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+# The lowest slot this process holds. A whole-machine hold always includes slot
+# 1, so what it exports as FM_BUILD_LOCK_HELD_LOCK is slot 1's path and an older
+# copy of this script still recognises the hold.
+fm_build_lock_lowest_held_slot() {
+  local k low=
+  for k in $FM_BUILD_LOCK_HELD_SLOTS; do
+    if [ -z "$low" ] || [ "$k" -lt "$low" ]; then
+      low=$k
+    fi
+  done
+  printf '%s\n' "${low:-1}"
+}
+
+# The head's one attempt per poll: take the lowest-numbered free slot. Lowest
+# first is what makes N=1 identical to today and keeps high slots empty when the
+# machine is quiet.
+fm_build_lock_claim_one() {  # <n> <a-slot-above-n-exists>
+  local n=$1 above=$2 k
+  # The live-holder count only matters while a slot ABOVE the count exists on
+  # disk, which happens only after the count was lowered. In every steady state,
+  # including the unconfigured N=1, this is skipped and the claim below is
+  # literally today's single acquire.
+  if [ "$above" = 1 ]; then
+    fm_build_lock_count_live_holders
+    [ "$FM_BUILD_LOCK_LIVE_HOLDERS" -lt "$n" ] || return 1
+  fi
+  k=1
+  while [ "$k" -le "$n" ]; do
+    fm_build_lock_slot_paths "$k"
+    if fm_lock_try_acquire "$FM_BUILD_LOCK_SLOT_PATH"; then
+      FM_BUILD_LOCK_HELD_SLOTS=$k
+      return 0
+    fi
+    k=$((k + 1))
+  done
+  return 1
+}
+
+# A whole-machine run reserves slots as they free and keeps them, so nothing
+# slips past while it drains: letting later, lighter runs through would be the
+# starvation ARRIVAL ORDER exists to prevent, with the roles reversed. Only an
+# ORDERED head may keep a partial reservation across polls - two processes each
+# holding part of the slots and waiting for the rest is a deadlock, and
+# head-only admission is what makes at most one such process exist. An
+# invocation that announced it abandoned ordering therefore makes one
+# all-or-nothing pass per poll and gives back whatever it could not complete.
+fm_build_lock_claim_exclusive() {  # <n>
+  local n=$1 k now=
+  k=1
+  while [ "$k" -le "$n" ]; do
+    if ! fm_build_lock_holds_slot "$k"; then
+      fm_build_lock_slot_paths "$k"
+      if fm_lock_try_acquire "$FM_BUILD_LOCK_SLOT_PATH"; then
+        # Read the clock only when there is a reservation to stamp, so a poll
+        # that takes nothing forks nothing.
+        [ -n "$now" ] || now=$(date +%s)
+        FM_BUILD_LOCK_HELD_SLOTS="${FM_BUILD_LOCK_HELD_SLOTS:+$FM_BUILD_LOCK_HELD_SLOTS }$k"
+        fm_build_lock_write_info "$FM_BUILD_LOCK_SLOT_INFO" "$$" "$now" "$DISPLAY_LINE" reserved || true
+      fi
+    fi
+    k=$((k + 1))
+  done
+  # "Every slot 1..n", not "n slots": the count can be lowered while this run is
+  # draining, and counting instead would leave a run holding MORE than the new
+  # count waiting forever for a number it had already passed.
+  k=1
+  while [ "$k" -le "$n" ] && fm_build_lock_holds_slot "$k"; do
+    k=$((k + 1))
+  done
+  if [ "$k" -gt "$n" ]; then
+    # A slot left above a lowered count can still be running, and the machine is
+    # not this run's alone until it is gone.
+    fm_build_lock_count_live_holders $((n + 1))
+    if [ "$FM_BUILD_LOCK_LIVE_HOLDERS" -eq 0 ]; then
+      return 0
+    fi
+  fi
+  [ "$FM_BUILD_LOCK_UNORDERED" = 0 ] || fm_build_lock_release_slots
+  return 1
+}
+
+# Retire a slot record left behind by a holder that died. The primitive already
+# reclaims one when a claimer reaches that slot, but a claimer stops at the
+# first free slot, so on a quiet machine nothing ever reaches a high one again -
+# and an idle machine having no build-lock residue is a guarantee this change
+# keeps. Reclaiming is not reimplemented here: the slot is taken through the
+# primitive's own guarded dead-holder path and given straight back.
+#
+# Runs once per acquisition, from the head, exactly like the primitive's own
+# stray-owner collection - never on the poll path, where it would cost every
+# waiter a directory scan per poll.
+fm_build_lock_reap_dead_slots() {
+  local entry suffix pid
+  for entry in "$LOCK".slot*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    suffix=${entry#"$LOCK".slot}
+    case "$suffix" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    fm_build_lock_holds_slot "$suffix" && continue
+    pid=
+    { IFS= read -r pid; } < "$entry/pid" 2>/dev/null || true
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    fm_pid_alive "$pid" && continue
+    if fm_lock_try_acquire "$entry"; then
+      rm -f -- "$entry.info" 2>/dev/null || true
+      fm_lock_release "$entry" || true
+    fi
+  done
+}
+
+# Published once per slot this process holds. A whole-machine run rewrites the
+# records it wrote while reserving, so their age becomes the run's rather than
+# the drain's.
+fm_build_lock_publish_holder() {  # <started>
+  local k state=
+  [ "$FM_BUILD_LOCK_EXCLUSIVE" = 0 ] || state=running
+  for k in $FM_BUILD_LOCK_HELD_SLOTS; do
+    fm_build_lock_slot_paths "$k"
+    fm_build_lock_write_info "$FM_BUILD_LOCK_SLOT_INFO" "$$" "$1" "$DISPLAY_LINE" "$state" || true
+  done
+}
+
+# Re-read the count, and decide which vocabulary this invocation speaks. EVERY
+# waiter does this on every poll, not only the one at the head of the line: a
+# waiter that is never the head would otherwise describe a machine with several
+# slots in the words of a single lock, which is the pane that reads as wedged.
+# It is also what lets a raised count take effect within one poll.
+fm_build_lock_refresh_count() {
+  local above=0
+  fm_build_lock_read_slots
+  FM_BUILD_LOCK_N=$FM_BUILD_LOCK_SLOTS
+  fm_build_lock_slot_above_exists "$FM_BUILD_LOCK_N" && above=1
+  FM_BUILD_LOCK_SLOT_ABOVE=$above
+  if [ "$FM_BUILD_LOCK_N" -gt 1 ] || [ "$above" = 1 ]; then
+    FM_BUILD_LOCK_MULTI=1
+    FM_BUILD_LOCK_NOUN='a machine-wide build slot'
+  fi
+}
+
+# The head's one attempt per poll, against the count refreshed just above it.
+fm_build_lock_claim() {
+  fm_build_lock_resolve_exclusive "$FM_BUILD_LOCK_N"
+  if [ "$FM_BUILD_LOCK_EXCLUSIVE" = 1 ]; then
+    fm_build_lock_claim_exclusive "$FM_BUILD_LOCK_N"
+    return
+  fi
+  fm_build_lock_claim_one "$FM_BUILD_LOCK_N" "$FM_BUILD_LOCK_SLOT_ABOVE"
+}
+
+# --- what a waiter says about the slots -------------------------------------
+
+FM_BUILD_LOCK_WAIT_CONTEXT=
+FM_BUILD_LOCK_WAIT_OLDEST_SECS=
+FM_BUILD_LOCK_WAIT_OLDEST_TEXT=
+FM_BUILD_LOCK_WAIT_HELD=0
+FM_BUILD_LOCK_WAIT_DRAINING=0
+
+fm_build_lock_scan_holders() {
+  local n=$FM_BUILD_LOCK_N k highest
+  FM_BUILD_LOCK_WAIT_HELD=0
+  FM_BUILD_LOCK_WAIT_OLDEST_TEXT=
+  FM_BUILD_LOCK_WAIT_OLDEST_SECS=
+  FM_BUILD_LOCK_WAIT_DRAINING=0
+  highest=$(fm_build_lock_highest_slot)
+  [ "$highest" -ge "$n" ] 2>/dev/null || highest=$n
+  k=1
+  while [ "$k" -le "$highest" ]; do
+    fm_build_lock_slot_paths "$k"
+    fm_build_lock_read_holder "$FM_BUILD_LOCK_SLOT_PATH" "$FM_BUILD_LOCK_SLOT_INFO"
+    [ "$FM_BUILD_LOCK_HOLDER_STATE" != reserved ] || FM_BUILD_LOCK_WAIT_DRAINING=1
+    if [ -n "$FM_BUILD_LOCK_HOLDER_TEXT" ]; then
+      FM_BUILD_LOCK_WAIT_HELD=$((FM_BUILD_LOCK_WAIT_HELD + 1))
+      if [ -z "$FM_BUILD_LOCK_WAIT_OLDEST_TEXT" ] \
+        || [ "${FM_BUILD_LOCK_HOLDER_SECS:-0}" -gt "${FM_BUILD_LOCK_WAIT_OLDEST_SECS:-0}" ]; then
+        FM_BUILD_LOCK_WAIT_OLDEST_TEXT=$FM_BUILD_LOCK_HOLDER_TEXT
+        FM_BUILD_LOCK_WAIT_OLDEST_SECS=$FM_BUILD_LOCK_HOLDER_SECS
+      fi
+    fi
+    k=$((k + 1))
+  done
+}
+
+# The sentence every waiting line carries. At N>1 it names the count and the
+# longest-running holder in full and counts the rest: naming all N would grow
+# the line with N and with each holder's working directory, while the oldest is
+# the one a reader needs, because it is the one most likely past its ceiling.
+fm_build_lock_wait_context() {
+  local n=$FM_BUILD_LOCK_N attempt=1
+  if [ "$FM_BUILD_LOCK_MULTI" = 0 ]; then
+    fm_build_lock_read_holder_settled "$LOCK" "$INFO"
+    FM_BUILD_LOCK_WAIT_CONTEXT=$FM_BUILD_LOCK_HOLDER_TEXT
+    FM_BUILD_LOCK_WAIT_OLDEST_SECS=$FM_BUILD_LOCK_HOLDER_SECS
+    return 0
+  fi
+  while [ "$attempt" -le 3 ]; do
+    fm_build_lock_scan_holders
+    case "$FM_BUILD_LOCK_WAIT_OLDEST_TEXT" in
+      *'(no command record)') : ;;
+      *) break ;;
+    esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -le 3 ] || break
+    sleep "$POLL"
+  done
+  # At N>1 a waiter can be waiting for a reason an inspected pane cannot see:
+  # behind an earlier arrival that has not polled yet while a slot sits free, or
+  # behind a whole-machine run collecting the slots one by one. Both read as
+  # wedged unless the line says which, and not reading as wedged is what these
+  # lines are for.
+  if [ "$FM_BUILD_LOCK_WAIT_DRAINING" = 1 ]; then
+    FM_BUILD_LOCK_WAIT_CONTEXT='a whole-machine run is taking every slot, and an earlier arrival goes first'
+  elif [ "$FM_BUILD_LOCK_WAIT_HELD" -lt "$n" ]; then
+    FM_BUILD_LOCK_WAIT_CONTEXT='a slot is free, but an earlier arrival goes first'
+  else
+    FM_BUILD_LOCK_WAIT_CONTEXT="all $n slots held"
+  fi
+  if [ "$FM_BUILD_LOCK_WAIT_HELD" -gt 0 ]; then
+    FM_BUILD_LOCK_WAIT_CONTEXT="$FM_BUILD_LOCK_WAIT_CONTEXT; oldest: $FM_BUILD_LOCK_WAIT_OLDEST_TEXT"
+    if [ "$FM_BUILD_LOCK_WAIT_HELD" -gt 1 ]; then
+      FM_BUILD_LOCK_WAIT_CONTEXT="$FM_BUILD_LOCK_WAIT_CONTEXT; $((FM_BUILD_LOCK_WAIT_HELD - 1)) more - see mutex --status"
+    fi
+  fi
+}
+
 # --- observable acquire -----------------------------------------------------
 
-fm_build_lock_acquire() {  # <lockdir> <info-path>
-  local lockdir=$1 info=$2 start waited=0 next_notice holder now place paused=0
+fm_build_lock_acquire() {
+  local start waited=0 next_notice ctx now place paused=0
   fm_build_lock_queue_enter
-  if fm_build_lock_my_turn && fm_lock_try_acquire "$lockdir"; then
+  fm_build_lock_refresh_count
+  if fm_build_lock_my_turn && fm_build_lock_claim; then
+    fm_build_lock_reap_dead_slots
     fm_build_lock_queue_leave
     return 0
   fi
   start=$(date +%s)
   next_notice=$NOTICE_INTERVAL
-  fm_build_lock_read_holder_settled "$lockdir" "$info"
-  holder=$FM_BUILD_LOCK_HOLDER_TEXT
-  note "waiting for the machine-wide build lock - this process is WAITING, not wedged${holder:+ (}${holder}${holder:+)}"
+  fm_build_lock_wait_context
+  ctx=$FM_BUILD_LOCK_WAIT_CONTEXT
+  note "waiting for $FM_BUILD_LOCK_NOUN - this process is WAITING, not wedged${ctx:+ (}${ctx}${ctx:+)}"
   while : ; do
     sleep "$POLL"
-    if fm_build_lock_my_turn && fm_lock_try_acquire "$lockdir"; then
+    fm_build_lock_refresh_count
+    if fm_build_lock_my_turn && fm_build_lock_claim; then
       break
     fi
     now=$(date +%s)
@@ -586,44 +1241,60 @@ fm_build_lock_acquire() {  # <lockdir> <info-path>
     [ "$waited" -ge "$next_notice" ] || continue
     next_notice=$((waited + NOTICE_INTERVAL))
     place=$(fm_build_lock_queue_position)
-    fm_build_lock_read_holder_settled "$lockdir" "$info"
-    holder=$FM_BUILD_LOCK_HOLDER_TEXT
+    fm_build_lock_wait_context
+    ctx=$FM_BUILD_LOCK_WAIT_CONTEXT
     if [ "$WAIT_WARN" -gt 0 ] && [ "$waited" -ge "$WAIT_WARN" ]; then
-      note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for the machine-wide build lock, past the ${WAIT_WARN}s ceiling${place:+ - }${place}${holder:+ - }${holder}"
+      note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN, past the ${WAIT_WARN}s ceiling${place:+ - }${place}${ctx:+ - }${ctx}"
       if [ "$paused" = 0 ]; then
         paused=1
-        fm_build_lock_task_status "paused: waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock to run $DISPLAY_LINE${holder:+ - }${holder}"
+        fm_build_lock_task_status "paused: waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN to run $DISPLAY_LINE${ctx:+ - }${ctx}"
       fi
     else
-      note "still waiting $(fm_build_lock_elapsed "$waited") for the machine-wide build lock${place:+ - }${place}${holder:+ - }${holder}"
+      note "still waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN${place:+ - }${place}${ctx:+ - }${ctx}"
     fi
-    if [ -n "$FM_BUILD_LOCK_HOLDER_SECS" ] && [ "$HOLD_WARN" -gt 0 ] \
-      && [ "$FM_BUILD_LOCK_HOLDER_SECS" -ge "$HOLD_WARN" ]; then
-      note "WARNING: the holder has held the build lock $(fm_build_lock_elapsed "$FM_BUILD_LOCK_HOLDER_SECS"), past the ${HOLD_WARN}s ceiling; it is not being killed"
+    if [ -n "$FM_BUILD_LOCK_WAIT_OLDEST_SECS" ] && [ "$HOLD_WARN" -gt 0 ] \
+      && [ "$FM_BUILD_LOCK_WAIT_OLDEST_SECS" -ge "$HOLD_WARN" ]; then
+      if [ "$FM_BUILD_LOCK_MULTI" = 1 ]; then
+        note "WARNING: the oldest holder has held its slot $(fm_build_lock_elapsed "$FM_BUILD_LOCK_WAIT_OLDEST_SECS"), past the ${HOLD_WARN}s ceiling; it is not being killed"
+      else
+        note "WARNING: the holder has held the build lock $(fm_build_lock_elapsed "$FM_BUILD_LOCK_WAIT_OLDEST_SECS"), past the ${HOLD_WARN}s ceiling; it is not being killed"
+      fi
     fi
   done
   now=$(date +%s)
   waited=$((now - start))
+  fm_build_lock_reap_dead_slots
   fm_build_lock_queue_leave
-  note "acquired the machine-wide build lock after $(fm_build_lock_elapsed "$waited")"
+  note "acquired $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited")"
   [ "$paused" = 0 ] \
-    || fm_build_lock_task_status "working: acquired the machine-wide build lock after $(fm_build_lock_elapsed "$waited")"
+    || fm_build_lock_task_status "working: acquired $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited")"
 }
 
 # --- release ----------------------------------------------------------------
 
-FM_BUILD_LOCK_HELD=0
 FM_BUILD_LOCK_CHILD=
+
+# Give back every slot this process owns and nothing else: a slot is released by
+# its own holder, which is what keeps one holder's exit from disturbing another.
+# For a whole-machine run this includes slots it had only RESERVED while
+# draining, so an interrupted drain frees them at once rather than leaving them
+# for the next claimer's liveness reclaim.
+fm_build_lock_release_slots() {
+  local k
+  for k in $FM_BUILD_LOCK_HELD_SLOTS; do
+    fm_build_lock_slot_paths "$k"
+    rm -f -- "$FM_BUILD_LOCK_SLOT_INFO" 2>/dev/null || true
+    fm_lock_release "$FM_BUILD_LOCK_SLOT_PATH" || true
+  done
+  FM_BUILD_LOCK_HELD_SLOTS=
+}
 
 # shellcheck disable=SC2329 # Reached only through the EXIT trap below.
 fm_build_lock_release_now() {
-  # An invocation interrupted while still waiting holds a ticket and no lock;
+  # An invocation interrupted while still waiting holds a ticket and no slot;
   # giving it back here retires it at once rather than leaving it for the reaper.
   fm_build_lock_queue_leave
-  [ "$FM_BUILD_LOCK_HELD" = 1 ] || return 0
-  FM_BUILD_LOCK_HELD=0
-  rm -f -- "$INFO" 2>/dev/null || true
-  fm_lock_release "$LOCK" || true
+  fm_build_lock_release_slots
 }
 
 # Release runs from a trap rather than after the wrapped command, so a wrapper
@@ -650,6 +1321,7 @@ fm_build_lock_on_signal() {  # <signal-name> <signal-number>
 MODE=run
 INSTALL_DIR=
 LABEL=
+SET_SLOTS=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -670,6 +1342,22 @@ while [ "$#" -gt 0 ]; do
       MODE='lock-path'
       shift
       [ "$#" -eq 0 ] || die "--lock-path takes no further arguments"
+      ;;
+    --slots-path)
+      MODE='slots-path'
+      shift
+      [ "$#" -eq 0 ] || die "--slots-path takes no further arguments"
+      ;;
+    --set-slots)
+      MODE='set-slots'
+      shift
+      [ "$#" -eq 1 ] || die "--set-slots takes exactly one count"
+      SET_SLOTS=$1
+      shift
+      ;;
+    --exclusive)
+      FM_BUILD_LOCK_EXCLUSIVE_FLAG=1
+      shift
       ;;
     --label)
       shift
@@ -725,9 +1413,25 @@ INFO="$LOCK_ROOT/fm-build-lock.info"
 QUEUE="$LOCK_ROOT/fm-build-lock.queue"
 QLOCK="$LOCK_ROOT/fm-build-lock.queue.lock"
 
+# The names deliberately do not start with `fm-build-lock`, so a reaper or a
+# residue check that globs for lock artifacts keeps meaning "lock residue" and
+# never sweeps up a machine's settings.
+SETTINGS_DIR=$(fm_build_lock_settings_dir) || SETTINGS_DIR=
+SLOTS_FILE=
+EXCLUSIVE_FILE=
+if [ -n "$SETTINGS_DIR" ]; then
+  SLOTS_FILE="$SETTINGS_DIR/build-lock-slots"
+  EXCLUSIVE_FILE="$SETTINGS_DIR/build-lock-exclusive"
+fi
+
 case "$MODE" in
   lock-path)
     printf '%s\n' "$LOCK"
+    exit 0
+    ;;
+  slots-path)
+    [ -n "$SLOTS_FILE" ] || die "cannot resolve this account's settings directory"
+    printf '%s\n' "$SLOTS_FILE"
     exit 0
     ;;
   install)
@@ -746,45 +1450,176 @@ esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-if [ "$MODE" = status ]; then
-  fm_build_lock_read_holder "$LOCK" "$INFO"
-  if [ -n "$FM_BUILD_LOCK_HOLDER_TEXT" ]; then
-    printf '%s\n' "$FM_BUILD_LOCK_HOLDER_TEXT"
-  else
-    printf 'free\n'
-  fi
-  exit 0
-fi
+fm_build_lock_status_problem() {
+  [ -n "$FM_BUILD_LOCK_SLOTS_PROBLEM" ] || return 0
+  printf ' - %s' "$FM_BUILD_LOCK_SLOTS_PROBLEM"
+}
 
-# --- nested inside a hold ---------------------------------------------------
-
-case "${FM_BUILD_LOCK_HELD_BY:-}" in
-  ''|*[!0-9]*) : ;;
-  *)
-    if [ "${FM_BUILD_LOCK_HELD_LOCK:-}" = "$LOCK" ] \
-      && [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$FM_BUILD_LOCK_HELD_BY" ] \
-      && fm_pid_alive "$FM_BUILD_LOCK_HELD_BY"; then
-      exec "$@"
+# Nothing in this repository parses --status; its readers are people and agents.
+# Every slot line reuses fm_build_lock_read_holder unchanged, including its
+# "held by pid N (no command record)" answer.
+fm_build_lock_print_status() {
+  local n k highest held=0 last
+  local -a slot_text slot_pid slot_state slot_display slot_secs
+  fm_build_lock_read_slots
+  n=$FM_BUILD_LOCK_SLOTS
+  highest=$(fm_build_lock_highest_slot)
+  [ "$highest" -ge "$n" ] 2>/dev/null || highest=$n
+  if [ "$n" -le 1 ] && [ "$highest" -le 1 ]; then
+    # One slot and nothing above it: today's output, from today's format string.
+    fm_build_lock_read_holder "$LOCK" "$INFO"
+    if [ -n "$FM_BUILD_LOCK_HOLDER_TEXT" ]; then
+      printf '%s%s\n' "$FM_BUILD_LOCK_HOLDER_TEXT" "$(fm_build_lock_status_problem)"
+    else
+      printf 'free%s\n' "$(fm_build_lock_status_problem)"
     fi
+    return 0
+  fi
+  k=1
+  while [ "$k" -le "$highest" ]; do
+    fm_build_lock_slot_paths "$k"
+    fm_build_lock_read_holder "$FM_BUILD_LOCK_SLOT_PATH" "$FM_BUILD_LOCK_SLOT_INFO"
+    slot_text[k]=$FM_BUILD_LOCK_HOLDER_TEXT
+    slot_pid[k]=$FM_BUILD_LOCK_HOLDER_PID
+    slot_state[k]=$FM_BUILD_LOCK_HOLDER_STATE
+    slot_display[k]=$FM_BUILD_LOCK_HOLDER_DISPLAY
+    slot_secs[k]=$FM_BUILD_LOCK_HOLDER_SECS
+    [ -z "$FM_BUILD_LOCK_HOLDER_TEXT" ] || held=$((held + 1))
+    k=$((k + 1))
+  done
+  # Still begins with `free` when nothing is held, so a reader looking for that
+  # word finds it wherever the count happens to be set.
+  if [ "$held" -eq 0 ]; then
+    printf 'free - 0 of %s build slots held%s\n' "$n" "$(fm_build_lock_status_problem)"
+  else
+    fm_build_lock_queue_scan
+    printf '%s of %s build slots held, %s waiting%s\n' \
+      "$held" "$n" "$FM_BUILD_LOCK_QUEUE_COUNT" "$(fm_build_lock_status_problem)"
+  fi
+  k=1
+  while [ "$k" -le "$highest" ]; do
+    if [ -z "${slot_text[$k]}" ]; then
+      printf 'slot %s: free\n' "$k"
+      k=$((k + 1))
+      continue
+    fi
+    if [ "${slot_state[$k]}" = reserved ]; then
+      if [ -n "${slot_secs[$k]}" ]; then
+        printf 'slot %s: reserved by pid %s for %s, draining for a whole-machine run: %s\n' \
+          "$k" "${slot_pid[$k]}" "$(fm_build_lock_elapsed "${slot_secs[$k]}")" "${slot_display[$k]}"
+      else
+        printf 'slot %s: reserved by pid %s, draining for a whole-machine run: %s\n' \
+          "$k" "${slot_pid[$k]}" "${slot_display[$k]}"
+      fi
+      k=$((k + 1))
+      continue
+    fi
+    if [ "${slot_state[$k]}" = running ]; then
+      # The slots one pid holds for one whole-machine run are one hold, so they
+      # are reported as one rather than as several concurrent builds.
+      last=$k
+      while [ $((last + 1)) -le "$highest" ] \
+        && [ "${slot_state[$((last + 1))]:-}" = running ] \
+        && [ "${slot_pid[$((last + 1))]:-}" = "${slot_pid[$k]}" ]; do
+        last=$((last + 1))
+      done
+      if [ "$last" -gt "$k" ]; then
+        printf 'slots %s-%s: whole machine, %s\n' "$k" "$last" "${slot_text[$k]}"
+      else
+        printf 'slot %s: whole machine, %s\n' "$k" "${slot_text[$k]}"
+      fi
+      k=$((last + 1))
+      continue
+    fi
+    if [ "$k" -gt "$n" ]; then
+      printf 'slot %s: %s (above the configured count of %s; finishing, will not be refilled)\n' \
+        "$k" "${slot_text[$k]}" "$n"
+    else
+      printf 'slot %s: %s\n' "$k" "${slot_text[$k]}"
+    fi
+    k=$((k + 1))
+  done
+}
+
+case "$MODE" in
+  status)
+    fm_build_lock_print_status
+    exit 0
+    ;;
+  set-slots)
+    case "$SET_SLOTS" in
+      ''|*[!0-9]*) die "--set-slots takes a whole number of slots, got '$SET_SLOTS'" ;;
+    esac
+    [ "$SET_SLOTS" -gt 0 ] 2>/dev/null \
+      || die "--set-slots must be greater than zero, got '$SET_SLOTS'"
+    [ -n "$SLOTS_FILE" ] || die "cannot resolve this account's settings directory"
+    mkdir -p "$SETTINGS_DIR" 2>/dev/null \
+      || die "settings directory is unavailable: $SETTINGS_DIR"
+    SET_SLOTS_TMP="$SLOTS_FILE.$$.tmp"
+    # Through a temporary file and a rename: waiters re-read this file on every
+    # poll, and a plain truncate-and-write would let one catch it empty for an
+    # instant and report a count that was never written.
+    if ! printf '%s\n' "$SET_SLOTS" > "$SET_SLOTS_TMP" 2>/dev/null \
+      || ! mv -f -- "$SET_SLOTS_TMP" "$SLOTS_FILE" 2>/dev/null; then
+      rm -f -- "$SET_SLOTS_TMP" 2>/dev/null || true
+      die "could not write the slot count: $SLOTS_FILE"
+    fi
+    fm_build_lock_print_status
+    exit 0
     ;;
 esac
 
-# The lock's recorded owner being a live ancestor of this process also means we
-# are inside its hold, whichever entry point or version took it.
+# --- nested inside a hold ---------------------------------------------------
+
+# Deliberately not bounded by the current count: N can be lowered in the middle
+# of a hold, and that hold is still a hold. An invocation nested inside a slot-2
+# hold that only recognised slot 1 would queue for a second slot while its own
+# ancestor waits on it, taking two slots for one run at best.
+fm_build_lock_nested_passthrough() {
+  local held=${FM_BUILD_LOCK_HELD_LOCK:-}
+  case "${FM_BUILD_LOCK_HELD_BY:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_build_lock_slot_index "$held" >/dev/null || return 1
+  [ "$(cat "$held/pid" 2>/dev/null || true)" = "$FM_BUILD_LOCK_HELD_BY" ] || return 1
+  fm_pid_alive "$FM_BUILD_LOCK_HELD_BY"
+}
+
+# A slot's recorded owner being a live ancestor of this process also means we
+# are inside its hold, whichever entry point or version took it. The ancestor
+# walk runs at most once and is skipped entirely when no slot is held.
 fm_build_lock_owner_is_ancestor() {
-  local owner walk=$$ depth=0
-  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
-  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
-  fm_pid_alive "$owner" || return 1
+  local owners='' entry suffix owner walk=$$ depth=0
+  for entry in "$LOCK" "$LOCK".slot*; do
+    if [ "$entry" != "$LOCK" ]; then
+      suffix=${entry#"$LOCK".slot}
+      case "$suffix" in
+        ''|*[!0-9]*) continue ;;
+      esac
+    fi
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    owner=$(cat "$entry/pid" 2>/dev/null || true)
+    case "$owner" in ''|*[!0-9]*) continue ;; esac
+    fm_pid_alive "$owner" || continue
+    owners="$owners $owner"
+  done
+  [ -n "$owners" ] || return 1
   while [ "$depth" -lt 64 ]; do
     walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
     case "$walk" in ''|*[!0-9]*|0|1) return 1 ;; esac
-    [ "$walk" = "$owner" ] && return 0
+    case "$owners " in
+      *" $walk "*) return 0 ;;
+    esac
     depth=$((depth + 1))
   done
   return 1
 }
-if fm_build_lock_owner_is_ancestor; then
+
+if fm_build_lock_nested_passthrough || fm_build_lock_owner_is_ancestor; then
+  # --exclusive cannot widen an ancestor's hold, and waiting for the rest of the
+  # machine here would be waiting on that ancestor.
+  [ "$FM_BUILD_LOCK_EXCLUSIVE_FLAG" = 0 ] \
+    || note "already inside a build hold, so --exclusive is ignored and this runs straight through"
   exec "$@"
 fi
 
@@ -804,19 +1639,20 @@ else
   DISPLAY_LINE="$(fm_build_lock_render_command "$@") [in $(pwd -P)]"
 fi
 
-fm_build_lock_acquire "$LOCK" "$INFO"
-FM_BUILD_LOCK_HELD=1
+fm_build_lock_acquire
 
 STARTED=$(date +%s)
 HELD_SINCE=$SECONDS
-fm_build_lock_write_info "$INFO" "$$" "$STARTED" "$DISPLAY_LINE" || true
+
+fm_build_lock_publish_holder "$STARTED"
+fm_build_lock_slot_paths "$(fm_build_lock_lowest_held_slot)"
 
 # An explicit stdin redirection is required: bash sends an asynchronous
 # command's stdin to /dev/null when job control is off, which would silently
 # starve any wrapped command that reads input. Job control being off is also why
 # the child stays in this process group, so a terminal interrupt still reaches
 # it directly.
-FM_BUILD_LOCK_HELD_BY=$$ FM_BUILD_LOCK_HELD_LOCK=$LOCK "$@" <&0 &
+FM_BUILD_LOCK_HELD_BY=$$ FM_BUILD_LOCK_HELD_LOCK=$FM_BUILD_LOCK_SLOT_PATH "$@" <&0 &
 FM_BUILD_LOCK_CHILD=$!
 
 # SECONDS is bash's own wall clock, so the ceiling costs no fork per tick.
@@ -832,7 +1668,11 @@ while kill -0 "$FM_BUILD_LOCK_CHILD" 2>/dev/null; do
   if [ "$HELD_REPORTED" = 0 ]; then
     HELD_REPORTED=1
     fm_build_lock_queue_scan
-    fm_build_lock_task_status "note: holding the machine-wide build lock for $(fm_build_lock_elapsed "$HELD") with $FM_BUILD_LOCK_QUEUE_COUNT waiting, past the ${HOLD_WARN}s ceiling; not being killed: $DISPLAY_LINE"
+    if [ "$FM_BUILD_LOCK_MULTI" = 1 ]; then
+      fm_build_lock_task_status "note: holding $(fm_build_lock_held_slot_count) of $FM_BUILD_LOCK_N machine-wide build slots for $(fm_build_lock_elapsed "$HELD") with $FM_BUILD_LOCK_QUEUE_COUNT waiting, past the ${HOLD_WARN}s ceiling; not being killed: $DISPLAY_LINE"
+    else
+      fm_build_lock_task_status "note: holding the machine-wide build lock for $(fm_build_lock_elapsed "$HELD") with $FM_BUILD_LOCK_QUEUE_COUNT waiting, past the ${HOLD_WARN}s ceiling; not being killed: $DISPLAY_LINE"
+    fi
   fi
 done
 

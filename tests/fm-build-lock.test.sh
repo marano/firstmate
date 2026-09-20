@@ -820,5 +820,859 @@ assert_grep 'Never put one invocation around a' "$TMP_ROOT/help.out" \
   "--help must forbid one invocation around a loop of separate runs"
 pass "--help states one invocation per run, never one around a loop of runs"
 
+
+# ============================================================================
+# The counting semaphore.
+#
+# Everything above this line ran with no slot-count file anywhere, which IS the
+# dark landing: the effective count is 1, slot 1 is today's lock path, and every
+# message, status line and --status above came from today's format strings.
+# ============================================================================
+
+# A private root per case. With FM_BUILD_LOCK_DIR set the machine-level settings
+# live in that same root, which is the whole test seam: one root has exactly one
+# count by construction, and no case can leak a count into another. The settings
+# names deliberately do not start with `fm-build-lock`, so lock_artifacts above
+# keeps meaning "lock residue" in these roots too.
+slot_root() {  # <name> [<count>]
+  local lockroot="$TMP_ROOT/root-$1"
+  rm -rf "$lockroot"
+  mkdir -p "$lockroot"
+  [ "$#" -lt 2 ] || printf '%s\n' "$2" > "$lockroot/build-lock-slots"
+  printf '%s\n' "$lockroot"
+}
+
+# One ordinary invocation against <root>, which also asserts the root is left
+# clean. The slots are usable afterwards or the preceding case broke them.
+settle_root() {  # <root>
+  FM_BUILD_LOCK_DIR="$1" "$SCRIPT" true >/dev/null 2>&1 \
+    || fail "the slots were unusable after the preceding case"
+  assert_equals 0 "$(lock_artifacts "$1")" \
+    "the preceding case left build-lock residue behind"
+}
+
+# Start a fixture that takes a slot and holds it until its release marker
+# appears, recording its pid in <pid-var>. Never started through a command
+# substitution: the background job would belong to that subshell and outlive the
+# case that started it.
+hold_slot() {  # <pid-var> <root> <tag> [args-before-the-command...]
+  local var=$1 lockroot=$2 tag=$3
+  shift 3
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" "$@" sh -c \
+    "touch '$TMP_ROOT/$tag.held'; while [ ! -e '$TMP_ROOT/$tag.release' ]; do sleep 0.05; done" \
+    >/dev/null 2>&1 &
+  printf -v "$var" '%s' "$!"
+  await_path "$TMP_ROOT/$tag.held" || fail "the $tag fixture never took a slot"
+}
+
+release_slot() {  # <pid> <tag>
+  touch "$TMP_ROOT/$2.release"
+  wait "$1" 2>/dev/null || true
+}
+
+# The exclusion gauge. Each job marks itself present, waits, records how many
+# marks it can see with it, then stays a little longer. The largest number any
+# job recorded is the most that ever held a slot at one moment, which is both
+# the upper bound exclusion needs and the lower bound that proves the slots are
+# real rather than one mutex wearing N names.
+GAUGE_JOB="$TMP_ROOT/gauge-job.sh"
+cat > "$GAUGE_JOB" <<'JOB'
+#!/usr/bin/env bash
+set -u
+marks=$1/marks
+obs=$1/obs
+: > "$marks/$$"
+sleep 0.3
+ls "$marks" | wc -l | tr -d ' ' > "$obs/$$"
+sleep 0.5
+rm -f "$marks/$$"
+JOB
+chmod +x "$GAUGE_JOB"
+
+GAUGE_SEQ=0
+GAUGE_MAX=0
+gauge_run() {  # <root> <jobs> [extra-args-before-the-command...]
+  local lockroot=$1 jobs=$2 i=0 pid pids='' dir
+  shift 2
+  GAUGE_SEQ=$((GAUGE_SEQ + 1))
+  dir="$TMP_ROOT/gauge.$GAUGE_SEQ"
+  mkdir -p "$dir/marks" "$dir/obs"
+  while [ "$i" -lt "$jobs" ]; do
+    i=$((i + 1))
+    FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" "$@" bash "$GAUGE_JOB" "$dir" >/dev/null 2>&1 &
+    pids="$pids $!"
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  GAUGE_MAX=$(cat "$dir"/obs/* 2>/dev/null | sort -n | tail -1)
+  case "$GAUGE_MAX" in
+    ''|*[!0-9]*) GAUGE_MAX=0 ;;
+  esac
+}
+
+# --- N holders run together, and never more than N --------------------------
+# A1 and A2 are two assertions on one gauge and neither is redundant: a plain
+# mutex satisfies A1 and proves nothing, while A2 alone would pass a slot loop
+# that ran to N+1.
+# Mutants: (A1) run the slot loop to N+1 - the gauge records N+1; (A2) stop the
+# slot loop at slot 1 - the gauge records 1 and A1 still passes.
+
+for n in 2 3; do
+  GAUGE_ROOT=$(slot_root "gauge$n" "$n")
+  gauge_run "$GAUGE_ROOT" $((3 * n))
+  [ "$GAUGE_MAX" -le "$n" ] \
+    || fail "$GAUGE_MAX invocations held a slot at once under a count of $n"
+  assert_equals "$n" "$GAUGE_MAX" \
+    "a count of $n never actually ran $n invocations together"
+  assert_equals 0 "$(lock_artifacts "$GAUGE_ROOT")" \
+    "a count of $n left build-lock residue behind"
+done
+pass "a count of N runs exactly N invocations at once, never more, and leaves nothing behind"
+
+# --- only the OLDEST ticket may try, at every count -------------------------
+# The rejected generalisation is "the N oldest may try". With both slots busy it
+# makes the two oldest eligible, so when one frees, whichever polls first takes
+# it - and a tight release-and-rejoin loop always polls first. Measured under
+# that rule at N=2, the later arrival took the freed slot in every run and ran
+# 7, 7 and 23 times before the earlier one.
+# Mutant: in fm_build_lock_my_turn, admit while fewer than N tickets are ahead
+# (`ahead < N`) instead of only the oldest.
+
+FAIR2_ROOT=$(slot_root fair2 2)
+FAIR2_ORDER="$TMP_ROOT/fair2-order"
+FAIR2_PATIENT_ERR="$TMP_ROOT/fair2-patient.err"
+FAIR2_BARGER_ERR="$TMP_ROOT/fair2-barger.err"
+: > "$FAIR2_ORDER"
+: > "$FAIR2_PATIENT_ERR"
+: > "$FAIR2_BARGER_ERR"
+
+FAIR2_A=
+FAIR2_B=
+hold_slot FAIR2_A "$FAIR2_ROOT" fair2-a
+hold_slot FAIR2_B "$FAIR2_ROOT" fair2-b
+
+FM_BUILD_LOCK_DIR="$FAIR2_ROOT" FM_BUILD_LOCK_POLL=2 FM_BUILD_LOCK_NOTICE_INTERVAL=1 \
+  "$SCRIPT" sh -c "printf 'patient\n' >> '$FAIR2_ORDER'" >/dev/null 2>"$FAIR2_PATIENT_ERR" &
+FAIR2_PATIENT=$!
+await_grep 'WAITING, not wedged' "$FAIR2_PATIENT_ERR" \
+  || fail "the patient waiter never reported that it was waiting for a slot"
+
+( while [ ! -e "$TMP_ROOT/fair2-barge-stop" ]; do
+    FM_BUILD_LOCK_DIR="$FAIR2_ROOT" FM_BUILD_LOCK_POLL=0.02 FM_BUILD_LOCK_NOTICE_INTERVAL=1 \
+      "$SCRIPT" sh -c "printf 'barger\n' >> '$FAIR2_ORDER'" >/dev/null 2>>"$FAIR2_BARGER_ERR" || true
+  done ) &
+FAIR2_BARGER=$!
+await_grep 'WAITING, not wedged' "$FAIR2_BARGER_ERR" \
+  || fail "the barging loop never reached the slots"
+
+# The patient waiter's own poll, observable from outside: it prints on waking,
+# then sleeps its full two seconds before looking again. Freeing a slot here
+# hands the barger a window in which it polls a hundred times and the patient
+# waiter not once.
+await_grep 'still waiting' "$FAIR2_PATIENT_ERR" || fail "the patient waiter never reported a poll"
+release_slot "$FAIR2_A" fair2-a
+
+await_pid_exit "$FAIR2_PATIENT" || fail "the patient waiter never got a slot"
+wait "$FAIR2_PATIENT" 2>/dev/null || true
+touch "$TMP_ROOT/fair2-barge-stop"
+await_pid_exit "$FAIR2_BARGER" || fail "the barging loop never finished"
+wait "$FAIR2_BARGER" 2>/dev/null || true
+assert_equals 'patient' "$(head -1 "$FAIR2_ORDER")" \
+  "a tight release-then-reacquire loop took the freed slot ahead of an earlier arrival"
+assert_grep 'barger' "$FAIR2_ORDER" "the barging loop never got in at all, so this case proved nothing"
+release_slot "$FAIR2_B" fair2-b
+settle_root "$FAIR2_ROOT"
+pass "with several slots, only the oldest ticket may try, so an earlier arrival still goes first"
+
+# --- a dead holder's slot is reclaimed, a live holder's is not --------------
+# Each slot is its own instance of the lockdir mutex, with its own pid record
+# and its own steal guard, so reclaiming one cannot disturb another.
+# Mutants: (a) make the dead-holder path unreachable - C never gets in;
+# (b) reclaim the first busy slot without testing that slot's own pid - slot 1
+# stops recording the live holder A.
+
+RECLAIM_ROOT=$(slot_root reclaim 2)
+RECLAIM_A_MARK="$TMP_ROOT/reclaim-a"
+RECLAIM_A_RELEASE="$TMP_ROOT/reclaim-a-release"
+RECLAIM_B_MARK="$TMP_ROOT/reclaim-b"
+FM_BUILD_LOCK_DIR="$RECLAIM_ROOT" "$SCRIPT" sh -c \
+  "touch '$RECLAIM_A_MARK'; while [ ! -e '$RECLAIM_A_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+RECLAIM_A=$!
+await_path "$RECLAIM_A_MARK" || fail "the live-holder fixture never took a slot"
+FM_BUILD_LOCK_DIR="$RECLAIM_ROOT" "$SCRIPT" sh -c "touch '$RECLAIM_B_MARK'; sleep 120" \
+  >/dev/null 2>&1 &
+RECLAIM_B=$!
+await_path "$RECLAIM_B_MARK" || fail "the dead-holder fixture never took a slot"
+sleep 0.3
+RECLAIM_A_PID=$(cat "$RECLAIM_ROOT/fm-build-lock/pid" 2>/dev/null || true)
+[ -n "$RECLAIM_A_PID" ] || fail "slot 1 recorded no holder while both slots were held"
+# SIGKILL the wrapper, so no trap runs and slot 2 is left recorded by a process
+# that no longer exists.
+kill -9 "$RECLAIM_B" 2>/dev/null || true
+wait "$RECLAIM_B" 2>/dev/null || true
+pkill -P "$RECLAIM_B" 2>/dev/null || true
+
+RECLAIM_C_OUT="$TMP_ROOT/reclaim-c.out"
+( FM_BUILD_LOCK_DIR="$RECLAIM_ROOT" "$SCRIPT" printf 'reclaimed\n' > "$RECLAIM_C_OUT" 2>/dev/null ) &
+RECLAIM_C=$!
+await_pid_exit "$RECLAIM_C" || fail "a slot left by a dead holder blocked the next invocation forever"
+wait "$RECLAIM_C" 2>/dev/null || true
+assert_equals 'reclaimed' "$(cat "$RECLAIM_C_OUT" 2>/dev/null || true)" \
+  "a slot whose holder died must be reclaimed while another slot is still held"
+kill -0 "$RECLAIM_A" 2>/dev/null || fail "the live holder stopped before this case could check its slot"
+assert_equals "$RECLAIM_A_PID" "$(cat "$RECLAIM_ROOT/fm-build-lock/pid" 2>/dev/null || true)" \
+  "reclaiming a dead holder's slot took the live holder's slot with it"
+touch "$RECLAIM_A_RELEASE"
+wait "$RECLAIM_A" 2>/dev/null || true
+settle_root "$RECLAIM_ROOT"
+pass "a dead holder's slot is reclaimed while a live holder keeps its own, and nothing is left behind"
+
+# --- N=1 is today's lock, byte for byte -------------------------------------
+# The whole suite above already runs with no slot-count file. This pins the
+# WORDING as well: the normalised stderr of a waiter and of a holder, the three
+# status-file lines, and --status held and free. The transcript below was
+# captured from the pre-change script and is identical to it.
+# Mutants: use the multi-slot --status format at N=1; rename slot 1's path; say
+# "build slot" instead of "build lock" at N=1 - each reds this transcript, and
+# the first two also red the existing --status and --lock-path cases above.
+
+n1_transcript() {  # <root>
+  local lockroot=$1
+  local w="$lockroot/work"
+  local e h waiter
+  mkdir -p "$w"
+  e='[0-9][0-9]*[hms]\([0-9][0-9]*[ms]\)\{0,1\}'
+  norm() {
+    sed -e "s#$w#WORK#g" -e "s#$lockroot#ROOT#g" \
+        -e 's/pid [0-9][0-9]*/pid PID/g' \
+        -e "s/for $e/for AGE/g" -e "s/after $e/after AGE/g" \
+        -e "s/WAITING $e/WAITING AGE/g" -e "s/waiting $e/waiting AGE/g" \
+        -e "s/build lock $e/build lock AGE/g" -e "s/its slot $e/its slot AGE/g" \
+        -e "s#\[in [^]]*\]#[in CWD]#g"
+  }
+  # Never started through a command substitution: the background job would
+  # belong to that subshell and outlive the section that started it.
+  hold_until() {  # <mark> <release>
+    FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" sh -c \
+      "touch '$1'; while [ ! -e '$2' ]; do sleep 0.05; done" >/dev/null 2>&1 &
+    HOLDER=$!
+    await_path "$1" || fail "a transcript fixture never took the lock"
+  }
+
+  echo "== free =="
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status 2>&1 | norm
+
+  echo "== held =="
+  hold_until "$w/h1" "$w/r1"
+  h=$HOLDER
+  sleep 0.3
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status 2>&1 | norm
+  touch "$w/r1"
+  wait "$h" 2>/dev/null || true
+
+  echo "== waiter =="
+  hold_until "$w/h2" "$w/r2"
+  h=$HOLDER
+  : > "$w/wait.status"
+  ( FM_BUILD_LOCK_DIR="$lockroot" FM_TASK_STATUS="$w/wait.status" \
+      FM_BUILD_LOCK_NOTICE_INTERVAL=1 FM_BUILD_LOCK_WAIT_WARN=1 FM_BUILD_LOCK_HOLD_WARN=1 \
+      "$SCRIPT" sleep 2 >/dev/null 2>"$w/wait.err" ) &
+  waiter=$!
+  await_grep 'past the 1s ceiling' "$w/wait.err" \
+    || fail "the transcript waiter never passed its wait ceiling"
+  sleep 2
+  # Snapshot the waiting notices while the holder is certainly still alive. A
+  # notice that lands in the same instant as the release reads the lock between
+  # two owners and so names no holder: a real shape of this output in every
+  # version of this script, but a coin toss, and a golden transcript must not
+  # turn on one.
+  cp "$w/wait.err" "$w/wait.err.snapshot"
+  touch "$w/r2"
+  wait "$waiter" 2>/dev/null || true
+  wait "$h" 2>/dev/null || true
+  norm < "$w/wait.err.snapshot" | sort -u
+  echo "-- after the release --"
+  norm < "$w/wait.err" | sort -u \
+    | grep -E 'acquired the machine-wide|this command has held' || true
+  echo "-- status --"
+  norm < "$w/wait.status"
+
+  echo "== holder with a waiter =="
+  : > "$w/hold.status"
+  FM_BUILD_LOCK_DIR="$lockroot" FM_TASK_STATUS="$w/hold.status" FM_BUILD_LOCK_HOLD_WARN=3 \
+    "$SCRIPT" sh -c "touch '$w/h3'; sleep 6" >/dev/null 2>"$w/hold.err" &
+  h=$!
+  await_path "$w/h3" || fail "the transcript holder fixture never started"
+  : > "$w/w3.err"
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" true >/dev/null 2>"$w/w3.err" &
+  waiter=$!
+  # The waiter must be IN LINE before the ceiling fires, or the holder's line
+  # reports a queue depth that depends on the scheduler rather than on the case.
+  await_grep 'WAITING, not wedged' "$w/w3.err" || fail "the transcript waiter never got into line"
+  wait "$h" 2>/dev/null || true
+  wait "$waiter" 2>/dev/null || true
+  norm < "$w/hold.err" | sort -u
+  echo "-- status --"
+  norm < "$w/hold.status"
+
+  echo "== free again =="
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status 2>&1 | norm
+  echo "== residue =="
+  lock_artifacts "$lockroot"
+}
+
+read -r -d '' N1_GOLDEN <<'GOLDEN' || true
+== free ==
+free
+== held ==
+held by pid PID for AGE running: sh -c touch\ \'WORK/h1\'\;\ while\ \[\ \!\ -e\ \'WORK/r1\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
+== waiter ==
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD])
+fm-build-lock: WARNING: still WAITING AGE for the machine-wide build lock, past the 1s ceiling - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
+fm-build-lock: WARNING: the holder has held the build lock AGE, past the 1s ceiling; it is not being killed
+-- after the release --
+fm-build-lock: acquired the machine-wide build lock after AGE
+fm-build-lock: WARNING: this command has held the machine-wide build lock for AGE and is blocking every other local build: sleep 2 [in CWD]
+-- status --
+paused: waiting AGE for the machine-wide build lock to run sleep 2 [in CWD] - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
+working: acquired the machine-wide build lock after AGE
+note: holding the machine-wide build lock for AGE with 0 waiting, past the 1s ceiling; not being killed: sleep 2 [in CWD]
+== holder with a waiter ==
+fm-build-lock: WARNING: this command has held the machine-wide build lock for AGE and is blocking every other local build: sh -c touch\ \'WORK/h3\'\;\ sleep\ 6 [in CWD]
+-- status --
+note: holding the machine-wide build lock for AGE with 1 waiting, past the 3s ceiling; not being killed: sh -c touch\ \'WORK/h3\'\;\ sleep\ 6 [in CWD]
+== free again ==
+free
+== residue ==
+0
+GOLDEN
+
+N1_ABSENT_ROOT=$(slot_root n1-absent)
+assert_equals "$N1_GOLDEN" "$(n1_transcript "$N1_ABSENT_ROOT")" \
+  "with no slot-count file the lock must behave and speak exactly as it did before slots existed"
+
+N1_ONE_ROOT=$(slot_root n1-one 1)
+assert_equals "$N1_GOLDEN" "$(n1_transcript "$N1_ONE_ROOT")" \
+  "a slot-count file holding 1 must behave and speak exactly as no file at all"
+[ -z "$(find "$N1_ONE_ROOT" -maxdepth 1 -name 'fm-build-lock.slot*' 2>/dev/null)" ] \
+  || fail "a count of 1 created a slot above slot 1"
+pass "a count of 1, configured or not, is today's lock in every observable respect"
+
+# --- the slot count's grammar ------------------------------------------------
+# A bad value falls back to 1 and warns; it never stops a build, because one
+# typo that failed every build, lint and pipeline step on the machine would be
+# far worse than one that under-admits.
+# Mutants: die on a malformed value (the wrapped command stops running); read a
+# malformed value as a number or as unlimited (the gauge exceeds 1); drop the
+# clamp (the reported count exceeds the core count).
+
+grammar_case() {  # <name> <expected-n> <expect-warning 0|1> [writer...]
+  local name=$1 expect=$2 warn=$3 lockroot err
+  shift 3
+  lockroot=$(slot_root "grammar-$name")
+  [ "$#" -eq 0 ] || "$@" "$lockroot/build-lock-slots"
+  err="$TMP_ROOT/grammar-$name.err"
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" sh -c 'exit 7' 2>"$err"
+  expect_code 7 $? "a slot count that is $name must still run the command and pass its status through"
+  assert_equals "$warn" "$(grep -c 'fm-build-lock: WARNING' "$err" || true)" \
+    "a slot count that is $name must warn exactly $warn time(s) on stderr"
+  if [ "$warn" = 1 ]; then
+    assert_grep "build-lock-slots" "$err" "the warning for $name must name the file"
+  fi
+  gauge_run "$lockroot" "$((expect + 1))"
+  assert_equals "$expect" "$GAUGE_MAX" "a slot count that is $name must be read as $expect"
+  settle_root "$lockroot"
+}
+
+write_line() { printf '%s\n' "$1" > "$2"; }
+write_raw() { printf '%s' "$1" > "$2"; }
+write_two_lines() { printf '2\n3\n' > "$1"; }
+write_symlink() { ln -s /dev/null "$1"; }
+
+grammar_case absent      1 0
+grammar_case one         1 0 write_line 1
+grammar_case three       3 0 write_line 3
+grammar_case zero        1 1 write_line 0
+grammar_case negative    1 1 write_line -2
+grammar_case words       1 1 write_line two
+grammar_case empty       1 1 write_raw ''
+grammar_case two-lines   1 1 write_two_lines
+grammar_case inner-space 1 1 write_line '2 3'
+grammar_case symlink     1 1 write_symlink
+pass "the slot count falls back to 1 and warns on every bad value, and never stops the build"
+
+# Clamped to the machine rather than gauged, because proving a clamp of ten by
+# running ten concurrent holders would measure this machine, not the clamp.
+CLAMP_ROOT=$(slot_root clamp 100000)
+CLAMP_ERR="$TMP_ROOT/clamp.err"
+CLAMP_STATUS=$(FM_BUILD_LOCK_DIR="$CLAMP_ROOT" "$SCRIPT" --status 2>"$CLAMP_ERR")
+CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)
+[ "$CORES" -gt 0 ] || fail "this host reports no online core count, so the clamp cannot be checked"
+assert_contains "$CLAMP_STATUS" "0 of $CORES build slots held" \
+  "a slot count above the online core count must be clamped to it"
+assert_equals 1 "$(grep -c 'fm-build-lock: WARNING' "$CLAMP_ERR" || true)" \
+  "a clamped slot count must warn exactly once"
+assert_contains "$CLAMP_STATUS" '100000' "--status must name the value that was clamped"
+settle_root "$CLAMP_ROOT"
+pass "a slot count above the online core count is clamped to it and says so"
+
+# --- a waiting head picks up a raised count ---------------------------------
+# Mutant: read the count once at startup; the waiter stays blocked and the
+# bounded wait below reds.
+
+RAISE_ROOT=$(slot_root raise)
+RAISE_MARK="$TMP_ROOT/raise-held"
+RAISE_RELEASE="$TMP_ROOT/raise-release"
+RAISE_ERR="$TMP_ROOT/raise.err"
+: > "$RAISE_ERR"
+FM_BUILD_LOCK_DIR="$RAISE_ROOT" "$SCRIPT" sh -c \
+  "touch '$RAISE_MARK'; while [ ! -e '$RAISE_RELEASE' ]; do sleep 0.05; done" >/dev/null 2>&1 &
+RAISE_HOLDER=$!
+await_path "$RAISE_MARK" || fail "the raised-count fixture never took the lock"
+FM_BUILD_LOCK_DIR="$RAISE_ROOT" "$SCRIPT" printf 'raised\n' >"$TMP_ROOT/raise.out" 2>"$RAISE_ERR" &
+RAISE_WAITER=$!
+await_grep 'WAITING, not wedged' "$RAISE_ERR" || fail "the raised-count waiter never got into line"
+FM_BUILD_LOCK_DIR="$RAISE_ROOT" "$SCRIPT" --set-slots 2 >/dev/null 2>&1 \
+  || fail "--set-slots 2 failed"
+await_pid_exit "$RAISE_WAITER" 200 || fail "a waiter never picked up a raised slot count"
+wait "$RAISE_WAITER" 2>/dev/null || true
+kill -0 "$RAISE_HOLDER" 2>/dev/null \
+  || fail "the first holder finished before the waiter got in, so the raise proved nothing"
+assert_equals 'raised' "$(cat "$TMP_ROOT/raise.out" 2>/dev/null || true)" \
+  "the waiter must run once the count is raised"
+touch "$RAISE_RELEASE"
+wait "$RAISE_HOLDER" 2>/dev/null || true
+assert_equals "$RAISE_ROOT/build-lock-slots" "$(FM_BUILD_LOCK_DIR="$RAISE_ROOT" "$SCRIPT" --slots-path)" \
+  "--slots-path must print the file --set-slots writes"
+settle_root "$RAISE_ROOT"
+pass "a waiting head picks up a raised slot count within a poll, and --slots-path names that file"
+
+# --- a lowered count drains and is not refilled -----------------------------
+# Holders above the new count finish normally, but nothing new is admitted while
+# as many live holders as the new count allows remain on ANY slot on disk.
+# Mutant: count holders only within 1..N; the waiter takes slot 1 and two run
+# together under a count of one.
+
+LOWER_ROOT=$(slot_root lower 2)
+LOWER_OUT="$TMP_ROOT/lower.out"
+LOWER_ERR="$TMP_ROOT/lower.err"
+: > "$LOWER_OUT"
+: > "$LOWER_ERR"
+LOWER_A=
+LOWER_B=
+hold_slot LOWER_A "$LOWER_ROOT" lower-a
+hold_slot LOWER_B "$LOWER_ROOT" lower-b
+FM_BUILD_LOCK_DIR="$LOWER_ROOT" "$SCRIPT" printf 'lowered\n' >"$LOWER_OUT" 2>"$LOWER_ERR" &
+LOWER_WAITER=$!
+await_grep 'WAITING, not wedged' "$LOWER_ERR" || fail "the lowered-count waiter never got into line"
+FM_BUILD_LOCK_DIR="$LOWER_ROOT" "$SCRIPT" --set-slots 1 >/dev/null 2>&1 || fail "--set-slots 1 failed"
+release_slot "$LOWER_A" lower-a
+sleep 2
+kill -0 "$LOWER_WAITER" 2>/dev/null \
+  || fail "a waiter was admitted under a count of 1 while a holder above that count was still running"
+assert_equals '' "$(cat "$LOWER_OUT" 2>/dev/null || true)" \
+  "a waiter ran under a count of 1 while a holder above that count was still running"
+release_slot "$LOWER_B" lower-b
+await_pid_exit "$LOWER_WAITER" || fail "the waiter never got in after the drained holder finished"
+wait "$LOWER_WAITER" 2>/dev/null || true
+assert_equals 'lowered' "$(cat "$LOWER_OUT" 2>/dev/null || true)" \
+  "the waiter must run once the holder above the lowered count finishes"
+settle_root "$LOWER_ROOT"
+pass "a lowered count drains rather than being refilled, and admits nobody until it has"
+
+# --- a slot left by a killed high holder is retired, not left on the machine -
+# A claimer stops at the first free slot, so on a quiet machine nothing ever
+# reaches a high one again: a record left there by a SIGKILLed holder would sit
+# in the lock root for the life of the machine, and an idle machine having no
+# build-lock residue is a guarantee slots do not get to drop.
+# Mutant: drop the dead-slot reap from the acquire path; the single ordinary run
+# below then leaves the killed holder's slot 2 behind and the residue check reds.
+
+RESIDUE_ROOT=$(slot_root residue 2)
+RESIDUE_A=
+hold_slot RESIDUE_A "$RESIDUE_ROOT" residue-a
+FM_BUILD_LOCK_DIR="$RESIDUE_ROOT" "$SCRIPT" sh -c \
+  "touch '$TMP_ROOT/residue-high'; sleep 120" >/dev/null 2>&1 &
+RESIDUE_B=$!
+await_path "$TMP_ROOT/residue-high" || fail "the high-slot fixture never took slot 2"
+kill -9 "$RESIDUE_B" 2>/dev/null || true
+wait "$RESIDUE_B" 2>/dev/null || true
+pkill -P "$RESIDUE_B" 2>/dev/null || true
+release_slot "$RESIDUE_A" residue-a
+[ "$(lock_artifacts "$RESIDUE_ROOT")" -gt 0 ] \
+  || fail "the SIGKILLed high-slot holder should have left a slot record behind"
+# One ordinary run on an otherwise idle machine, which takes slot 1 and never
+# reaches slot 2 on its own.
+FM_BUILD_LOCK_DIR="$RESIDUE_ROOT" "$SCRIPT" true >/dev/null 2>&1 \
+  || fail "the slots were unusable after a high slot was left by a dead holder"
+assert_equals 0 "$(lock_artifacts "$RESIDUE_ROOT")" \
+  "a slot left by a dead high holder was still in the lock root after an idle-machine run"
+pass "a slot left by a killed high holder is retired by the next acquisition, not left behind"
+
+# --- a nested invocation inside a HIGH slot runs straight through -----------
+# An invocation nested inside a slot-2 hold that only recognised slot 1 would
+# queue for a second slot while its own ancestor waits on it, taking two slots
+# for one run at best and deadlocking at worst.
+# Mutants: compare FM_BUILD_LOCK_HELD_LOCK only with slot 1's path; read only
+# slot 1's owner in the ancestor check. Each leaves the inner invocation queued
+# and the bounded wait below reds.
+
+nested_high_slot_case() {  # <name> <inner-prefix...>
+  local name=$1 lockroot mark release out
+  shift
+  lockroot=$(slot_root "nested-$name" 2)
+  mark="$TMP_ROOT/nested-$name-held"
+  release="$TMP_ROOT/nested-$name-release"
+  out="$TMP_ROOT/nested-$name.out"
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" sh -c \
+    "touch '$mark'; while [ ! -e '$release' ]; do sleep 0.05; done" >/dev/null 2>&1 &
+  local fixture=$!
+  await_path "$mark" || fail "the $name fixture never took slot 1"
+  # shellcheck disable=SC2016 # The inner sh expands its own positional argument.
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" "$@" "$SCRIPT" sh -c 'printf "inner\n" >"$1"' _ "$out" \
+    >/dev/null 2>"$TMP_ROOT/nested-$name.err" &
+  local outer=$!
+  await_pid_exit "$outer" 200 \
+    || fail "an invocation nested inside a slot-2 hold ($name) deadlocked on its own holder"
+  wait "$outer" 2>/dev/null
+  expect_code 0 $? "the $name nested invocation must succeed"
+  assert_equals 'inner' "$(cat "$out" 2>/dev/null || true)" "the $name nested command must run"
+  kill -0 "$fixture" 2>/dev/null \
+    || fail "the $name fixture released slot 1 before the inner invocation finished"
+  touch "$release"
+  wait "$fixture" 2>/dev/null || true
+  settle_root "$lockroot"
+}
+
+nested_high_slot_case variables
+nested_high_slot_case ancestor env -u FM_BUILD_LOCK_HELD_BY -u FM_BUILD_LOCK_HELD_LOCK
+pass "a nested invocation inside a high slot runs through, by hold variables or by a live ancestor"
+
+# --- --status names every slot and every holder -----------------------------
+# Mutant: print slot 1 only.
+
+ST_ROOT=$(slot_root status3 3)
+assert_contains "$(FM_BUILD_LOCK_DIR="$ST_ROOT" "$SCRIPT" --status)" 'free - 0 of 3 build slots held' \
+  "with nothing held --status must still begin with free and name the count"
+ST_A=
+ST_B=
+ST_C=
+hold_slot ST_A "$ST_ROOT" st-a --label labelled-a
+hold_slot ST_B "$ST_ROOT" st-b --label labelled-b
+sleep 0.3
+ST_OUT=$(FM_BUILD_LOCK_DIR="$ST_ROOT" "$SCRIPT" --status)
+ST_PID_1=$(cat "$ST_ROOT/fm-build-lock/pid" 2>/dev/null || true)
+ST_PID_2=$(cat "$ST_ROOT/fm-build-lock.slot2/pid" 2>/dev/null || true)
+assert_equals '2 of 3 build slots held, 0 waiting' "$(printf '%s\n' "$ST_OUT" | head -1)" \
+  "--status must report how many slots are held, of how many, and how many are waiting"
+assert_contains "$ST_OUT" "slot 1: held by pid $ST_PID_1" "--status must name slot 1's holder"
+assert_contains "$ST_OUT" "slot 2: held by pid $ST_PID_2" "--status must name slot 2's holder"
+assert_contains "$ST_OUT" 'running: labelled-a' "--status must name what slot 1 is running"
+assert_contains "$ST_OUT" 'running: labelled-b' "--status must name what slot 2 is running"
+assert_contains "$ST_OUT" 'slot 3: free' "--status must report a free slot as free"
+
+# Fill the last slot so the next invocation really has to queue: the waiting
+# count is only worth printing when there is somebody to count.
+hold_slot ST_C "$ST_ROOT" st-c --label labelled-c
+ST_ERR="$TMP_ROOT/st-waiter.err"
+: > "$ST_ERR"
+FM_BUILD_LOCK_DIR="$ST_ROOT" "$SCRIPT" --label queued true >/dev/null 2>"$ST_ERR" &
+ST_WAITER=$!
+await_grep 'WAITING, not wedged' "$ST_ERR" || fail "the --status waiter never got into line"
+ST_FULL=$(FM_BUILD_LOCK_DIR="$ST_ROOT" "$SCRIPT" --status)
+release_slot "$ST_A" st-a
+release_slot "$ST_B" st-b
+release_slot "$ST_C" st-c
+await_pid_exit "$ST_WAITER" || fail "the --status waiter never got in"
+wait "$ST_WAITER" 2>/dev/null || true
+assert_equals '3 of 3 build slots held, 1 waiting' "$(printf '%s\n' "$ST_FULL" | head -1)" \
+  "--status must count the waiters behind full slots"
+case "$(FM_BUILD_LOCK_DIR="$ST_ROOT" "$SCRIPT" --status)" in
+  free*) : ;;
+  *) fail "with nothing held --status must still begin with free" ;;
+esac
+settle_root "$ST_ROOT"
+pass "--status names every slot, its holder and what it runs, and the waiting count"
+
+# --- a waiter's lines name the count and a holder ---------------------------
+# Mutants: drop the holder from the N>1 notice; give the waiter's status line
+# any verb but paused - the supervisor then reads an idle waiter as wedged or as
+# a decision.
+
+W2_ROOT=$(slot_root wait2 2)
+W2_STATUS="$TMP_ROOT/wait2.status"
+W2_ERR="$TMP_ROOT/wait2.err"
+: > "$W2_STATUS"
+: > "$W2_ERR"
+W2_A=
+W2_B=
+hold_slot W2_A "$W2_ROOT" w2-a --label busy-a
+hold_slot W2_B "$W2_ROOT" w2-b --label busy-b
+FM_BUILD_LOCK_DIR="$W2_ROOT" FM_TASK_STATUS="$W2_STATUS" \
+  FM_BUILD_LOCK_NOTICE_INTERVAL=1 FM_BUILD_LOCK_WAIT_WARN=1 \
+  "$SCRIPT" printf 'got-a-slot\n' >/dev/null 2>"$W2_ERR" &
+W2_WAITER=$!
+await_grep 'WAITING, not wedged' "$W2_ERR" || fail "the waiting-line waiter never got into line"
+sleep 2
+release_slot "$W2_A" w2-a
+release_slot "$W2_B" w2-b
+await_pid_exit "$W2_WAITER" || fail "the waiting-line waiter never got a slot"
+wait "$W2_WAITER" 2>/dev/null || true
+assert_grep 'waiting for a machine-wide build slot' "$W2_ERR" \
+  "a waiter at N>1 must say it is waiting for a slot"
+assert_grep 'WAITING, not wedged' "$W2_ERR" "the waiting notice must say the process is waiting, not wedged"
+assert_grep 'all 2 slots held' "$W2_ERR" "the waiting notice must name the slot count"
+assert_grep 'held by pid ' "$W2_ERR" "the waiting notice must name a holder's pid"
+assert_grep 'running: busy-' "$W2_ERR" "the waiting notice must name what a holder is running"
+assert_grep '1 more - see mutex --status' "$W2_ERR" "the waiting notice must count the holders it did not name"
+assert_grep 'acquired a machine-wide build slot after ' "$W2_ERR" "the waiter must report when it got a slot"
+W2_FIRST=$(sed -n 1p "$W2_STATUS")
+W2_SECOND=$(sed -n 2p "$W2_STATUS")
+assert_equals 2 "$(grep -c '' "$W2_STATUS")" "a long wait must append exactly a paused line and a working line"
+classify status_is_paused "$W2_FIRST" \
+  || fail "the waiter's first status line must be a declared paused: wait: $W2_FIRST"
+assert_contains "$W2_FIRST" 'all 2 slots held' "the waiter's paused line must name the slot count"
+assert_contains "$W2_FIRST" 'held by pid ' "the waiter's paused line must name a holder"
+case "$W2_SECOND" in
+  'working: acquired a machine-wide build slot after '*) : ;;
+  *) fail "the waiter must say working: once it gets a slot: $W2_SECOND" ;;
+esac
+settle_root "$W2_ROOT"
+pass "a waiter at N>1 names the slot count and a holder, and declares its wait as paused"
+
+# --- an ordinary hold never claims to block everyone ------------------------
+# At N>1 an ordinary hold blocks nobody, and a warning that says otherwise sends
+# a reader looking for a contention that is not there.
+# Mutant: keep today's sentence at N>1.
+
+H2_ROOT=$(slot_root hold2 2)
+H2_STATUS="$TMP_ROOT/hold2.status"
+H2_ERR="$TMP_ROOT/hold2.err"
+: > "$H2_STATUS"
+FM_BUILD_LOCK_DIR="$H2_ROOT" FM_TASK_STATUS="$H2_STATUS" FM_BUILD_LOCK_HOLD_WARN=1 \
+  "$SCRIPT" sh -c 'sleep 2.5; printf "survived\n"' >"$TMP_ROOT/hold2.out" 2>"$H2_ERR"
+assert_equals 'survived' "$(cat "$TMP_ROOT/hold2.out")" "the holder must not be killed at its ceiling"
+assert_grep 'has held 1 of 2 machine-wide build slots for ' "$H2_ERR" \
+  "an ordinary hold at N>1 must say how many of how many slots it holds"
+assert_not_contains "$(cat "$H2_ERR")" 'blocking every other local build' \
+  "an ordinary hold at N>1 must not claim to block every other local build"
+H2_LINE=$(cat "$H2_STATUS")
+assert_contains "$H2_LINE" 'note: holding 1 of 2 machine-wide build slots for ' \
+  "the holder's status line at N>1 must say how many of how many slots it holds"
+assert_not_contains "$H2_LINE" 'blocking every other local build' \
+  "the holder's status line at N>1 must not claim to block every other local build"
+classify status_is_captain_relevant "$H2_LINE" \
+  && fail "the holder's status line must not wake firstmate as a decision: $H2_LINE"
+settle_root "$H2_ROOT"
+pass "an ordinary hold at N>1 reports its share of the slots and claims to block nobody"
+
+# --- CI stands down before any setting is read ------------------------------
+# Mutant: move the settings read above the CI check; the unreadable slot count
+# below then warns on a run that never touches the lock at all.
+
+CI_SETTINGS_ROOT="$TMP_ROOT/ci-settings-root"
+rm -rf "$CI_SETTINGS_ROOT"
+mkdir -p "$CI_SETTINGS_ROOT"
+printf 'not a number\n' > "$CI_SETTINGS_ROOT/build-lock-slots"
+ln -s /dev/null "$CI_SETTINGS_ROOT/build-lock-exclusive"
+CI_SETTINGS_ERR="$TMP_ROOT/ci-settings.err"
+CI_SETTINGS_OUT=$(env -u FM_BUILD_LOCK_CI CI=true FM_BUILD_LOCK_DIR="$CI_SETTINGS_ROOT" \
+  "$SCRIPT" printf 'stood-down\n' 2>"$CI_SETTINGS_ERR")
+assert_equals 'stood-down' "$CI_SETTINGS_OUT" "the command must still run on CI"
+assert_equals '' "$(cat "$CI_SETTINGS_ERR")" \
+  "on CI no setting is read, so a malformed one must say nothing"
+assert_equals 0 "$(lock_artifacts "$CI_SETTINGS_ROOT")" "on CI nothing may be created in the lock root"
+pass "on CI the slot count and the whole-machine patterns are never read and nothing is created"
+
+# --- a whole-machine run never runs beside anything -------------------------
+# A slot is not a share of the machine, so a count alone re-admits the pairing
+# the one-lock rule exists to prevent. A run named as needing the whole machine
+# holds every slot.
+# Mutant: let --exclusive claim one slot; the ordinary runs then overlap it and
+# the recorded order interleaves.
+
+EX_ROOT=$(slot_root exclusive 3)
+EX_ORDER="$TMP_ROOT/exclusive.order"
+EX_ERR="$TMP_ROOT/exclusive.err"
+EX_LATER_ERR="$TMP_ROOT/exclusive-later.err"
+: > "$EX_ORDER"
+: > "$EX_ERR"
+: > "$EX_LATER_ERR"
+FM_BUILD_LOCK_DIR="$EX_ROOT" "$SCRIPT" sh -c \
+  "printf 'first in\n' >>'$EX_ORDER'; touch '$TMP_ROOT/ex-held'; while [ ! -e '$TMP_ROOT/ex-release' ]; do sleep 0.05; done; printf 'first out\n' >>'$EX_ORDER'" \
+  >/dev/null 2>&1 &
+EX_FIRST=$!
+await_path "$TMP_ROOT/ex-held" || fail "the whole-machine fixture never took a slot"
+
+FM_BUILD_LOCK_DIR="$EX_ROOT" "$SCRIPT" --exclusive sh -c \
+  "printf 'whole in\n' >>'$EX_ORDER'; sleep 1.5; printf 'whole out\n' >>'$EX_ORDER'" \
+  >/dev/null 2>"$EX_ERR" &
+EX_WHOLE=$!
+await_grep 'WAITING, not wedged' "$EX_ERR" || fail "the whole-machine run never got into line"
+
+FM_BUILD_LOCK_DIR="$EX_ROOT" "$SCRIPT" sh -c \
+  "printf 'later in\n' >>'$EX_ORDER'; sleep 0.2; printf 'later out\n' >>'$EX_ORDER'" \
+  >/dev/null 2>"$EX_LATER_ERR" &
+EX_LATER=$!
+await_grep 'WAITING, not wedged' "$EX_LATER_ERR" || fail "the later ordinary run never got into line"
+
+# While the whole-machine run drains, --status must show the slots it has
+# reserved rather than reporting them free, and the waiter behind it must read
+# as waiting for a named reason rather than as wedged.
+# Mutants: show a reserved slot as free; drop the draining clause from the
+# waiter's periodic line.
+EX_DRAIN_STATUS=$(FM_BUILD_LOCK_DIR="$EX_ROOT" "$SCRIPT" --status)
+assert_contains "$EX_DRAIN_STATUS" 'draining for a whole-machine run' \
+  "--status must show a slot a whole-machine run has reserved while it drains"
+
+touch "$TMP_ROOT/ex-release"
+wait "$EX_FIRST" 2>/dev/null || true
+await_pid_exit "$EX_WHOLE" || fail "the whole-machine run never started"
+wait "$EX_WHOLE" 2>/dev/null || true
+await_pid_exit "$EX_LATER" || fail "the run behind the whole-machine run never got in"
+wait "$EX_LATER" 2>/dev/null || true
+
+assert_equals 'first in
+first out
+whole in
+whole out
+later in
+later out' "$(cat "$EX_ORDER")" "a whole-machine run must not overlap anything, before or after it"
+assert_grep 'an earlier arrival goes first' "$EX_LATER_ERR" \
+  "a waiter behind a draining whole-machine run must be told why, not read as wedged"
+settle_root "$EX_ROOT"
+pass "a run named with --exclusive holds every slot and never runs beside anything"
+
+# --- the pattern file names a whole-machine run, so no caller has to --------
+# Mutants: ignore the pattern file (the two matching runs overlap); open it at
+# N=1 (the unreadable file below then warns on a run that cannot be affected).
+
+PAT_ROOT=$(slot_root patterns 2)
+cat > "$PAT_ROOT/build-lock-exclusive" <<'PATTERNS'
+# a comment, and a blank line, are both ignored
+
+*gauge-job.sh*
+PATTERNS
+gauge_run "$PAT_ROOT" 4
+assert_equals 1 "$GAUGE_MAX" \
+  "a run matching the whole-machine pattern file ran beside another under a count of 2"
+settle_root "$PAT_ROOT"
+
+# A command the file does not name still shares the machine.
+PAT_SHARE_ROOT=$(slot_root patterns-share 2)
+printf '*no-such-command*\n' > "$PAT_SHARE_ROOT/build-lock-exclusive"
+gauge_run "$PAT_SHARE_ROOT" 4
+assert_equals 2 "$GAUGE_MAX" \
+  "a run the whole-machine pattern file does not name must still share the slots"
+settle_root "$PAT_SHARE_ROOT"
+
+# At a count of 1 the file is never opened, so an unusable one cannot warn.
+PAT_N1_ROOT=$(slot_root patterns-n1)
+ln -s /dev/null "$PAT_N1_ROOT/build-lock-exclusive"
+PAT_N1_ERR="$TMP_ROOT/patterns-n1.err"
+FM_BUILD_LOCK_DIR="$PAT_N1_ROOT" "$SCRIPT" true 2>"$PAT_N1_ERR"
+expect_code 0 $? "a run at a count of 1 must ignore the whole-machine pattern file entirely"
+assert_equals '' "$(cat "$PAT_N1_ERR")" \
+  "at a count of 1 the whole-machine pattern file must not even be opened"
+settle_root "$PAT_N1_ROOT"
+pass "the whole-machine pattern file names runs without any caller knowing, and is unread at a count of 1"
+
+# --- an unusable pattern file is conservative -------------------------------
+# Treating it as empty would silently drop the protection the file exists to
+# give; making every run whole-machine is a count of 1, which is where the
+# machine already is.
+# Mutant: treat an unusable pattern file as empty; the two runs then overlap.
+
+PAT_BAD_ROOT=$(slot_root patterns-bad 2)
+ln -s /dev/null "$PAT_BAD_ROOT/build-lock-exclusive"
+PAT_BAD_ERR="$TMP_ROOT/patterns-bad.err"
+FM_BUILD_LOCK_DIR="$PAT_BAD_ROOT" "$SCRIPT" true 2>"$PAT_BAD_ERR"
+assert_equals 1 "$(grep -c 'fm-build-lock: WARNING' "$PAT_BAD_ERR" || true)" \
+  "an unusable whole-machine pattern file must warn exactly once"
+assert_grep 'build-lock-exclusive' "$PAT_BAD_ERR" "the warning must name the pattern file"
+gauge_run "$PAT_BAD_ROOT" 4
+assert_equals 1 "$GAUGE_MAX" \
+  "with an unusable whole-machine pattern file two runs still overlapped"
+settle_root "$PAT_BAD_ROOT"
+pass "an unusable whole-machine pattern file makes every run whole-machine and says so once"
+
+# --- a whole-machine run draining through a LOWERED count still starts ------
+# The count can be lowered while a whole-machine run is collecting the slots, so
+# it can end up holding more slots than the new count allows. That is strictly
+# more exclusive, not less, and it must not be read as "not enough yet".
+# Mutants: require the number of held slots to EQUAL the count (the run holds
+# every slot and waits forever); count the slots this process itself holds as
+# other live holders (same wait). Either leaves the bounded wait below red.
+
+EXLOW_ROOT=$(slot_root exclusive-lowered 2)
+EXLOW_A=
+hold_slot EXLOW_A "$EXLOW_ROOT" exlow-a
+EXLOW_ERR="$TMP_ROOT/exlow.err"
+: > "$EXLOW_ERR"
+FM_BUILD_LOCK_DIR="$EXLOW_ROOT" "$SCRIPT" --exclusive printf 'whole\n' \
+  >"$TMP_ROOT/exlow.out" 2>"$EXLOW_ERR" &
+EXLOW_WHOLE=$!
+await_grep 'WAITING, not wedged' "$EXLOW_ERR" || fail "the whole-machine run never got into line"
+await_path "$EXLOW_ROOT/fm-build-lock.slot2" \
+  || fail "the whole-machine run never reserved the free slot while draining"
+FM_BUILD_LOCK_DIR="$EXLOW_ROOT" "$SCRIPT" --set-slots 1 >/dev/null 2>&1 \
+  || fail "--set-slots 1 failed"
+release_slot "$EXLOW_A" exlow-a
+await_pid_exit "$EXLOW_WHOLE" 300 \
+  || fail "a whole-machine run holding more slots than a lowered count never started"
+wait "$EXLOW_WHOLE" 2>/dev/null || true
+assert_equals 'whole' "$(cat "$TMP_ROOT/exlow.out" 2>/dev/null || true)" \
+  "the whole-machine run must run once it holds every slot the lowered count names"
+settle_root "$EXLOW_ROOT"
+pass "a whole-machine run that outlives a lowered count still starts, holding more than it needs"
+
+# --- an interrupted reservation is given back -------------------------------
+# A whole-machine run that dies while draining must not keep the slots it had
+# already taken, whether its trap ran or not.
+# Mutant: release only the slot recorded as "the" held slot; the waiter behind
+# then never gets in and the bounded wait reds.
+
+interrupted_reservation_case() {  # <name> <signal>
+  local name=$1 signal=$2 lockroot err waiter_out waiter_err
+  lockroot=$(slot_root "reserve-$name" 2)
+  err="$TMP_ROOT/reserve-$name.err"
+  waiter_out="$TMP_ROOT/reserve-$name.out"
+  waiter_err="$TMP_ROOT/reserve-$name-waiter.err"
+  : > "$err"
+  : > "$waiter_err"
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" sh -c \
+    "touch '$TMP_ROOT/reserve-$name-held'; while [ ! -e '$TMP_ROOT/reserve-$name-release' ]; do sleep 0.05; done" \
+    >/dev/null 2>&1 &
+  local fixture=$!
+  await_path "$TMP_ROOT/reserve-$name-held" || fail "the $name fixture never took a slot"
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --exclusive sleep 120 >/dev/null 2>"$err" &
+  local draining=$!
+  await_grep 'WAITING, not wedged' "$err" || fail "the $name whole-machine run never got into line"
+  # It is the head, so it reserves the free slot and keeps it across polls.
+  await_path "$lockroot/fm-build-lock" || fail "the $name whole-machine run never reserved a slot"
+  assert_contains "$(FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status)" 'draining for a whole-machine run' \
+    "--status must show the $name reservation while it drains"
+  kill -"$signal" "$draining" 2>/dev/null || true
+  wait "$draining" 2>/dev/null || true
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" printf 'behind\n' >"$waiter_out" 2>"$waiter_err" &
+  local behind=$!
+  await_pid_exit "$behind" 200 \
+    || fail "a slot reserved by a $name-interrupted whole-machine run was never given back"
+  wait "$behind" 2>/dev/null || true
+  assert_equals 'behind' "$(cat "$waiter_out" 2>/dev/null || true)" \
+    "the run behind a $name-interrupted whole-machine run must get in"
+  kill -0 "$fixture" 2>/dev/null \
+    || fail "the $name fixture released its slot before this case could check the reservation"
+  touch "$TMP_ROOT/reserve-$name-release"
+  wait "$fixture" 2>/dev/null || true
+  settle_root "$lockroot"
+}
+
+interrupted_reservation_case term TERM
+interrupted_reservation_case kill 9
+pass "a whole-machine run interrupted while draining gives its reserved slots straight back"
+
 assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "the suite must leave no lock behind"
 pass "fm-build-lock behaves"
