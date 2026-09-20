@@ -2203,9 +2203,14 @@ TS
     local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
     while [ "$attempt" -lt 600 ]; do
       capture_geometry_viewport "$file" || true
-      if grep -Fq "$transient_text" "$file" 2>/dev/null; then
+      # The transient row can come and go between two viewport samples, so
+      # decide whether it rendered from the recorded terminal stream instead.
+      if [ "$saw_transient" -eq 0 ] \
+        && sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' "$reload_stream" 2>/dev/null | grep -Fq "$transient_text"; then
         saw_transient=1
-      elif [ "$saw_transient" -eq 1 ] && grep -Fq "$final_text" "$file" 2>/dev/null; then
+      fi
+      if [ "$saw_transient" -eq 1 ] && ! grep -Fq "$transient_text" "$file" 2>/dev/null \
+        && grep -Fq "$final_text" "$file" 2>/dev/null; then
         return 0
       fi
       sleep 0.01
@@ -2258,6 +2263,9 @@ TS
   grep -Fq 'tool result one' "$session_file" \
     || fail "Calm removed hidden tool results from persisted history"
 
+  reload_stream="$snapshot.reload-stream"
+  : >"$reload_stream"
+  tmux -L "$TMUX_SOCKET" pipe-pane -t "$TMUX_SESSION" "cat >>'$reload_stream'"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   wait_for_geometry_transition \
