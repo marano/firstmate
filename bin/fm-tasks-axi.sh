@@ -509,9 +509,9 @@ chunk_verb() {  # <unit> <title> <member>...
   done
 
   if ! fm_grouping_posture "$GROUPING_CONFIG"; then
-    printf 'fm-tasks-axi: cannot tell this home"s soft member cap, so no size warning was made: %s\n' "$FM_GROUPING_ERROR" >&2
+    printf 'fm-tasks-axi: cannot tell this home'"'"'s soft member cap, so no size warning was made: %s\n' "$FM_GROUPING_ERROR" >&2
   elif [ -n "$FM_GROUPING_MEMBER_CAP" ] && [ "${#members[@]}" -gt "$FM_GROUPING_MEMBER_CAP" ]; then
-    printf 'fm-tasks-axi: %s has %s members, above this home"s soft cap of %s; that is a warning, not a refusal\n' \
+    printf 'fm-tasks-axi: %s has %s members, above this home'"'"'s soft cap of %s; that is a warning, not a refusal\n' \
       "$unit" "${#members[@]}" "$FM_GROUPING_MEMBER_CAP" >&2
   fi
   printf 'ok: chunk %s (%s) delivers %s\n' "$unit" "$key" "$members_csv"
@@ -694,7 +694,8 @@ plan_verb() {
       queued\ no\ no) ;;
       *) continue ;;
     esac
-    grouping_read_body "$id"
+    fm_backlog_row_field "$DATA" "$id" body || { printf 'cannot-tell - - %s\n' "$id"; continue; }
+    GROUPING_BODY=$FM_BACKLOG_ROW_FIELD_VALUE
     plan=$(fm_grouping_plan_of_body "$GROUPING_BODY") || { printf 'cannot-tell - - %s\n' "$id"; continue; }
     [ -z "$plan" ] || continue
     key=$(fm_grouping_key_of_body "$GROUPING_BODY") || { printf 'cannot-tell - - %s\n' "$id"; continue; }
