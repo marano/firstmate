@@ -23,6 +23,16 @@
 # deliberately not asserted here.
 set -u
 
+# Outer guard for a call that must not hang: GNU timeout when present, else a
+# perl alarm (stock macOS ships neither timeout nor gtimeout). Both exit 124
+# when the bound fires; -k is accepted and ignored on the perl path.
+outer_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; return; fi
+  [ "$1" = "-k" ] && shift 2
+  local secs=$1; shift
+  perl -e '$s=shift; $SIG{ALRM}=sub{kill "KILL",$p;exit 124}; $p=fork; if(!$p){exec @ARGV;exit 127} alarm $s; waitpid $p,0; exit($?>>8)' "$secs" "$@"
+}
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -321,7 +331,7 @@ if [ "\${1:-}" = start ]; then
     kill -TERM "\$spawn_pid"
     exit 0
   fi
-  sleep 300
+  exec sleep 300
 fi
 exec "$real" "\$@"
 SH
@@ -1508,7 +1518,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    outer_timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
@@ -2805,7 +2815,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    outer_timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \
@@ -3108,6 +3118,45 @@ test_a_first_dispatch_records_when_it_took_its_copy() {
   [ "$value" -ge "$before" ] && [ "$value" -le "$after" ] \
     || fail "first_spawn_epoch $value is outside the dispatch window $before-$after"
   pass "a first dispatch records when the task took its local copy"
+}
+
+# A chunk's whole claim is that it already IS the shape dispatch accepts: the
+# unit is what `ready` offers, `--delivers` takes its planned members, and the
+# close carries the job's own link to every one of them. Planning, dispatching
+# and closing one in a single case is what proves that end to end.
+test_a_chunk_dispatches_and_closes_through_delivers() {
+  local case_dir unit out id
+  unit=atomic-chunk-e2e-g8
+  case_dir=$(make_home chunk-end-to-end "$unit")
+  tasks-axi add chunk-a-g8 "item for chunk-a-g8" --kind ship --repo app-web \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  tasks-axi add chunk-b-g8 "item for chunk-b-g8" --kind ship --repo app-web \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" group chunk-a-g8 blu-3156 >/dev/null \
+    || fail "could not record the group key"
+  out=$(FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" \
+    chunk "$unit" "web children" chunk-a-g8 chunk-b-g8) || fail "could not plan the chunk: $out"
+  [ "$(idle_fleet_ready_count "$case_dir")" = 1 ] \
+    || fail "a planned chunk is not one ready item: $(idle_fleet_ready_count "$case_dir")"
+
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers chunk-a-g8,chunk-b-g8) || fail "the planned chunk could not be dispatched: $out"
+  for id in "$unit" chunk-a-g8 chunk-b-g8; do
+    [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+      || fail "dispatching the chunk left $id $(row_state "$case_dir" "$id")"
+  done
+
+  printf 'pr=https://github.com/example/repo/pull/77\n' >> "$(home_of "$case_dir")/state/$unit.meta"
+  printf 'done: PR https://github.com/example/repo/pull/77 checks green run=r1\n' \
+    > "$(home_of "$case_dir")/state/$unit.status"
+  out=$(run_teardown "$case_dir" "$unit") || fail "teardown of the chunk failed: $out"
+  for id in "$unit" chunk-a-g8 chunk-b-g8; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "the landed chunk left $id $(row_state "$case_dir" "$id")"
+    assert_contains "$(row_links "$case_dir" "$id")" "https://github.com/example/repo/pull/77" \
+      "$id was closed without the job's pull request"
+  done
+  pass "a planned chunk dispatches through --delivers and closes every member with the job's link"
 }
 
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
@@ -3464,6 +3513,7 @@ test_a_secondmate_home_keeps_its_own_books
 test_a_persistent_secondmate_is_never_a_backlog_item
 test_grouped_dispatch_records_members_and_moves_them_in_flight
 test_a_first_dispatch_records_when_it_took_its_copy
+test_a_chunk_dispatches_and_closes_through_delivers
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver
 test_grouped_close_closes_every_delivered_member
 test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason

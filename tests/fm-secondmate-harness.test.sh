@@ -1054,7 +1054,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/grouping\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1483,6 +1483,29 @@ test_claude_permission_mode_inheritance_present_and_absent() {
   expect_code 0 "$status" "claude-permission-mode absence push should succeed"
   [ -e "$w/sm/config/claude-permission-mode" ] && fail "claude-permission-mode not removed on primary absence"
   pass "B12c claude-permission-mode inheritance: present values and primary absence converge exactly"
+}
+
+# The grouping posture is the captain's rule about what work belongs together,
+# so a secondmate dispatches under the same one: present values converge and
+# primary absence mirrors, exactly as the other captain-wide preferences do.
+test_grouping_inheritance_present_and_absent() {
+  local w head out err status
+  w=$(new_world grouping-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+
+  printf 'enforce 6\n' > "$w/home/config/grouping"
+  err="$w/grouping-inherit.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "grouping present push should succeed"
+  assert_contains "$out" "grouping: pushed" "present value should report pushed"
+  [ "$(cat "$w/sm/config/grouping")" = "enforce 6" ] || fail "grouping present value not pushed"
+
+  rm -f "$w/home/config/grouping"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "grouping absence push should succeed"
+  [ -e "$w/sm/config/grouping" ] && fail "grouping not removed on primary absence"
+  pass "the grouping posture inherits: present values and primary absence converge exactly"
 }
 
 test_backend_inheritance_present_and_absent() {
@@ -2681,6 +2704,7 @@ test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
+test_grouping_inheritance_present_and_absent
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_claude_permission_mode_inheritance_present_and_absent

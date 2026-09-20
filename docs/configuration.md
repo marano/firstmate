@@ -101,6 +101,7 @@ Spawn likewise refuses, before creating any endpoint or local copy, a harness wh
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 Completion closes an item only when something shows its work was started - a status line, a pull request, or a commit on its local copy that its default branch does not hold - and otherwise returns it to Queued with the reason in its body, so cleaning up a worker that never ran is never recorded as shipped work.
 A grouped dispatch, where one worker delivers several items as one job, names those items with `bin/fm-spawn.sh --delivers`; they move In flight with it and close with its pull request, except an item handed back with `bin/fm-tasks-axi.sh handback`, which returns to Queued with its reason.
+`bin/fm-tasks-axi.sh chunk` plans such a job before anyone is dispatched, so the queue offers one ready item instead of several, and `bin/fm-tasks-axi.sh join` hands a newly ready sibling to a worker already running one; `plan` lists what is not planned yet, and "Grouping posture" above owns the vocabulary all three use.
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
 A markdown backlog is additionally addressed by an explicit `--file` at `<data>/backlog.md`, so the change lands in the home that owns the task regardless of the caller's working directory.
@@ -206,6 +207,17 @@ When launching a Secondmate, the primary copies the presence flag into its home 
 A Secondmate on a remote route is covered the same way: the primary resolves and records that task's carrier, and the configured host exports it and receives the same enablement snapshot.
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
+
+## Grouping posture (config/grouping, FM_GROUPING)
+
+The optional local, gitignored `config/grouping` says how firmly this home holds work together: one line carrying `off`, `warn`, or `enforce`, optionally followed by a soft member cap such as `enforce 6`.
+An absent file is `off`, so a home that has not opted in behaves exactly as before.
+`FM_GROUPING` overrides the file with the same grammar.
+A token the posture does not know, a cap that is not a positive whole number, and anything beyond those two words are each refused and named rather than defaulted around, for the same reason a malformed fleet capacity is: a typo must not quietly restore the behavior the posture was set to change.
+The cap only warns - a chunk above it is still planned - because how large a chunk should be is guidance with stated exceptions, while what one reviewer should read is a property of a pull request rather than of a chunk.
+The posture is a captain-wide rule about what work belongs together, so it is inherited by secondmate homes, which dispatch their own crew under it.
+The vocabulary it governs lives in [`../bin/fm-grouping-lib.sh`](../bin/fm-grouping-lib.sh): a *group key* is an opaque slug an agent records on a backlog item (`bin/fm-tasks-axi.sh group <id> <key>`, or `--solo` for the recorded verdict that an item belongs with nothing), a *chunk* is a unit row plus the members parked behind it (`bin/fm-tasks-axi.sh chunk`), and a *sibling* is another item sharing both the repository and the key.
+What a key means - an epic, a subsystem, anything else - is this home's own policy and never reaches shared code.
 
 ## Fleet capacity (config/fleet-capacity)
 
@@ -990,6 +1002,7 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_GROUPING=            # optional grouping posture override; see "Grouping posture"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 FM_TASK_STATUS=         # internal: the task's absolute status file, exported by fm-spawn.sh beside FM_TASK_ID, never set by hand; bin/fm-build-lock.sh appends its hold and wait ceiling lines there
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
