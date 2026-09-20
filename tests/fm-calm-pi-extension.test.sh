@@ -2276,7 +2276,11 @@ TS
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  # A key sent while Pi is still repainting after /reload can be dropped; the
+  # toggle did not apply then, so pressing it once more is safe.
   wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
+    || { tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+         wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE"; } \
     || fail "thinking expansion did not restore Calm-hidden reasoning"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
