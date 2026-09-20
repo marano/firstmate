@@ -31,6 +31,13 @@
 #      receive messages - named as that, never as the generic unread-instruction
 #      wake - while a busy worker whose queued text will still submit is never
 #      alarmed on.
+#   8. Busy wedges: a busy pane defers its doorbell but keeps counting, so an
+#      unbroken busy run carrying an unhandled record past the bound surfaces as
+#      a worker that cannot be reached, naming the record - while the same pane
+#      inside the bound stays completely quiet. A worker held on a blocking
+#      harness permission dialog is exactly this shape: its harness opened a turn
+#      it can never close, so it reads busy on every poll forever (2026-09-20,
+#      where two instructions sat unread for 75 minutes with no wake at all).
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -535,6 +542,56 @@ test_ladder_names_a_composer_stuck_through_the_budget() {
   pass "inbox: the ladder names a composer stuck through the whole budget, and only that"
 }
 
+# The ladder half of the busy-wedge contract, driven through the library's own
+# entry point so the accumulation, its reset conditions, and the bound are each
+# pinned separately from the watcher wiring above them.
+test_ladder_counts_an_unbroken_busy_run() {
+  local state rec action
+  state="$TMP_ROOT/ladder-busy/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please stop and report")
+  age_path "$rec"
+  # The first busy observation opens the run, so nothing is due yet however
+  # low the bound: "busy right now" is not evidence of anything.
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=1 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "the first busy observation should only open the run, got: $action"
+  sleep 2
+  # A generous bound keeps a busy pane quiet - this is the refusal that keeps a
+  # worker legitimately inside one long turn from being alarmed on.
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=3600 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "a busy run inside the bound should stay quiet, got: $action"
+  # The run accumulated across those calls rather than restarting at each one,
+  # which is the whole difference from the unconditional busy return.
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=2 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  case "$action" in
+    "wedged $rec "[0-9]*) : ;;
+    *) fail "a busy run past the bound should surface as wedged with its record, got: $action" ;;
+  esac
+  [ "${action##* }" -ge 2 ] || fail "the wedged run should report the accumulated seconds, got: $action"
+  # A delivery attempt means the pane was reachable, so the run starts over.
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 0
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=2 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "a delivery attempt should end the busy run, got: $action"
+  # So does a different oldest record: a fresh instruction gets a fresh run.
+  sleep 2
+  mv "$rec" "$state/t1.inbox/handled/"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "next thing")
+  age_path "$rec"
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=2 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "a new oldest record should start a fresh busy run, got: $action"
+  # A bound of none is refused rather than honored: it would wedge every busy
+  # worker on its first observation, which is exactly the alarm nobody reads.
+  sleep 2
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=0 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "a zero bound should fall back to the default, got: $action"
+  # An escalated record stays quiet, so one wedge is reported once.
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=2 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  case "$action" in "wedged $rec "*) : ;; *) fail "expected the accumulated fresh run to wedge past its bound, got: $action" ;; esac
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$rec"
+  action=$(FM_TASK_INBOX_BUSY_MAX_SECS=2 inbox_lib "$state" fm_task_inbox_busy_action "$state" t1 "$rec")
+  [ "$action" = quiet ] || fail "an escalated record should not wedge again, got: $action"
+  pass "inbox: an unbroken busy run accumulates, wedges past its bound, and resets on an attempt or a new record"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -624,6 +681,92 @@ test_watcher_waits_on_busy_pane() {
   [ ! -s "$log" ] || fail "a busy pane should wait, not ring:"$'\n'"$(cat "$log")"
   [ ! -s "$state/.wake-queue" ] || fail "a busy wait queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
   pass "watcher: a busy pane just waits - the record is durable and no doorbell is typed"
+}
+
+# claude_blocking_dialog_capture: claude 2.1.278 held on a blocking permission
+# dialog, transcribed from a live pane reproducing the 2026-09-20 incident (a
+# PreToolUse guard answering `ask` on an `rm -rf` with a possibly-empty variable
+# path). Nothing on this screen can be typed into, and the harness opened a turn
+# that only a human answer can close, so every later poll reads it unchanged.
+claude_blocking_dialog_capture() {
+  printf '%s\n' "⏺ Bash(rm -rf \"\$S/\$1\")"
+  printf '%s\n' "  ⎿  Waiting…"
+  printf '\n'
+  printf '%s\n' "────────────────────────────────────────"
+  printf '%s\n' " Bash command"
+  printf '\n'
+  printf '%s\n' "   rm -rf \"\$S/\$1\""
+  printf '\n'
+  printf '%s\n' " │ Hook PreToolUse:Bash requires confirmation for this command:"
+  printf '%s\n' " │ Dangerous rm operation on possibly-empty variable path"
+  printf '\n'
+  printf '%s\n' " Do you want to proceed?"
+  printf '%s\n' " ❯ 1. Yes"
+  printf '%s\n' "   2. No"
+  printf '\n'
+  printf '%s\n' " Esc to cancel · Tab to amend"
+}
+
+# setup_blocked_claude_case <name> -> echoes case dir. A claude task whose own
+# busy record says busy (armed through the real writer, exactly as fm-spawn
+# arms it) and whose pane is held on the blocking dialog above. This is the
+# incident's shape: alive, busy, unreachable, with an aged unhandled record.
+setup_blocked_claude_case() {  # <name>
+  local name=$1 dir state rec
+  dir=$(setup_watch_case "$name")
+  state="$dir/state"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" t1 >/dev/null \
+    || fail "could not arm a busy turn for the blocked-dialog fixture"
+  claude_blocking_dialog_capture > "$dir/dialog.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "stop and report what you are doing")
+  age_path "$rec"
+  printf '%s\n' "$dir"
+}
+
+test_watcher_names_a_worker_wedged_behind_a_blocking_prompt() {
+  local dir state out log pid rec
+  dir=$(setup_blocked_claude_case wedged-dialog)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec="$state/t1.inbox/001.msg"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/dialog.capture" \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_BUSY_MAX_SECS=2
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a pane busy past the bound with an unhandled instruction never woke firstmate:"$'\n'"$(cat "$out")"; }
+  [ ! -s "$log" ] || fail "a pane held on a blocking dialog was typed into:"$'\n'"$(cat "$log")"
+  grep -qF 'worker unreachable' "$state/.wake-queue" \
+    || fail "the wedge should be named as an unreachable worker:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF "$rec" "$state/.wake-queue" \
+    || fail "the wedge wake must name the unhandled record:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'continuously busy' "$state/.wake-queue" \
+    || fail "the wedge wake must say the pane was busy without accepting a message:"$'\n'"$(cat "$state/.wake-queue")"
+  [ -f "$rec" ] || fail "the durable record must survive the wedge escalation"
+  pass "watcher: a pane continuously busy past the bound with an unhandled instruction is named as unreachable"
+}
+
+# The refusal that keeps the wake above worth reading: the SAME wedged-looking
+# fixture, inside the bound, must stay completely silent. Without this, a bound
+# of zero would pass the test above while alarming on every busy worker.
+test_watcher_never_wedges_a_busy_pane_inside_the_bound() {
+  local dir state out log pid
+  dir=$(setup_blocked_claude_case wedge-inside-bound)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/dialog.capture" \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=99 \
+    FM_TASK_INBOX_BUSY_MAX_SECS=3600
+  pid=$!
+  sleep 5
+  kill -0 "$pid" 2>/dev/null \
+    || fail "a busy pane inside the bound woke firstmate:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a busy pane inside the bound was rung into:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a busy pane inside the bound was alarmed on:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a busy pane inside the bound is never rung into and never alarmed on"
 }
 
 test_watcher_quiet_on_healthy_inbox() {
@@ -880,8 +1023,11 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_ladder_names_a_composer_stuck_through_the_budget
+test_ladder_counts_an_unbroken_busy_run
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
+test_watcher_names_a_worker_wedged_behind_a_blocking_prompt
+test_watcher_never_wedges_a_busy_pane_inside_the_bound
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder

@@ -74,6 +74,13 @@
 #                          every attempt of that budget found the live, idle
 #                          worker's composer holding unsent text, so no
 #                          doorbell could submit; reported, never cleared
+#   stale: <window> (worker unreachable: ...)
+#                          the pane has been continuously busy past the
+#                          steering-inbox busy bound while an instruction
+#                          stayed unhandled, so no doorbell could ever be
+#                          typed into it - the signature of a worker held on
+#                          a blocking harness prompt rather than one merely
+#                          working slowly
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
@@ -305,7 +312,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # automatic interrupt, signal, or restart - unless the crew declared the wait
 # itself, which takes the long pause cadence instead. Set generously above
 # any legitimate interval without observable progress, including silent long
-# tool calls, builds, or test runs.
+# tool calls, builds, or test runs. It answers only "has this pane gone too
+# long with no completed turn"; how long an unhandled steering-inbox
+# instruction may ride a busy pane is a different question with its own bound
+# in bin/fm-task-inbox-lib.sh, and neither is a substitute for the other.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
@@ -489,11 +499,31 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     "stale: $1 (unread firstmate instruction: $3 is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
 }
 
+# Surface a ladder whose bookkeeping cannot be persisted while its record stays
+# unhandled. Shared by both writers (a delivery attempt and a busy observation),
+# because an unwritable ladder means the same thing for either: the ladder can
+# never reach escalation, so the failure itself has to be what wakes firstmate
+# rather than a silent forever-retry. A record acknowledged or an inbox removed
+# underneath the write is the quiet race, not a failure.
+inbox_steer_unwritable_ladder() {  # <window> <task> <record>
+  local w=$1 task=$2 rec=$3 reason
+  if [ ! -f "$rec" ]; then
+    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    return 0
+  fi
+  [ -d "${rec%/*}" ] || return 0
+  reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  wake "$reason"
+}
+
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
+# policy owner) reports a due action, a busy pane defers its doorbell but
+# keeps counting through fm_task_inbox_busy_action - the record is durable and
+# a healthy worker will reach a turn boundary, while one that never does
+# surfaces as unreachable past that owner's bound - an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
 # or missing skips the ladder altogether: it is never typed into and surfaces
@@ -508,7 +538,8 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state stuck
+  local w=$1 task=$2 action verb rec count tail40 ring_rc backend agent_state stuck
+  local busy_action busy_secs
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -530,6 +561,24 @@ inbox_steer_check() {  # <window> <task>
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
+    # A busy pane is a reason to DEFER the doorbell, never a reason to stop
+    # counting. This branch used to return unconditionally, which is why the
+    # 2026-09-20 wedge was invisible: a worker held on a blocking permission
+    # dialog reads busy on every poll (its harness opened a turn it can never
+    # close), so the ladder never advanced and escalation was unreachable for
+    # as long as the pane stayed up. Nothing is typed here either way; the
+    # ladder owner decides when an unbroken busy run stops being patience.
+    busy_action=$(fm_task_inbox_busy_action "$STATE" "$task" "$rec") || {
+      inbox_steer_unwritable_ladder "$w" "$task" "$rec"
+      return 0
+    }
+    case "$busy_action" in
+      wedged*)
+        busy_secs=${busy_action##* }
+        inbox_steer_escalate "$w" "$task" "$rec" \
+          "stale: $w (worker unreachable: its agent has been continuously busy for ${busy_secs}s without reaching a turn boundary, so no doorbell could be typed and $rec is still unhandled; this is a worker that cannot accept a message rather than one working slowly - inspect its pane for a blocking prompt or dialog)"
+        ;;
+    esac
     return 0
   fi
   case "$verb" in
@@ -543,15 +592,7 @@ inbox_steer_check() {  # <window> <task>
       stuck=0
       case "$ring_rc" in 1|4) stuck=1 ;; esac
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$stuck"; then
-        if [ ! -f "$rec" ]; then
-          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
-          return 0
-        fi
-        if [ -d "${rec%/*}" ]; then
-          reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
-          fm_wake_append stale "$w" "$reason" || exit 1
-          wake "$reason"
-        fi
+        inbox_steer_unwritable_ladder "$w" "$task" "$rec"
       fi
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
