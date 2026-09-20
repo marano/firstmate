@@ -1,0 +1,73 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 83513 for 23s running: bash tests/fm-task-inbox.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate])
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - held by pid 89086 for 7s running: bin/fm-test-run.sh tests/fm-bearings-board-render.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/4/firstmate]
+fm-build-lock: acquired the machine-wide build lock after 1m13s
+== tests/fm-backlog-atomicity.test.sh
+ok - environment-selected adapters bypass the legacy markdown file override
+ok - a manual-backlog home dispatches and completes without a hard failure
+ok - a secondmate home keeps its own books paired through dispatch and completion
+ok - dispatching a persistent secondmate needs no backlog item
+ok - grouped dispatch records its members and takes them out of the ready count
+ok - a first dispatch records when the task took its local copy
+ok - a planned chunk dispatches through --delivers and closes every member with the job's link
+ok - a dispatch beside a ready sibling is refused, and delivering it in the same job resolves that
+ok - a dispatch beside a live worker on the same group is refused, naming the worker to hand it to
+ok - a dispatch apart records its reason on the task and on the item
+ok - a planned chunk cannot launch while leaving one of its own members behind
+ok - the warn posture reports the same findings and lets the dispatch through
+ok - a home with no grouping posture dispatches exactly as before
+ok - a malformed grouping posture refuses a dispatch instead of defaulting to off
+ok - a chunk brief must carry a filled slot per member and the membership the dispatch names
+ok - grouped dispatch refuses a member it cannot deliver before creating anything
+ok - a landed grouped dispatch closes every member it delivered, with its PR
+ok - a member handed back stays queued with its reason while the rest close
+ok - handback refuses an item the unit does not deliver
+ok - session start finishes an interrupted grouped close for every member
+ok - an ordinary single-item dispatch and its close are unchanged
+ok - spawn refuses a harness whose command is missing, before creating anything
+ok - cleanup of a task nothing shows was started requeues it instead of closing it
+ok - cleanup of an unstarted grouped dispatch requeues the unit and every member
+ok - session start finishes an interrupted requeue without closing the item
+rc=0
+== tests/fm-task-delivery.test.sh
+ok - fm-spawn/fm-promote: authorized intent preserves exact words and refuses operator-address lines
+ok - fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions
+ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
+ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
+ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
+ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
+ok - fm-spawn: a scout spawn resolves no delivery posture from the registry
+ok - fm-promote: promotion requires the delivery contract and records it exactly once
+ok - promotion faces the same grouping guard, and its recorded reason clears it
+ok - fm-promote: a symlinked task record is refused and its target is left untouched
+ok - fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does
+ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
+ok - fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled
+# all fm-task-delivery tests passed
+rc=0
+== tests/fm-control-relaunch.test.sh
+ok - fm-control relaunch: a worker with nothing to work from is never launched
+ok - fm-control relaunch: a refusal before the agent is stopped leaves the durable record untouched
+ok - fm-control relaunch: checkpoint inspection failures refuse before stopping
+ok - fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state
+ok - fm-control relaunch: unpublished rollback keeps concurrent durable metadata
+ok - fm-control relaunch: post-publication failure keeps the new durable record
+ok - fm-control relaunch: partial stop reconciles actual agent state
+ok - fm-control relaunch: failed journal replacement preserves durable phase
+ok - fm-spawn relaunch: prepublication abort removes replacement state
+ok - fm-control relaunch: the checkpoint records the exact unlanded work it preserved
+ok - fm-control relaunch: a secondmate's child work is accounted for and its charter is left alone
+ok - fm-control relaunch: a secondmate home that is not this secondmate's is refused
+ok - fm-control relaunch: unreadable and untraversable child state fails checkpoint
+ok - fm-control relaunch: two control actions on one task serialize instead of interleaving
+ok - fm-spawn relaunch: direct entry participates in lifecycle serialization
+ok - fm-promote: promotion participates in lifecycle serialization
+ok - fm-spawn --relaunch: refuses to launch a second agent into a live endpoint
+ok - fm-spawn --relaunch: symlinked records refuse before inspection
+ok - fm-spawn --relaunch: keeps its early meta lock continuous
+ok - fm-spawn --relaunch: pending closes refuse before replacement begins
+ok - fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses
+ok - fm-spawn --relaunch: an unrecorded task is refused
+ok - fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work
+ok - relaunch re-reads the backlog item instead of blindly re-running the transition
+ok - relaunch heals an item that drifted out of In flight while the task stayed live
+rc=0
