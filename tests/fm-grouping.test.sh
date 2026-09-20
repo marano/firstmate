@@ -29,6 +29,10 @@
 #     refuses an unrelated item and a unit with a pending close, and resumes a
 #     row an interrupted join already moved ("reuse the dispatchable check
 #     alone", which refuses that retry).
+# The single-quoted with_lib snippets are deliberate: the helper evaluates them
+# in a subshell where DATA, STATE, CONFIG and the FM_GROUPING_* globals exist.
+# shellcheck disable=SC2016
+
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
