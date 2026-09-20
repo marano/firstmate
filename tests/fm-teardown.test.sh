@@ -42,6 +42,8 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) unlanded work on another branch this task checked out      -> REFUSE
+#        (and never another task's branch, nor a record with no epoch)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -1155,6 +1157,87 @@ SH
   assert_absent "$case_dir/state/task-x1.meta" \
     "content-landed: teardown left task metadata after destructive cleanup"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+# A worker that ships one PR per contract leaves each earlier contract on its own
+# branch in its copy. The copy shares its branches with the project clone and
+# every other copy, so cleanup reads the branches THIS task checked out, from the
+# copy's own history since the record's first_spawn_epoch - never every branch in
+# the repository, and never an earlier task's branches from the same pool slot.
+# Git stamps a history entry with GIT_COMMITTER_DATE, which is how the "earlier
+# task" entries are placed before the epoch.
+test_cleanup_refuses_unpushed_work_on_any_local_branch() {
+  local case_dir rc old='@1000000000 +0000' epoch
+  epoch=$(( $(date +%s) - 60 ))
+
+  # (1) This task's earlier branch holds an unpushed, unlanded commit; the
+  # checked-out branch holds nothing. Reading HEAD alone passed this.
+  case_dir=$(make_case other-branch-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'first_spawn_epoch=%s\n' "$epoch" >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" contract-one.txt one "contract one"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-two origin/main
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "other-branch-unlanded: cleanup must refuse"
+  assert_grep 'on branch fm/task-x1, which this task checked out' "$case_dir/stderr" \
+    "other-branch-unlanded: the refusal did not name the unlanded branch"
+  assert_present "$case_dir/state/task-x1.meta" "other-branch-unlanded: the refusal erased the task record"
+  git -C "$case_dir/wt" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null \
+    || fail "other-branch-unlanded: the refusal lost the unlanded branch"
+
+  # (2) The same shape once that branch's content has landed: its own proof
+  # carries it, exactly as the checked-out branch's would.
+  case_dir=$(make_case other-branch-landed)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'first_spawn_epoch=%s\n' "$epoch" >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" contract-one.txt one "contract one"
+  land_on_origin_main "$case_dir" contract-one.txt one
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-two origin/main
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "other-branch-landed: cleanup must accept a landed earlier branch: $(cat "$case_dir/stderr")"
+
+  # (3) Unpushed work that is not this task's: a branch in the project clone the
+  # copy never checked out, and an earlier task's branch in the same slot,
+  # checked out before this task's first dispatch. Neither refuses.
+  case_dir=$(make_case other-tasks-branches)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'first_spawn_epoch=%s\n' "$epoch" >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" checkout -q -b fm/elsewhere
+  printf '%s\n' elsewhere > "$case_dir/project/elsewhere.txt"
+  git -C "$case_dir/project" add -- elsewhere.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m "another task's work"
+  git -C "$case_dir/project" checkout -q main
+  GIT_COMMITTER_DATE=$old git -C "$case_dir/wt" checkout -q -b fm/earlier-task
+  printf '%s\n' earlier > "$case_dir/wt/earlier.txt"
+  git -C "$case_dir/wt" add -- earlier.txt
+  GIT_COMMITTER_DATE=$old git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q -m "an earlier task's work"
+  GIT_COMMITTER_DATE=$old git -C "$case_dir/wt" checkout -q fm/task-x1
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "other-tasks-branches: another task's branch must not block cleanup: $(cat "$case_dir/stderr")"
+
+  # (4) A record written before first_spawn_epoch existed keeps today's read of
+  # the checked-out branch only.
+  case_dir=$(make_case other-branch-legacy-record)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" contract-one.txt one "contract one"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-two origin/main
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "other-branch-legacy-record: a record without the epoch reads the checked-out branch only: $(cat "$case_dir/stderr")"
+  pass "cleanup refuses unlanded work on any branch this task checked out, and only on those"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -3734,6 +3817,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_cleanup_refuses_unpushed_work_on_any_local_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

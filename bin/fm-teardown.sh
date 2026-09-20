@@ -73,6 +73,14 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# The same test covers every other local branch this task checked out in its own
+# copy - a worker shipping one PR per contract leaves each earlier contract on its
+# own branch - each proved by its own merged PR or content, never by the recorded
+# pr=. A copy shares its branches with the project's clone and every other copy,
+# so the branches are read from the copy's own HEAD history since the record's
+# first_spawn_epoch (task_other_checked_out_branches owns that read), never from
+# every branch in the repository; a record without that key reads the checked-out
+# branch only.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1313,9 +1321,9 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+unpushed_patches_are_in_pr_head() {  # <pr-head> [<work-ref>]
+  local pr_head=$1 work_ref=${2:-HEAD} current base pr_patch_ids commit patch_id unpushed
+  current=$(git -C "$WT" rev-parse --verify "$work_ref" 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
     git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
@@ -1326,7 +1334,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H "$work_ref" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1343,9 +1351,14 @@ EOF
 # for both the PR state and head. Returns non-zero when the PR is not merged, the
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
-  if [ -n "$PR_URL" ]; then
+# <work-ref> defaults to the checked-out HEAD. A branch other than the checked-out
+# one passes its own ref and "by-branch": its PR is found by its own name only,
+# because the recorded pr= belongs to whichever branch registered it, and the
+# lookup never fills PR_URL, which names the task's completion link.
+pr_is_merged() {  # <branch> [<work-ref> [by-branch]]
+  local branch=$1 work_ref=${2:-HEAD} lookup=${3:-recorded}
+  local target view state remainder head resolved_url current landed=0
+  if [ "$lookup" = recorded ] && [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
@@ -1364,13 +1377,14 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  current=$(git -C "$WT" rev-parse --verify "$work_ref" 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif unpushed_patches_are_in_pr_head "$head" "$work_ref"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
+  [ "$lookup" = recorded ] || return 0
   if [ -z "$PR_URL" ]; then
     [ -n "$resolved_url" ] || return 1
     PR_URL=$resolved_url
@@ -1384,9 +1398,9 @@ pr_is_merged() {
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
+# so the caller refuses rather than guesses. <work-ref> defaults to HEAD.
+content_in_default() {  # [<work-ref>]
+  local work_ref=${1:-HEAD} name ref default_tree merged_tree
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -1398,7 +1412,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" "$work_ref" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -1407,11 +1421,105 @@ content_in_default() {
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
-work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+# only for genuinely unlanded work. The optional arguments are pr_is_merged's.
+work_is_landed() {  # <branch> [<work-ref> [by-branch]]
+  local branch=$1 work_ref=${2:-HEAD} lookup=${3:-recorded}
+  pr_is_merged "$branch" "$work_ref" "$lookup" && return 0
+  content_in_default "$work_ref"
+}
+
+# The local branches this task checked out in its own copy since it first took
+# it, other than <current>, one per line. A copy shares its branches with the
+# project's clone and every other copy, so "every local branch" would sweep in
+# other tasks' work; the copy's own HEAD history (git keeps it per worktree)
+# names exactly the branches this copy moved onto or renamed. A pool slot is
+# reused across tasks, so that history is read only from the task record's
+# first_spawn_epoch, which bin/fm-spawn.sh writes at first dispatch and a
+# relaunch carries forward. A record without it (spawned before it existed)
+# names no further branch, leaving the checked-out branch as the only one read.
+# Returns non-zero when the epoch or the history cannot be read.
+task_other_checked_out_branches() {  # <current>
+  local current=$1 since history line stamp subject rest name branch_names=''
+  since=$(meta_value "$META" first_spawn_epoch)
+  [ -n "$since" ] || return 0
+  case "$since" in
+    *[!0-9]*) return 1 ;;
+  esac
+  history=$(git -C "$WT" reflog show --date=unix --format='%gd%x09%gs' HEAD 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    stamp=${line%%$'\t'*}
+    subject=${line#*$'\t'}
+    stamp=${stamp##*@\{}
+    stamp=${stamp%\}}
+    case "$stamp" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$stamp" -ge "$since" ] || continue
+    case "$subject" in
+      'checkout: moving from '*' to '*)
+        rest=${subject#checkout: moving from }
+        branch_names="$branch_names ${rest%% to *} ${rest#* to }"
+        ;;
+      'Branch: renamed refs/heads/'*' to refs/heads/'*)
+        branch_names="$branch_names ${subject##* to refs/heads/}"
+        ;;
+    esac
+  done <<EOF
+$history
+EOF
+  for name in $branch_names; do
+    [ "$name" != "$current" ] && [ "$name" != HEAD ] || continue
+    git -C "$WT" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null || continue
+    printf '%s\n' "$name"
+  done | sort -u
+}
+
+# Every branch task_other_checked_out_branches names must hold nothing unlanded,
+# by the same rules the checked-out branch meets in
+# validate_worktree_teardown_safety: nothing off every remote, or (local-only)
+# merged into the local default branch, or (otherwise) landed by that branch's
+# own merged PR or by its content already in the default branch. A worker that
+# ships one PR per contract leaves each earlier contract on its own branch, and
+# cleanup that read only the checked-out one would discard an unpushed earlier
+# branch with the copy.
+validate_task_other_branches_landed() {  # <current>
+  local current=$1 branches branch unpushed_raw unpushed default unmerged
+  if ! branches=$(task_other_checked_out_branches "$current"); then
+    echo "REFUSED: cannot read which branches task $ID checked out in worktree $WT." >&2
+    echo "Restore the record's first_spawn_epoch or the worktree's git history, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  while IFS= read -r branch; do
+    [ -n "$branch" ] || continue
+    if ! unpushed_raw=$(git -C "$WT" log --oneline "refs/heads/$branch" --not --remotes -- 2>/dev/null); then
+      echo "REFUSED: cannot inspect branch $branch in worktree $WT for commits not on a remote." >&2
+      echo "Restore the branch, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
+    [ -n "$unpushed" ] || continue
+    if [ "$MODE" = local-only ]; then
+      default=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      if ! unmerged=$(git -C "$WT" log --oneline "refs/heads/$branch" --not "$default" -- 2>/dev/null); then
+        echo "REFUSED: cannot inspect branch $branch in worktree $WT for commits not on $default." >&2
+        echo "Restore the branch, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
+      [ -n "$unmerged" ] || continue
+      echo "REFUSED: local-only worktree $WT has work on branch $branch, which this task checked out, not yet merged into $default and not on any remote." >&2
+      printf 'commits on %s not yet on %s:\n%s\n' "$branch" "$default" "$(printf '%s\n' "$unmerged" | head -5)" >&2
+      echo "Merge the branch into local $default first (bin/fm-merge-local.sh after the captain approves), or push it to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    work_is_landed "$branch" "refs/heads/$branch" by-branch && continue
+    echo "REFUSED: worktree $WT has work on branch $branch, which this task checked out, not on any remote and not landed." >&2
+    printf 'unpushed commits on %s:\n%s\n' "$branch" "$unpushed" >&2
+    echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  done <<EOF
+$branches
+EOF
 }
 
 # Was this task's work ever started? Cleanup must not record work nobody did as
@@ -1778,6 +1886,11 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+  # A re-check after cleanup detached the checked-out branch still treats that
+  # branch as the one the checks above proved, not as another branch.
+  branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+  [ -n "$branch" ] || branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || echo HEAD)
+  validate_task_other_branches_landed "$branch"
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
