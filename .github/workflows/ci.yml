@@ -9,6 +9,26 @@ on:
 permissions:
   contents: read
 
+# TESTS NOT RUN IN THIS WORKFLOW. A family named here does not execute in the
+# CI lanes below, so a green run does NOT vouch for it. This list is the single
+# place the exclusion is stated, and the "Prove exclusions" step of the timing
+# aggregate job checks it against what the run actually recorded: it reds
+# naming any excluded script that ran and any other script that did not.
+#   secondmate      22 tests, dropped from the serial shards. This home has never
+#                   registered a secondmate. NOT because they pass: one of them,
+#                   tests/fm-remote-secondmate-trace-context.test.sh, produced
+#                   an unattributed red on 2026-09-21 that is still an open card
+#                   (fm-remote-clone-source-object-red). Excluding the family
+#                   hides that red; it does not answer it.
+#   real-herdr-gated  16 tests, run only by the "Behavior tests (Herdr)" job,
+#                   which is skipped below unless FM_CI_RUN_HERDR is true. This home runs tmux.
+# The stock macOS Bash 3.2 lane selects its own subset and still runs the
+# secondmate tests it selects. To run a family again, delete it from this list
+# (and, for real-herdr-gated, set repository variable FM_CI_RUN_HERDR=true so tests-herdr runs). Measurement
+# and reasoning: the unused-capability audit, scenario C.
+env:
+  FM_CI_EXCLUDED_FAMILIES: secondmate real-herdr-gated
+
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
 # CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
 # The group uses the PR number for pull_request events, so every run of one PR
@@ -282,7 +302,14 @@ jobs:
           # any missing typecheck prerequisite is a broken lane, not a valid skip.
           # The job cap is this lane's hang tripwire, so it keeps the runner
           # unbounded per script; the runner's default bound is for local runs.
+          # Families in FM_CI_EXCLUDED_FAMILIES (top of this file) do not run.
+          excluded=()
+          for family in $FM_CI_EXCLUDED_FAMILIES; do
+            excluded+=(--exclude-family "$family")
+            echo "::notice::NOT RUN in this shard: family $family (FM_CI_EXCLUDED_FAMILIES)"
+          done
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" --per-script-timeout-secs 0 \
+            "${excluded[@]}" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
@@ -297,8 +324,14 @@ jobs:
   # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
   # platform invariant fails (focus, cleanup, default-session tripwire), keep
   # the failure evidence and move the job to macOS rather than skip assertions.
+  #
+  # SWITCHED OFF: unless the repository variable FM_CI_RUN_HERDR is 'true' this
+  # job is skipped, and the run shows it as skipped rather than absent. real-herdr-gated is listed in FM_CI_EXCLUDED_FAMILIES at
+  # the top of this file; re-enable both together (variable on, family off the list), because the aggregate job
+  # proves the two agree from the recorded timings.
   tests-herdr:
     name: Behavior tests (Herdr)
+    if: ${{ vars.FM_CI_RUN_HERDR == 'true' }}
     runs-on: ubuntu-latest
     # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
     # tripwire, not the expected end of the lane. The family-run step owns the
@@ -452,6 +485,32 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      # Prove the exclusions at the top of this file from what the run recorded,
+      # not from the workflow text: a misspelled family excludes nothing, and a
+      # mistaken one drops a family nobody named. Runs on pull requests too.
+      - name: Prove exclusions against the recorded timings
+        if: success()
+        run: |
+          set -eu
+          [ -f "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" ] || {
+            echo "::error::no aggregate timing to prove the exclusions against"
+            exit 1
+          }
+          excluded=()
+          for family in $FM_CI_EXCLUDED_FAMILIES; do
+            excluded+=(--exclude-family "$family")
+          done
+          bin/fm-test-run.sh --check-exclusions "${excluded[@]}" \
+            "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" | tee "$RUNNER_TEMP/fm-test/exclusions.txt"
+          {
+            echo "### Tests NOT run in this workflow"
+            echo
+            echo "Families excluded via \`FM_CI_EXCLUDED_FAMILIES\`: **$FM_CI_EXCLUDED_FAMILIES**. A green run does not vouch for them."
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/fm-test/exclusions.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       # Serial shard balance rots as tests grow (docs/fm-test-portable-shards.md).
       # This runs on pull requests as well as main. The per-script comparison it
       # replaced could not: a script's measured duration depends on which shard

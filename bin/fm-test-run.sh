@@ -48,6 +48,16 @@
 #                   every push and pull request.
 #                   FM_PORTABLE_SERIAL_HINTS_FILE replaces the table (tests).
 #
+# Exclusion proof (no suite execution; inputs are lane or aggregate timing JSON):
+#   fm-test-run.sh --check-exclusions --exclude-family <name> [--exclude-family ...] <timing.json...>
+#                   prove, from what the run itself recorded and not from the
+#                   workflow text, that (1) no script of an excluded family
+#                   executed and (2) every script outside those families did,
+#                   each named on failure. Records from the stock-bash lane are
+#                   ignored: it selects its own subset and keeps its own set.
+#                   CI runs it in the aggregate job against the families named
+#                   in ci.yml's FM_CI_EXCLUDED_FAMILIES.
+#
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
 #                   script record carries its family, expected gate-skip class,
@@ -1704,6 +1714,69 @@ print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipp
 PY
 }
 
+# Proof that a CI exclusion is real and complete, read from the timing
+# artifacts a run recorded. The workflow text cannot prove it: a misspelled
+# family name excludes nothing, and a name that matches a neighbour drops a
+# third family without any diff saying so. Two obligations, each named:
+#   - an excluded family's script that executed is a stale or ineffective exclusion
+#   - a script outside the excluded families that did not execute was dropped
+check_excluded_families() {
+  local ex known inv rc=0
+  [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ] || die "--check-exclusions requires at least one --exclude-family"
+  [ "$#" -gt 0 ] || die "--check-exclusions requires at least one input timing JSON"
+  command -v python3 >/dev/null 2>&1 || die "--check-exclusions requires python3"
+  known=$(list_known_families)
+  for ex in "${EXCLUDE_FAMILIES[@]}"; do
+    printf '%s\n' "$known" | grep -qxF "$ex" || die "--exclude-family '$ex' is not a known family (see --list-families)"
+  done
+  inv=$(mktemp "${TMPDIR:-/tmp}/fm-test-inventory.XXXXXX") || return 1
+  local f
+  while IFS= read -r f; do
+    printf '%s\t%s\n' "$f" "$(family_for_basename "$(basename "$f")")"
+  done < <(all_repo_tests) >"$inv"
+  python3 - "$inv" "$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")" "$@" <<'PY' || rc=$?
+import json, sys
+from pathlib import Path
+
+inv_path, excluded_csv = sys.argv[1:3]
+excluded = [e for e in excluded_csv.split(",") if e]
+inventory = {}
+for line in Path(inv_path).read_text(encoding="utf-8").splitlines():
+    path, family = line.split("\t")
+    inventory[path] = family
+
+executed = {}
+for name in sys.argv[3:]:
+    doc = json.loads(Path(name).read_text(encoding="utf-8"))
+    for s in doc.get("scripts") or []:
+        selection = s.get("lane_selection") or doc.get("selection") or ""
+        if "lane=stock-bash" in selection:
+            continue
+        executed[s.get("path")] = s.get("family")
+
+bad = []
+for path, ran_family in sorted(executed.items()):
+    fam = inventory.get(path, ran_family)
+    if fam in excluded or ran_family in excluded:
+        bad.append(f"FM_EXCLUSION_EXECUTED {path} family={fam}: the exclusion did not take effect")
+for path, fam in sorted(inventory.items()):
+    if fam not in excluded and path not in executed:
+        bad.append(f"FM_EXCLUSION_DROPPED {path} family={fam}: not excluded, yet it did not run")
+
+counts = {e: sum(1 for f in inventory.values() if f == e) for e in excluded}
+for line in bad:
+    print(line)
+if bad:
+    print(f"FM_EXCLUSIONS failed excluded={','.join(excluded)} problems={len(bad)}")
+    sys.exit(1)
+skipped = sum(counts.values())
+detail = " ".join(f"{e}={counts[e]}" for e in excluded)
+print(f"FM_EXCLUSIONS ok excluded={','.join(excluded)} excluded_scripts={skipped} ({detail}) executed={len(executed)} inventory={len(inventory)}")
+PY
+  rm -f "$inv"
+  return "$rc"
+}
+
 all_repo_tests() {
   # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
   local f
@@ -2476,6 +2549,10 @@ while [ "$#" -gt 0 ]; do
       MODE=hints-lane
       shift
       ;;
+    --check-exclusions)
+      MODE=exclusions
+      shift
+      ;;
     --exclude-family)
       [ "$#" -gt 1 ] || die "--exclude-family requires a name"
       EXCLUDE_FAMILIES+=("$2")
@@ -2509,7 +2586,7 @@ while [ "$#" -gt 0 ]; do
       die "unknown option: $1"
       ;;
     *)
-      if [ "${MODE:-}" = "aggregate" ] || [[ "${MODE:-}" == hints-* ]]; then
+      if [ "${MODE:-}" = "aggregate" ] || [ "${MODE:-}" = "exclusions" ] || [[ "${MODE:-}" == hints-* ]]; then
         SCRIPTS+=("$1")
       elif [ -z "$MODE" ] || [ "$MODE" = scripts ]; then
         MODE=scripts
@@ -2547,6 +2624,14 @@ if [[ "${MODE:-}" == hints-* ]]; then
     [ -f "$s" ] || die "timing input not found: $s"
   done
   serial_hints_from_timing "${MODE#hints-}" "${SCRIPTS[@]}"
+  exit $?
+fi
+
+if [ "${MODE:-}" = "exclusions" ]; then
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    [ -f "$s" ] || die "timing input not found: $s"
+  done
+  check_excluded_families "${SCRIPTS[@]+"${SCRIPTS[@]}"}"
   exit $?
 fi
 
