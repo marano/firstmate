@@ -473,7 +473,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pan
       case "$(fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 2>/dev/null || printf 'not-own')" in
         empty) return 0 ;;
         not-own) return 1 ;;
-        *) return 5 ;;
+        pending) return 5 ;;
+        send-failed) return 2 ;;
+        *) return 0 ;;
       esac
       ;;
   esac
