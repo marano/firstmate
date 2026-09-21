@@ -2387,6 +2387,21 @@ tests/fm-gemini-harness.test.sh${t}gemini harness is not used here
 tests/fm-backend-orca.test.sh${t}orca backend is not used here
 tests/fm-backend-zellij.test.sh${t}zellij backend is not used here
 tests/fm-backend-cmux.test.sh${t}cmux backend is not used here
+tests/fm-pi-codex-native.test.sh${t}Pi surface is not used here; currently skips (needs a real Pi install), so this hides nothing and saves no measurable time
+tests/fm-pi-primary-live-e2e.test.sh${t}Pi surface is not used here; currently skips (needs a real Pi install), so this hides nothing and saves no measurable time
+tests/fm-pi-branch-live-e2e.test.sh${t}Pi surface is not used here; currently skips (needs a real Pi install), so this hides nothing and saves no measurable time
+tests/fm-pi-windows-shell-invocation.test.sh${t}Native Windows Pi surface is not used here; currently skips (needs native Windows), so this hides nothing and saves no measurable time
+tests/fm-herdr-pi-stale-registration-live-e2e.test.sh${t}Herdr classifier against real Pi surface is not used here; currently skips (needs Herdr and a real Pi install), so this hides nothing and saves no measurable time
+tests/fm-cursor-primary-live-e2e.test.sh${t}cursor harness surface is not used here; currently skips (needs a real cursor install), so this hides nothing and saves no measurable time
+tests/fm-agy-signals-live-e2e.test.sh${t}agy harness surface is not used here; currently skips (needs a real agy install), so this hides nothing and saves no measurable time
+tests/fm-muse-signals-live-e2e.test.sh${t}muse harness surface is not used here; currently skips (needs a real muse install), so this hides nothing and saves no measurable time
+tests/fm-rovo-signals-live-e2e.test.sh${t}rovo harness surface is not used here; currently skips (needs a real rovo install), so this hides nothing and saves no measurable time
+tests/fm-omp-primary-live-e2e.test.sh${t}omp harness surface is not used here; currently skips (needs a real omp install), so this hides nothing and saves no measurable time
+tests/fm-opencode-primary-live-e2e.test.sh${t}opencode harness surface is not used here; currently skips (needs a real opencode install), so this hides nothing and saves no measurable time
+tests/fm-grok-continuity-live-e2e.test.sh${t}grok harness surface is not used here; currently skips (needs a real grok install), so this hides nothing and saves no measurable time
+tests/fm-grok-stop-live-e2e.test.sh${t}grok harness surface is not used here; currently skips (needs a real grok install), so this hides nothing and saves no measurable time
+tests/fm-backend-cmux-smoke.test.sh${t}cmux backend surface is not used here; currently skips (needs a real cmux), so this hides nothing and saves no measurable time
+tests/fm-backend-zellij-smoke.test.sh${t}zellij backend surface is not used here; currently skips (needs a real zellij), so this hides nothing and saves no measurable time
 EOF
 }
 

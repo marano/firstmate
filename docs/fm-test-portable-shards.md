@@ -116,7 +116,7 @@ The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 1
 
 ## Default exclusions
 
-`bin/fm-test-run.sh` owns one table of tests this home does not run by default, printed with a reason for each by `--list-default-exclusions`: the `secondmate` and `real-herdr-gated` families, and the Pi, unused-harness and unused-backend scripts.
+`bin/fm-test-run.sh` owns one table of tests this home does not run by default, printed with a reason for each by `--list-default-exclusions`: the `secondmate` and `real-herdr-gated` families, and the Pi, unused-harness and unused-backend scripts. Some of those entries name live scripts that currently skip; their reason line says so, and they hide nothing.
 It governs `--all`, `--lane`, `--proven-isolated` and `--changed`, so a local run and every CI lane, the stock Bash 3.2 lane included, leave the same tests out; `ci.yml` carries no list of its own and only says so in its header.
 The exclusion is applied after selection, so the packed shards do not move.
 Nothing is deleted and the coverage guard still accounts for every file, because each excluded test stays in its lane's membership; the guard also refuses a table entry that names a missing test or family or lacks a reason.
