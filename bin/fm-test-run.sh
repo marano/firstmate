@@ -37,10 +37,15 @@
 #                   script, as the hint table's "<path> <ms>" lines.
 #   fm-test-run.sh --refresh-serial-hints <timing.json...>
 #                   rewrite portable_serial_weight_hints in this file from them.
-#   fm-test-run.sh --check-hint-drift <timing.json...>
-#                   exit 1, naming each script, when a measured duration differs
-#                   from its hint by more than PORTABLE_SERIAL_HINT_DRIFT_PERCENT
-#                   and PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS. CI runs it on main.
+#   fm-test-run.sh --check-lane-timing <timing.json...>
+#                   judge a completed portable-serial run against the two bounds
+#                   a re-pack does not move: no shard may measure more than
+#                   PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS, and the lane may not
+#                   measure more than PORTABLE_SERIAL_LANE_UNDERPREDICT_PERCENT
+#                   above its packed weight. Refuses an input missing a shard.
+#                   Per-script hint gaps are reported, never gated: see the
+#                   comment on the measured-shard bound for why. CI runs it on
+#                   every push and pull request.
 #                   FM_PORTABLE_SERIAL_HINTS_FILE replaces the table (tests).
 #
 # Options:
@@ -278,11 +283,38 @@ PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 # spends the hang-tripwire margin the cap exists to keep.
 PORTABLE_SERIAL_MAX_SHARD_MS=1440000
 
-# A measured serial script has drifted from its hint when it differs by more
-# than this share of the hint AND by more than the absolute floor. Single CI runs
-# of one script vary by up to ~55% from the slowest of several, so the share is
-# wide enough that noise alone does not trip it while a hint that is off by the
-# amounts that once left shards 7 minutes apart does.
+# Largest MEASURED total any single portable-serial shard may reach, in
+# milliseconds. This is the same risk PORTABLE_SERIAL_MAX_SHARD_MS bounds, read
+# off what actually happened instead of off the hints: the packed weight
+# under-predicted the measured shard total by up to 24%, so a shard could run
+# 120s past its own packed budget and the coverage guard could not see it.
+# Derived from the job cap in .github/workflows/ci.yml, which owns that number:
+# 30 minutes, minus 120s allowed for checkout, the pinned linters and the npm
+# globals (measured at 15-21s across the five shards of one run), leaves 1680s
+# for the lane run itself. One shard's measured total moves about 6% run to run
+# under a fixed packing, so refusing at 1500s names a shard with roughly 300s
+# still in hand rather than letting the job be killed with no verdict.
+# Answer this by re-sharding, not by raising it.
+PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS=1500000
+
+# Largest share by which the lane's MEASURED total may exceed its packed weight
+# before the hint table counts as rotted. Both sides are recomputed from the
+# scripts the run actually reported, so removing or adding tests moves them
+# together and neither needs re-deriving when the set changes.
+# This is the bound the per-script comparison below cannot be: a script's
+# measured duration is not a property of the script. A re-pack that changed no
+# test file moved one script from 43663ms to 104844ms and another from 74942ms
+# to 20282ms, while the lane's measured total stayed between 5860s and 6314s
+# across both packings, so the total is what survives a re-pack and the
+# per-script number is not.
+PORTABLE_SERIAL_LANE_UNDERPREDICT_PERCENT=10
+
+# Band for REPORTING a per-script hint gap. Not a gate: after a re-pack such a
+# gap is attribution moving between scripts, not cost changing. Under a fixed
+# packing a script's duration is stable - across nine consecutive green runs the
+# spread of the 105 scripts over 5s had a median of 17% and a 90th percentile of
+# 34% - so this band names the gaps worth a human's attention without pretending
+# they are defects.
 PORTABLE_SERIAL_HINT_DRIFT_PERCENT=50
 PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS=30000
 
@@ -1474,8 +1506,10 @@ run_coverage_guard() {
 }
 
 # Serial-hint tooling over measured timing JSON. One python body serves three
-# modes: derive (print the table), refresh (rewrite it in this file), and drift
-# (compare it with the current table). Only passing portable-serial records count.
+# modes: derive (print the table), refresh (rewrite it in this file), and lane
+# (judge a completed run). Only passing portable-serial records feed the table;
+# the lane bounds count every reported record, because a shard's wall clock is
+# spent whether or not the script that spent it passed.
 serial_hints_from_timing() {
   local mode=$1
   shift
@@ -1485,21 +1519,35 @@ serial_hints_from_timing() {
   cur=$(mktemp "${TMPDIR:-/tmp}/fm-test-hints.XXXXXX") || return 1
   portable_serial_weight_hints >"$cur"
   local rc=0
-  python3 - "$mode" "$cur" "$0" "$PORTABLE_SERIAL_HINT_DRIFT_PERCENT" "$PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS" "$@" <<'PY' || rc=$?
+  python3 - "$mode" "$cur" "$0" "$PORTABLE_SERIAL_HINT_DRIFT_PERCENT" \
+    "$PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS" "$PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS" \
+    "$PORTABLE_SERIAL_LANE_UNDERPREDICT_PERCENT" "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" \
+    "$@" <<'PY' || rc=$?
 import json, re, sys
 from pathlib import Path
 
-mode, cur_path, self_path, pct, floor = sys.argv[1:6]
-pct, floor = int(pct), int(floor)
+mode, cur_path, self_path = sys.argv[1:4]
+pct, floor, shard_max, over_pct, default_ms = (int(a) for a in sys.argv[4:9])
 measured = {}
-for name in sys.argv[6:]:
+shards = {}
+shard_count = 0
+for name in sys.argv[9:]:
     doc = json.loads(Path(name).read_text(encoding="utf-8"))
     for s in doc.get("scripts") or []:
-        if "portable-serial" not in (s.get("lane_selection") or doc.get("selection") or ""):
+        sel = s.get("lane_selection") or doc.get("selection") or ""
+        if "portable-serial" not in sel:
             continue
+        ms = int(s["duration_ms"])
+        # A shard's wall clock is what the job cap kills, so the lane bounds
+        # count every record. The hint table stays built from passing ones: a
+        # script that died early did not measure its own cost.
+        m = re.search(r"portable-serial-(\d+)of(\d+)", sel)
+        if m:
+            shard_count = max(shard_count, int(m.group(2)))
+            shards.setdefault(int(m.group(1)), {})[s["path"]] = ms
         if s.get("exit") != 0:
             continue
-        measured[s["path"]] = max(measured.get(s["path"], 0), int(s["duration_ms"]))
+        measured[s["path"]] = max(measured.get(s["path"], 0), ms)
 table = "".join(f"{p} {ms}\n" for p, ms in sorted(measured.items()))
 if mode == "derive":
     sys.stdout.write(table)
@@ -1523,17 +1571,65 @@ else:
         f = line.split()
         if len(f) == 2:
             hints[f[0]] = int(f[1])
-    drifted = []
+
+    # Refuse a partial input rather than judge it. The aggregate job runs even
+    # when a shard failed or uploaded late, and summing four shards out of five
+    # makes both bounds below silently lenient.
+    if not shards:
+        sys.exit("--check-lane-timing: the inputs hold no portable-serial shard records")
+    absent = [k for k in range(1, shard_count + 1) if k not in shards]
+    if absent:
+        sys.exit(
+            "--check-lane-timing: inputs cover shards "
+            f"{sorted(shards)} of {shard_count}; missing {absent}. "
+            "Re-run with every shard's timing artifact."
+        )
+
+    failures = []
+    lane_measured = lane_packed = 0
+    for k in sorted(shards):
+        shard_ms = sum(shards[k].values())
+        packed = sum(hints.get(path, default_ms) for path in shards[k])
+        lane_measured += shard_ms
+        lane_packed += packed
+        print(
+            f"FM_LANE_SHARD shard={k} scripts={len(shards[k])} "
+            f"measured_ms={shard_ms} packed_ms={packed} max_ms={shard_max}"
+        )
+        if shard_ms > shard_max:
+            failures.append(
+                f"portable-serial shard {k} measured {shard_ms}ms, over the {shard_max}ms bound; "
+                "re-shard (PORTABLE_SERIAL_SHARDS), do not raise the bound"
+            )
+    over = lane_measured * 100 - lane_packed * (100 + over_pct)
+    print(
+        f"FM_LANE_TIMING shards={len(shards)} measured_ms={lane_measured} "
+        f"packed_ms={lane_packed} allowed_over_percent={over_pct}"
+    )
+    if lane_packed and over > 0:
+        failures.append(
+            f"the portable-serial lane measured {lane_measured}ms against a packed weight of "
+            f"{lane_packed}ms, more than {over_pct}% over; the hint table under-predicts the "
+            "lane, so refresh it: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> "
+            "(docs/fm-test-portable-shards.md)"
+        )
+
+    # Reported, never gated. After a re-pack a per-script gap is attribution
+    # moving between scripts rather than cost changing, so it names something
+    # worth a look and decides nothing.
+    named = 0
     for path, ms in sorted(measured.items()):
         if path not in hints:
             continue
         gap = abs(ms - hints[path])
         if gap > floor and gap * 100 > pct * hints[path]:
-            drifted.append(path)
+            named += 1
             print(f"FM_HINT_DRIFT {path} hint_ms={hints[path]} measured_ms={ms}")
-    print(f"FM_HINT_DRIFT_SUMMARY checked={len(measured)} drifted={len(drifted)}")
-    if drifted:
-        print("refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)", file=sys.stderr)
+    print(f"FM_HINT_DRIFT_SUMMARY checked={len(measured)} named={named} gating=no")
+
+    if failures:
+        for line in failures:
+            print(f"fm-test-run: {line}", file=sys.stderr)
         sys.exit(1)
 PY
   rm -f "$cur"
@@ -2367,8 +2463,8 @@ while [ "$#" -gt 0 ]; do
       MODE=hints-refresh
       shift
       ;;
-    --check-hint-drift)
-      MODE=hints-drift
+    --check-lane-timing)
+      MODE=hints-lane
       shift
       ;;
     --exclude-family)

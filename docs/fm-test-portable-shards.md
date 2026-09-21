@@ -86,14 +86,30 @@ Measure native-Windows-only scripts through the focused Git Bash runner and reta
 A hint can only come from green CI runs that include the script at its new size, and those runs happen after the change that grew it, so no change can refresh the hints for its own growth.
 A refresh is therefore its own follow-up change, made from the timing artifacts of several green runs on `main`, rather than an obligation on the change that caused the growth.
 File it when a change adds scripts to a lane or grows a member materially, and whenever `--check-coverage` reports `serial_unhinted=` or `serial_max_ms=` approaching its bound; the guard's refusals remain the enforced backstop.
+A refresh re-packs the shards, which changes what every script measures, so it is a rebalance rather than a correction to a set of numbers: expect the reported per-script gaps to be different afterwards rather than absent, and judge the result by the lane timing guard below.
 Lint shard weights need no refresh: [`bin/fm-lint.sh`](../bin/fm-lint.sh) derives them from the source graph at run time.
 
-## Hint drift guard
+## Lane timing guard
 
-Hints go stale silently, so the aggregate job's "Check serial shard hints" step runs `bin/fm-test-run.sh --check-hint-drift` on every `main` push.
-It names each script whose measured duration differs from its hint by more than `PORTABLE_SERIAL_HINT_DRIFT_PERCENT` (50) and `PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS` (30000), and exits non-zero.
-The share is wide because one script's duration varies by up to about 55% between runs of the same code; a hint set refreshed from three green runs stays quiet against each of them.
-A red step is the signal to run the refresh above as its own follow-up change.
+Hints go stale silently, so the aggregate job's "Check serial shard timings" step runs `bin/fm-test-run.sh --check-lane-timing` on every push and pull request.
+It refuses an input missing any shard, because the aggregate job also runs when a lane produced no timing artifact and summing four shards out of five makes both bounds below silently lenient.
+It then checks two things and exits non-zero naming either:
+
+- Each shard's **measured** total against `PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS` (1500000), the job cap read off what happened rather than off the hints.
+  The packed weight cannot stand in for this: it under-predicted the measured shard total by up to 24%, so shard 5 measured 1532068 ms and 1560275 ms on green `main` runs while its packed weight sat inside the 1440000 ms budget and nothing said so.
+  The answer when this trips is re-sharding, not a larger bound.
+- The lane's **measured** total against its packed weight, refusing past `PORTABLE_SERIAL_LANE_UNDERPREDICT_PERCENT` (10).
+  Both sides are recomputed from the scripts the run itself reported, so adding or removing tests moves them together and neither side needs re-deriving when the script set changes.
+  The refresh takes each script's slowest run, so the packed weight normally sits a few percent above the measured lane; measuring 10% above it means the table has rotted enough to make the per-shard budget it feeds untrustworthy, and the answer is the refresh above.
+
+A per-script gap between a measured duration and its hint is reported as `FM_HINT_DRIFT`, past the same `PORTABLE_SERIAL_HINT_DRIFT_PERCENT` (50) and `PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS` (30000) band, and gates nothing.
+It cannot: a script's measured duration is not a property of the script.
+The 2026-09-21 re-pack is the measurement: it changed no test file, so the same `tests/fm-bootstrap.test.sh` measured 43663 ms in shard 4 and 104844 ms in shard 3, and `tests/fm-send-resolve-key.test.sh` measured 74942 ms in shard 5 and 20282 ms in shard 4.
+`tests/fm-secondmate-sync.test.sh` did not change shard at all and still moved from 53642 ms to 85037 ms once its shard's composition changed.
+The lane's measured total meanwhile stayed between 5860 s and 6314 s across both packings, which is why the total is the quantity a re-pack leaves alone and the per-script number is not.
+Measured against a fixed packing the same durations are stable: across nine consecutive green `main` runs the 105 serial scripts over 5 s had a median spread of 17% and a 90th percentile of 34%, so the band is right and the basis was not.
+This is also why the guard runs pre-merge now: a branch's per-script durations were never `main`'s, but a shard's measured total against the job cap is the same quantity on either.
+
 The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 19.7 minutes) bounds CI end to end, so more serial shards buy nothing.
 
 ## Coverage guard
