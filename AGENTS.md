@@ -207,6 +207,7 @@ When that section reports its checks still in progress it names exactly what is 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the essential launch tools are present and GitHub authentication is good; presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
+Name the repository on every GitHub call (`-R <owner>/<repo>`, or the `repos/<owner>/<repo>/...` path for `gh api`), because an unnamed call resolves the repository from the checkout's git remotes and a checkout carrying a second GitHub remote can reach a different repository, returning its data on a read and refusing a write as a permissions error.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.

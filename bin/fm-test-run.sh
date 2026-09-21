@@ -409,7 +409,7 @@ family_for_basename() {
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
-    fm-pr-state-live-e2e.test.sh|\
+    fm-pr-body-write-live-e2e.test.sh|fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -956,6 +956,7 @@ tests/fm-pi-watch-extension.test.sh 52010
 tests/fm-pi-windows-shell-invocation.test.sh 84
 tests/fm-pr-check-security.test.sh 256802
 tests/fm-pr-reviewers.test.sh 549
+tests/fm-pr-body-write-live-e2e.test.sh 48
 tests/fm-pr-state-live-e2e.test.sh 48
 tests/fm-pr-state.test.sh 684
 tests/fm-procevent-quota.test.sh 2038

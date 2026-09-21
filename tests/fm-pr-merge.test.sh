@@ -286,6 +286,7 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *"/git/refs/heads/"*)
+        : > "${FM_TEST_GH_DELETE_BRANCH_ATTEMPTED:-/dev/null}"
         [ ! -f "${FM_TEST_GH_DELETE_BRANCH_FAILS:-}" ] || exit 1
         : > "${FM_TEST_GH_DELETE_BRANCH_CALLED:-/dev/null}"
         exit 0
@@ -300,6 +301,11 @@ case "${1:-} ${2:-}" in
         ;;
       *"/branches/"*)
         if [ -f "${FM_TEST_GH_BRANCH_MISSING:-}" ]; then
+          exit 1
+        elif [ -f "${FM_TEST_GH_BRANCH_MISSING_AFTER_DELETE:-}" ] \
+          && [ -f "${FM_TEST_GH_DELETE_BRANCH_ATTEMPTED:-}" ]; then
+          # The delete-on-merge race: readable while protection is checked, gone
+          # from the moment the delete is attempted.
           exit 1
         elif [ -f "${FM_TEST_GH_BRANCH_PROTECTED:-}" ]; then
           printf 'true\n'
@@ -418,8 +424,20 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *"/repository/branches/"*)
-        [ ! -e "$case_dir/glab-delete-branch-fails" ] || exit 1
-        : > "$case_dir/glab-delete-branch-called"
+        case " $* " in
+          *" -X DELETE "*)
+            : > "$case_dir/glab-delete-branch-attempted"
+            [ ! -e "$case_dir/glab-delete-branch-fails" ] || exit 1
+            : > "$case_dir/glab-delete-branch-called"
+            exit 0
+            ;;
+        esac
+        if [ -e "$case_dir/glab-branch-missing-after-delete" ] \
+          && [ -e "$case_dir/glab-delete-branch-attempted" ]; then
+          echo 'error: 404 Not Found' >&2
+          exit 1
+        fi
+        printf '{"name":"branch"}\n'
         exit 0
         ;;
     esac
@@ -554,6 +572,8 @@ run_pr_merge() {
   FM_TEST_GH_OPEN_PR_COUNT="$case_dir/github-open-pr-count" \
   FM_TEST_GH_BRANCH_PROTECTED="$case_dir/github-branch-protected" \
   FM_TEST_GH_BRANCH_MISSING="$case_dir/github-branch-missing" \
+  FM_TEST_GH_BRANCH_MISSING_AFTER_DELETE="$case_dir/github-branch-missing-after-delete" \
+  FM_TEST_GH_DELETE_BRANCH_ATTEMPTED="$case_dir/github-delete-branch-attempted" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -3608,6 +3628,57 @@ test_branch_deletion_failure_does_not_fail_a_landed_merge() {
   pass "fm-pr-merge reports a landed merge as done even when branch deletion fails"
 }
 
+# Regression for the delete-on-merge race behind a false actionable line. A
+# repository that deletes head branches on merge can remove the branch between
+# the protection read and the delete, and the delete then answers "Reference
+# does not exist". The same already-deleted branch previously took two
+# different paths depending on that timing, and one of them reported work the
+# supervisor did not have: an actionable line that is routinely false trains
+# its reader to skip actionable lines.
+test_branch_deleted_by_the_forge_mid_merge_reports_already_gone() {
+  local case_dir rc
+  case_dir=$(make_case deletion-race-reports-already-gone)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-delete-branch-fails"
+  : > "$case_dir/github-branch-missing-after-delete"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/84 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deletion-race: a landed merge must still exit zero"
+  assert_grep "branch already gone: $GH_TEST_HEAD_BRANCH" "$case_dir/stdout" \
+    "deletion-race: a branch the forge had already deleted was not reported as already gone"
+  assert_no_grep 'could not delete branch' "$case_dir/stderr" \
+    "deletion-race: an already-deleted branch still printed an actionable line"
+  pass "fm-pr-merge reports a branch the forge deleted mid-merge as already gone"
+}
+
+# The GitLab path carries the same race and the same contract.
+test_gitlab_branch_deleted_by_the_forge_mid_merge_reports_already_gone() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-deletion-race-reports-already-gone)
+  : > "$case_dir/glab-delete-branch-fails"
+  : > "$case_dir/glab-branch-missing-after-delete"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-deletion-race: a landed merge must still exit zero"
+  assert_grep 'branch already gone: fm/example-branch' "$case_dir/stdout" \
+    "gitlab-deletion-race: a branch the forge had already deleted was not reported as already gone"
+  assert_no_grep 'could not delete branch' "$case_dir/stderr" \
+    "gitlab-deletion-race: an already-deleted branch still printed an actionable line"
+  pass "fm-pr-merge reports a GitLab branch deleted mid-merge as already gone"
+}
+
 test_protected_head_branch_is_left_in_place() {
   local case_dir rc
   case_dir=$(make_case protected-branch-left-in-place)
@@ -3779,6 +3850,8 @@ test_allow_red_refused_on_gitlab
 test_verified_merge_deletes_head_branch_after_proof
 test_unproved_github_merge_leaves_branch_alone
 test_branch_deletion_failure_does_not_fail_a_landed_merge
+test_branch_deleted_by_the_forge_mid_merge_reports_already_gone
+test_gitlab_branch_deleted_by_the_forge_mid_merge_reports_already_gone
 test_protected_head_branch_is_left_in_place
 test_branch_base_of_open_pr_is_left_in_place
 test_fork_head_branch_is_left_in_place
