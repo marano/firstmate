@@ -137,7 +137,152 @@ def markdown_anchors(path: Path) -> set[str]:
     return anchors
 
 
-def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
+def validate_agent_skill_pointers(root: Path, data: dict) -> int:
+    """Every agent-only skill is either named by AGENTS.md or exempted on the record.
+
+    A skill AGENTS.md names must exist, so a pointer cannot rot into a dangling
+    reference; a skill AGENTS.md no longer names must carry the reason and, where
+    another surface now triggers it, that surface must still name it.
+    """
+    spec = data.get("agentSkillPointers")
+    if not isinstance(spec, dict):
+        fail("agentSkillPointers must be an object")
+    source = spec.get("source")
+    skills_root_name = spec.get("skillsRoot")
+    if not isinstance(source, str) or not source:
+        fail("agentSkillPointers.source must be a non-empty string")
+    if not isinstance(skills_root_name, str) or not skills_root_name:
+        fail("agentSkillPointers.skillsRoot must be a non-empty string")
+    source_path = root / source
+    if not source_path.is_file():
+        fail(f"agentSkillPointers.source is missing: {source}")
+    try:
+        source_text = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"agentSkillPointers.source is unreadable {source}: {exc}")
+
+    skills_root = root / skills_root_name
+    if not skills_root.is_dir():
+        fail(f"agentSkillPointers.skillsRoot is missing: {skills_root_name}")
+    present = sorted(
+        entry.name for entry in skills_root.iterdir() if (entry / "SKILL.md").is_file()
+    )
+
+    raw_referenced = spec.get("referenced")
+    if not isinstance(raw_referenced, list) or not raw_referenced:
+        fail("agentSkillPointers.referenced must be a non-empty array")
+    referenced: list[str] = []
+    for index, entry in enumerate(raw_referenced):
+        if isinstance(entry, str) and entry:
+            referenced.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            fail(f"agentSkillPointers.referenced[{index}] must be a name or an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            fail(f"agentSkillPointers.referenced[{index}].name must be a non-empty string")
+        referenced.append(name)
+        phrases = entry.get("contains")
+        if phrases is None:
+            continue
+        phrases = list_of_strings(phrases, f"agentSkillPointers.referenced[{index}].contains")
+        skill_file = skills_root / name / "SKILL.md"
+        try:
+            skill_text = skill_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"{name}: SKILL.md is unreadable: {exc}")
+        for phrase in phrases:
+            if phrase not in skill_text:
+                fail(
+                    f"owning skill does not state the boundary: {name} is missing "
+                    f"{phrase!r} required by {source}"
+                )
+    exemptions = spec.get("unreferenced")
+    if not isinstance(exemptions, list):
+        fail("agentSkillPointers.unreferenced must be an array")
+    exempt_names: list[str] = []
+    for index, entry in enumerate(exemptions):
+        if not isinstance(entry, dict):
+            fail(f"agentSkillPointers.unreferenced[{index}] must be an object")
+        name = entry.get("name")
+        reason = entry.get("reason")
+        if not isinstance(name, str) or not name:
+            fail(f"agentSkillPointers.unreferenced[{index}].name must be a non-empty string")
+        if not isinstance(reason, str) or not reason:
+            fail(f"{name}: an unreferenced skill needs a recorded reason")
+        exempt_names.append(name)
+        via = entry.get("via")
+        if via is None:
+            continue
+        if not isinstance(via, str) or not via:
+            fail(f"{name}: agentSkillPointers.unreferenced via must be a non-empty string")
+        via_path = root / via
+        if not via_path.is_file():
+            fail(f"{name}: load-trigger owner is missing: {via}")
+        try:
+            via_text = via_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"{name}: load-trigger owner is unreadable {via}: {exc}")
+        if name not in via_text:
+            fail(f"{name}: load-trigger owner {via} no longer names it")
+
+    declared = referenced + exempt_names
+    duplicates = sorted(name for name, count in Counter(declared).items() if count != 1)
+    if duplicates:
+        fail("skills declared more than once: " + ", ".join(duplicates))
+    missing = sorted(set(present) - set(declared))
+    extra = sorted(set(declared) - set(present))
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("undeclared skills: " + ", ".join(missing))
+        if extra:
+            details.append("declared skill has no SKILL.md: " + ", ".join(extra))
+        fail("; ".join(details))
+
+    for name in referenced:
+        if name not in source_text:
+            fail(f"{source} no longer names the skill it is declared to trigger: {name}")
+    for name in exempt_names:
+        if name in source_text:
+            fail(f"{source} names {name}, which is declared unreferenced; move it to referenced")
+    return len(declared)
+
+
+def validate_size_budgets(root: Path, data: dict) -> int:
+    """Hold a trimmed instruction surface to its measured size.
+
+    The budget is a ceiling, so further trimming passes and only re-inflation
+    fails, naming the overshoot rather than a snapshot of the file's bytes.
+    """
+    budgets = data.get("sizeBudgets")
+    if not isinstance(budgets, list) or not budgets:
+        fail("sizeBudgets must be a non-empty array")
+    for index, entry in enumerate(budgets):
+        if not isinstance(entry, dict):
+            fail(f"sizeBudgets[{index}] must be an object")
+        path = entry.get("path")
+        max_bytes = entry.get("maxBytes")
+        note = entry.get("note")
+        if not isinstance(path, str) or not path:
+            fail(f"sizeBudgets[{index}].path must be a non-empty string")
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+            fail(f"{path}: sizeBudgets maxBytes must be a positive whole number")
+        if not isinstance(note, str) or not note:
+            fail(f"{path}: sizeBudgets needs a note recording what the budget holds")
+        target = root / path
+        if not target.is_file():
+            fail(f"sizeBudgets path is missing: {path}")
+        actual = target.stat().st_size
+        if actual > max_bytes:
+            fail(
+                f"{path} exceeds its size budget: {actual} bytes against {max_bytes} "
+                f"({actual - max_bytes} over); trim it or raise the budget deliberately"
+            )
+    return len(budgets)
+
+
+def validate(root: Path, inventory_path: Path) -> tuple[int, int, int, int]:
     data = load_inventory(inventory_path)
     scope = data.get("scope")
     if not isinstance(scope, dict):
@@ -226,6 +371,25 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             }
         if target not in source_text and target not in linked_targets:
             fail(f"required owner pointer missing: {source} -> {target}")
+        required_phrases = pointer.get("contains")
+        if required_phrases is None:
+            continue
+        required_phrases = list_of_strings(
+            required_phrases, f"requiredOwnerPointers[{index}].contains"
+        )
+        try:
+            target_text = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"owner-pointer target is unreadable {target}: {exc}")
+        for phrase in required_phrases:
+            if phrase not in target_text:
+                fail(
+                    f"owner pointer target does not state the boundary: "
+                    f"{target} is missing {phrase!r} required by {source}"
+                )
+
+    skills = validate_agent_skill_pointers(root, data)
+    budgets = validate_size_budgets(root, data)
 
     checked_links = 0
     anchor_cache: dict[Path, set[str]] = {}
@@ -243,7 +407,7 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
                 if fragment not in anchors:
                     fail(f"unresolved local anchor in {path}: {raw}")
 
-    return len(tracked), checked_links
+    return len(tracked), checked_links, skills, budgets
 
 
 def main() -> int:
@@ -256,11 +420,14 @@ def main() -> int:
     if not inventory_path.is_absolute():
         inventory_path = root / inventory_path
     try:
-        surfaces, links = validate(root, inventory_path)
+        surfaces, links, skills, budgets = validate(root, inventory_path)
     except CheckError as exc:
         print(f"fm-doc-audience-check: {exc}", file=sys.stderr)
         return 1
-    print(f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links}")
+    print(
+        f"fm-doc-audience-check: ok surfaces={surfaces} local_links={links} "
+        f"skill_pointers={skills} size_budgets={budgets}"
+    )
     return 0
 
 

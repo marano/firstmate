@@ -45,6 +45,36 @@ elif mode.name == "missing-owner-pointer":
     }
 elif mode.name == "shrink-scope":
     data["scope"]["trackedPatterns"] = ["README.md"]
+elif mode.name == "broken-owner-contains":
+    for entry in data["requiredOwnerPointers"]:
+        if entry.get("contains"):
+            entry["contains"][0] = "a boundary no owner states"
+            break
+    else:
+        raise SystemExit("inventory declares no owner-pointer contains to mutate")
+elif mode.name == "broken-skill-contains":
+    for entry in data["agentSkillPointers"]["referenced"]:
+        if isinstance(entry, dict) and entry.get("contains"):
+            entry["contains"][0] = "a boundary no skill states"
+            break
+    else:
+        raise SystemExit("inventory pins no skill boundary to mutate")
+elif mode.name == "dangling-skill-pointer":
+    data["agentSkillPointers"]["referenced"].append("skill-that-never-existed")
+elif mode.name == "undeclared-skill-trigger":
+    name = data["agentSkillPointers"]["referenced"].pop(0)
+    data["agentSkillPointers"]["unreferenced"].append(
+        {"name": name, "reason": "mutant: silently dropped from the inventory"}
+    )
+elif mode.name == "stale-skill-via":
+    for entry in data["agentSkillPointers"]["unreferenced"]:
+        if entry.get("via"):
+            entry["via"] = "docs/documentation-audiences.md"
+            break
+    else:
+        raise SystemExit("inventory declares no unreferenced skill with a via to mutate")
+elif mode.name == "tight-size-budget":
+    data["sizeBudgets"][0]["maxBytes"] = 1
 else:
     raise SystemExit(f"unknown mode: {mode.name}")
 destination.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -85,6 +115,42 @@ test_required_pointer_fails() {
   pass "required documentation owner pointers cannot silently disappear"
 }
 
+test_owner_must_state_the_boundary() {
+  local broken="$TMP_ROOT/broken-contains.json"
+  mutate_inventory "$INVENTORY" "$broken" broken-owner-contains
+  run_expect_failure "owner pointer target does not state the boundary" \
+    "$CHECK" --inventory "$broken"
+  pass "a boundary AGENTS.md delegates must still be stated by the file it points at"
+}
+
+test_skill_pointers_cannot_rot() {
+  local dangling="$TMP_ROOT/dangling-skill.json"
+  local undeclared="$TMP_ROOT/undeclared-skill.json"
+  local stale_via="$TMP_ROOT/stale-via.json"
+  mutate_inventory "$INVENTORY" "$dangling" dangling-skill-pointer
+  mutate_inventory "$INVENTORY" "$undeclared" undeclared-skill-trigger
+  mutate_inventory "$INVENTORY" "$stale_via" stale-skill-via
+  local broken_skill="$TMP_ROOT/broken-skill-contains.json"
+  mutate_inventory "$INVENTORY" "$broken_skill" broken-skill-contains
+  run_expect_failure "owning skill does not state the boundary" \
+    "$CHECK" --inventory "$broken_skill"
+  run_expect_failure "declared skill has no SKILL.md" \
+    "$CHECK" --inventory "$dangling"
+  run_expect_failure "which is declared unreferenced" \
+    "$CHECK" --inventory "$undeclared"
+  run_expect_failure "load-trigger owner" \
+    "$CHECK" --inventory "$stale_via"
+  pass "a skill AGENTS.md names must exist and keep stating its boundary, and one it stopped naming must keep a live load trigger"
+}
+
+test_size_budget_catches_reinflation() {
+  local tight="$TMP_ROOT/tight-budget.json"
+  mutate_inventory "$INVENTORY" "$tight" tight-size-budget
+  run_expect_failure "exceeds its size budget" \
+    "$CHECK" --inventory "$tight"
+  pass "the trimmed instruction surface is held to its measured size"
+}
+
 write_fixture_inventory() {
   local repo=$1
   cat > "$repo/docs/documentation-audiences.json" <<'JSON'
@@ -95,7 +161,20 @@ write_fixture_inventory() {
   "setupAudiences": ["public-product", "operator-current"],
   "readmeSetupTargets": ["docs/setup.md"],
   "requiredOwnerPointers": [
-    {"source": "README.md", "target": "docs/policy.md"}
+    {"source": "README.md", "target": "docs/policy.md", "contains": ["# Policy"]}
+  ],
+  "agentSkillPointers": {
+    "source": "README.md",
+    "skillsRoot": ".agents/skills",
+    "referenced": [
+      {"name": "sample-referenced", "contains": ["# Referenced"]}
+    ],
+    "unreferenced": [
+      {"name": "sample-exempt", "reason": "fixture exemption", "via": "docs/policy.md"}
+    ]
+  },
+  "sizeBudgets": [
+    {"path": "docs/policy.md", "maxBytes": 4096, "note": "fixture budget"}
   ],
   "surfaces": [
     {"path": "README.md", "audience": "public-product"},
@@ -109,11 +188,15 @@ JSON
 
 test_local_links_and_no_keyword_heuristic() {
   local repo="$TMP_ROOT/fixture"
-  mkdir -p "$repo/docs"
+  mkdir -p "$repo/docs" "$repo/.agents/skills/sample-referenced" \
+    "$repo/.agents/skills/sample-exempt"
   git -C "$repo" init -q
-  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
+  printf '%s\n' '# Referenced' > "$repo/.agents/skills/sample-referenced/SKILL.md"
+  printf '%s\n' '# Exempt' > "$repo/.agents/skills/sample-exempt/SKILL.md"
+  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md) loads sample-referenced' \
+    > "$repo/README.md"
   printf '%s\n' '# Setup' > "$repo/docs/setup.md"
-  printf '%s\n' '# Policy' > "$repo/docs/policy.md"
+  printf '%s\n' '# Policy' 'Agents load sample-exempt from here.' > "$repo/docs/policy.md"
   cat > "$repo/docs/evidence.md" <<'MD'
 # Incident verification on 2026-07-23
 
@@ -128,7 +211,8 @@ MD
   "$CHECK" --root "$repo" >/dev/null \
     || fail "structural checker rejected legitimate maintainer evidence prose"
 
-  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md) [Broken](docs/missing.bin)' \
+  printf '%s\n' \
+    '[Setup](docs/setup.md) [Policy](docs/policy.md) [Broken](docs/missing.bin) sample-referenced' \
     > "$repo/README.md"
   git -C "$repo" add README.md
   run_expect_failure "unresolved local link" "$CHECK" --root "$repo"
@@ -138,4 +222,7 @@ MD
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
+test_owner_must_state_the_boundary
+test_skill_pointers_cannot_rot
+test_size_budget_catches_reinflation
 test_local_links_and_no_keyword_heuristic

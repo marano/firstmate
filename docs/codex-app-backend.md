@@ -3,6 +3,7 @@
 Codex App is not a selectable Firstmate runtime backend.
 Codex Desktop host tools can create and supervise visible threads and those threads can write Firstmate status files when given an authorized path, but Firstmate has no supported shell-callable bridge to those host tools.
 A manual thread ledger is not a backend.
+Firstmate agents load [`firstmate-codexapp`](../.agents/skills/firstmate-codexapp/SKILL.md) before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence.
 
 ## Acceptance contract
 
