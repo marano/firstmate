@@ -1,0 +1,49 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 1875 for 1m14s running: bash -c $'\ncd /Users/marano/.treehouse/firstmate-7077c2/4/firstmate\nS="/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-4-firstmate/b68fa6bc-cca4-410e-a227-77002468f641/scratchpad"\necho "--- A: pi-watch-extension ALONE ---"\nbash tests/fm-pi-watch-extension.test.sh > "$S/piw-alone.log" 2>&1\necho "alone rc=$? ok=$(grep -c "^ok" "$S/piw-alone.log") notok=$(grep -c "^not ok" "$S/piw-alone.log")"\ngrep "^not ok" "$S/piw-alone.log" | head -2\necho "--- B: watch-arm first, then pi-watch-extension ---"\nbash tests/fm-watch-arm.test.sh > "$S/piw-armfirst-arm.log" 2>&1\necho "watch-arm rc=$? notok=$(grep -c "^not ok" "$S/piw-armfirst-arm.log")"\nbash tests/fm-pi-watch-extension.test.sh > "$S/piw-after-arm.log" 2>&1\necho "after-arm rc=$? ok=$(grep -c "^ok" "$S/piw-after-arm.log") notok=$(grep -c "^not ok" "$S/piw-after-arm.log")"\ngrep "^not ok" "$S/piw-after-arm.log" | head -2' [in /Users/marano/.treehouse/firstmate-7077c2/4/firstmate])
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - position 1 of 2 in line - held by pid 1875 for 2m14s running: bash -c $'\ncd /Users/marano/.treehouse/firstmate-7077c2/4/firstmate\nS="/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-4-firstmate/b68fa6bc-cca4-410e-a227-77002468f641/scratchpad"\necho "--- A: pi-watch-extension ALONE ---"\nbash tests/fm-pi-watch-extension.test.sh > "$S/piw-alone.log" 2>&1\necho "alone rc=$? ok=$(grep -c "^ok" "$S/piw-alone.log") notok=$(grep -c "^not ok" "$S/piw-alone.log")"\ngrep "^not ok" "$S/piw-alone.log" | head -2\necho "--- B: watch-arm first, then pi-watch-extension ---"\nbash tests/fm-watch-arm.test.sh > "$S/piw-armfirst-arm.log" 2>&1\necho "watch-arm rc=$? notok=$(grep -c "^not ok" "$S/piw-armfirst-arm.log")"\nbash tests/fm-pi-watch-extension.test.sh > "$S/piw-after-arm.log" 2>&1\necho "after-arm rc=$? ok=$(grep -c "^ok" "$S/piw-after-arm.log") notok=$(grep -c "^not ok" "$S/piw-after-arm.log")"\ngrep "^not ok" "$S/piw-after-arm.log" | head -2' [in /Users/marano/.treehouse/firstmate-7077c2/4/firstmate]
+fm-build-lock: acquired the machine-wide build lock after 1m51s
+ok - exit status passes through unchanged for success, failure, and signal death
+ok - stdout and stdin pass through untouched
+ok - two concurrent invocations never overlap, and the lock is left clean
+ok - a blocked invocation names the holder, its age and its command, on stderr
+ok - --status reports the holder while held and free once released
+ok - the lock is released when the wrapped command is SIGKILLed, and the next waiter gets in
+ok - a lock left by a dead holder is reclaimed instead of blocking forever
+ok - a tight release-then-reacquire loop never overtakes an earlier waiter
+ok - a waiter that dies while in line does not block the waiters behind it
+ok - a waiter that stops renewing its ticket loses its place instead of wedging the line
+ok - an unreadable ticket age is not treated as stale
+ok - a waiter killed while in line strands nothing in the lock root
+ok - CI stands down: the command runs, the lock is never taken, and it never queues
+ok - both ceilings warn loudly and neither kills the holder
+ok - the default lock is one machine-wide path, outside every home and independent of TMPDIR
+ok - workers with different TMPDIR values still exclude each other
+ok - the mutex entry point works as a bare word, installed elsewhere, and refuses to clobber
+ok - argument and environment handling refuses bad input instead of guessing
+ok - a nested invocation inside a hold runs straight through, and a foreign hold variable does not
+ok - a nested invocation under an owner that exported no hold variables runs straight through
+ok - a hold past its ceiling appends one informational note to the task status file
+ok - a wait past its ceiling appends a declared pause, then working once the lock is taken
+ok - without an absolute FM_TASK_STATUS a ceiling appends nothing
+ok - --label names the hold in place of the rendered command
+ok - --help states one invocation per run, never one around a loop of runs
+ok - a count of N runs exactly N invocations at once, never more, and leaves nothing behind
+ok - with several slots, only the oldest ticket may try, so an earlier arrival still goes first
+ok - a dead holder's slot is reclaimed while a live holder keeps its own, and nothing is left behind
+ok - a count of 1, configured or not, is today's lock in every observable respect
+ok - the slot count falls back to 1 and warns on every bad value, and never stops the build
+ok - a slot count above the online core count is clamped to it and says so
+ok - a waiting head picks up a raised slot count within a poll, and --slots-path names that file
+ok - a lowered count drains rather than being refilled, and admits nobody until it has
+ok - a slot left by a killed high holder is retired by the next acquisition, not left behind
+ok - a nested invocation under an ancestor holding a high slot runs straight through
+ok - hold variables naming a high slot pass an invocation through with no ancestor to fall back on
+ok - --status names every slot, its holder and what it runs, and the waiting count
+ok - a waiter at N>1 names the slot count and a holder, and declares its wait as paused
+ok - an ordinary hold at N>1 reports its share of the slots and claims to block nobody
+ok - on CI the slot count and the whole-machine patterns are never read and nothing is created
+ok - a run named with --exclusive holds every slot and never runs beside anything
+ok - the whole-machine pattern file names runs without any caller knowing, and is unread at a count of 1
+ok - an unusable whole-machine pattern file makes every run whole-machine and says so once
+ok - a whole-machine run that outlives a lowered count still starts, holding more than it needs
+ok - a whole-machine run interrupted while draining gives its reserved slots straight back
+ok - fm-build-lock behaves

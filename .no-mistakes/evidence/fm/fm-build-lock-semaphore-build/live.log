@@ -1,0 +1,46 @@
+### N=1 default: no settings file created
+### N=1 default: no settings file created
+free
+### malformed -> 1 slot + warn
+### malformed -> 1 slot + warn
+fm-build-lock: WARNING: slot count file is malformed, using 1: /tmp/fmbl.YKro/build-lock-slots
+fm-build-lock: WARNING: slot count file is malformed, using 1: /tmp/fmbl.YKro/build-lock-slots
+free - slot count file is malformed, using 1: /tmp/fmbl.YKro/build-lock-slots
+### set-slots 2
+### set-slots 2
+free - 0 of 2 build slots held
+slot 1: free
+slot 2: free
+2
+### two concurrent + third waits
+### two concurrent + third waits
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 2 slots held; oldest: held by pid 85826 for 0s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]; 1 more - see mutex --status)
+2 of 2 build slots held, 1 waiting
+slot 1: held by pid 85826 for 1s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+slot 2: held by pid 85827 for 1s running: B [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+fm-build-lock: acquired a machine-wide build slot after 4s
+C-ran
+### exclusive drains
+### exclusive drains
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (a whole-machine run is taking every slot, and an earlier arrival goes first; oldest: held by pid 94929 for 1s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]; 1 more - see mutex --status)
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (a whole-machine run is taking every slot, and an earlier arrival goes first; oldest: held by pid 94929 for 2s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]; 1 more - see mutex --status)
+2 of 2 build slots held, 2 waiting
+slot 1: held by pid 94929 for 3s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+slot 2: reserved by pid 97828 for 2s, draining for a whole-machine run: X [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+fm-build-lock: acquired a machine-wide build slot after 3s
+fm-build-lock: acquired a machine-wide build slot after 5s
+D-ran
+### residue
+### residue
+build-lock-slots
+### lower to 1 during holds
+### lower to 1 during holds
+2 of 1 build slots held, 0 waiting
+slot 1: held by pid 8780 for 1s running: B [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+slot 2: held by pid 8776 for 0s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV] (above the configured count of 1; finishing, will not be refilled)
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 1 slots held; oldest: held by pid 8780 for 2s running: B [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]; 1 more - see mutex --status)
+2 of 1 build slots held, 1 waiting
+slot 1: held by pid 8780 for 3s running: B [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+slot 2: held by pid 8776 for 2s running: A [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV] (above the configured count of 1; finishing, will not be refilled)
+fm-build-lock: acquired a machine-wide build slot after 3s
+C-ran
