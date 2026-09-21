@@ -600,6 +600,12 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # Refuse an adapter file that cannot be read before sourcing it. Stock macOS
+  # Bash 3.2 under errexit exits the whole shell when `.` cannot open its file,
+  # even inside `|| return 1`, and with a status its EXIT trap can turn into 0,
+  # so a caller's refusal for a missing adapter never ran and it looked done.
+  [ -f "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] && [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] \
+    || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
