@@ -1196,10 +1196,8 @@ gitlab_confirm_merged() {
 # Delete the pull request's own head branch, but only from the call site that
 # is reached exclusively after the forge has confirmed the merge landed: never
 # call this speculatively, and never move it ahead of that proof. A deletion
-# failure or an unmet safety condition is reported and left in place, except
-# that a failure over a branch that is already gone reports it as gone rather
-# than as work to do; it never turns a landed merge into a failed run, so this
-# always returns 0.
+# failure or an unmet safety condition is reported and left in place; it never
+# turns a landed merge into a failed run, so this always returns 0.
 github_delete_merged_branch() {
   local branch="$FM_PR_GITHUB_HEAD_REF" enc protected_json protected_status=0
   local open_count
@@ -1247,14 +1245,6 @@ github_delete_merged_branch() {
   fi
   if gh api -X DELETE "repos/$PR_OWNER/$PR_REPO/git/refs/heads/$branch" >/dev/null 2>&1; then
     printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
-  elif ! gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" >/dev/null 2>&1; then
-    # The branch is gone, so the deletion has nothing left to report. Repositories
-    # that delete head branches on merge race this call: the protection read above
-    # still saw the branch, and the forge removed it before the delete landed, which
-    # answers the delete with "Reference does not exist". Re-reading existence rather
-    # than matching that text keeps the same verdict when the forge rewords it, and
-    # also covers a delete that landed while its reply was lost.
-    printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
   else
     printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
       "$branch" "$URL" >&2
@@ -1312,10 +1302,6 @@ gitlab_delete_merged_branch() {
   if GITLAB_HOST="$FM_PR_HOST" glab api -X DELETE \
     "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
     printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
-  elif ! GITLAB_HOST="$FM_PR_HOST" glab api \
-    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
-    # Same already-gone race as the GitHub path above owns.
-    printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
   else
     printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
       "$branch" "$URL" >&2
