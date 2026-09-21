@@ -1259,6 +1259,90 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(out,
   fail "dominant script landed in no serial shard"
 }
 
+# Fixture timing doc: every test script the repository has, minus the given
+# families and minus any extra path, in the shape a lane artifact records.
+exclusion_fixture() {  # <out.json> <selection> <excluded-family,...> [extra-path-to-drop]
+  local out=$1 selection=$2 fams=$3 drop=${4:-} f fam skip
+  local listing=$out.list
+  : >"$listing"
+  for fam in $(printf '%s' "$fams" | tr ',' ' '); do
+    "$RUNNER" --list --family "$fam" >>"$listing.skip"
+  done
+  [ -f "$listing.skip" ] || : >"$listing.skip"
+  "$RUNNER" --list --all | while IFS= read -r f; do
+    grep -qxF "$f" "$listing.skip" && continue
+    [ "$f" = "$drop" ] && continue
+    printf '%s\n' "$f"
+  done >"$listing"
+  python3 -c '
+import json, sys
+out, selection, listing = sys.argv[1:4]
+rows = [{"path": p, "family": "x", "exit": 0, "duration_ms": 1} for p in open(listing).read().split()]
+json.dump({"selection": selection, "scripts": rows}, open(out, "w"))
+' "$out" "$selection" "$listing"
+  rm -f "$listing" "$listing.skip"
+}
+
+test_check_exclusions_reads_the_recorded_run() {
+  local tmp out rc third
+  # The proof reads what the run recorded. A workflow that names a family is
+  # not evidence that the family stopped running, or that nothing else did.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-excl.XXXXXX")
+  exclusion_fixture "$tmp/ok.json" "lane=portable-serial-1of5" secondmate,real-herdr-gated
+  out=$("$RUNNER" --check-exclusions --exclude-family secondmate --exclude-family real-herdr-gated "$tmp/ok.json" 2>&1) \
+    || fail "an exact exclusion must pass: $out"
+  assert_contains "$out" "FM_EXCLUSIONS ok excluded=secondmate,real-herdr-gated" "the pass line must name the excluded families"
+
+  # Mutant 1: the exclusion did not take effect (a typo excludes nothing in the
+  # runner, so the family's scripts run). Must red, naming the script that ran.
+  exclusion_fixture "$tmp/ran.json" "lane=portable-serial-1of5" real-herdr-gated
+  rc=0
+  out=$("$RUNNER" --check-exclusions --exclude-family secondmate --exclude-family real-herdr-gated "$tmp/ran.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an excluded family that executed must fail the proof"
+  assert_contains "$out" "FM_EXCLUSION_EXECUTED tests/fm-secondmate-safety.test.sh family=secondmate" "must name the excluded script that ran"
+
+  # Mutant 2: a third family quietly dropped. Must red, naming the dropped script.
+  third=$("$RUNNER" --list --family watcher-wake-lock | sed -n 1p)
+  [ -n "$third" ] || fail "fixture needs a watcher-wake-lock script"
+  exclusion_fixture "$tmp/dropped.json" "lane=portable-serial-1of5" secondmate,real-herdr-gated "$third"
+  rc=0
+  out=$("$RUNNER" --check-exclusions --exclude-family secondmate --exclude-family real-herdr-gated "$tmp/dropped.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dropped non-excluded script must fail the proof"
+  assert_contains "$out" "FM_EXCLUSION_DROPPED $third family=watcher-wake-lock" "must name the dropped script"
+  assert_not_contains "$out" "FM_EXCLUSION_EXECUTED" "a pure drop must not read as an executed exclusion"
+
+  # A misspelled family is refused outright rather than proving nothing.
+  rc=0
+  out=$("$RUNNER" --check-exclusions --exclude-family secondmat "$tmp/ok.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unknown family name must be refused"
+  assert_contains "$out" "not a known family" "must say the name is unknown"
+
+  # The stock-bash lane selects its own subset and keeps running the tests it
+  # selects, so its records must neither red the proof nor stand in for a shard.
+  exclusion_fixture "$tmp/stock.json" "lane=stock-bash" real-herdr-gated
+  out=$("$RUNNER" --check-exclusions --exclude-family secondmate --exclude-family real-herdr-gated "$tmp/ok.json" "$tmp/stock.json" 2>&1) \
+    || fail "stock-bash records must be ignored: $out"
+  rm -rf "$tmp"
+  pass "exclusion proof reads the recorded run and names each broken obligation"
+}
+
+test_ci_workflow_states_its_exclusions() {
+  local ci=$ROOT/.github/workflows/ci.yml list
+  # The workflow must say which families it does not run, in the file itself.
+  list=$(sed -n 's/^  FM_CI_EXCLUDED_FAMILIES: //p' "$ci")
+  [ -n "$list" ] || fail "ci.yml must state FM_CI_EXCLUDED_FAMILIES"
+  case " $list " in
+    *" real-herdr-gated "*)
+      # Switching the Herdr job off and listing its family are one decision.
+      awk '/^  tests-herdr:/{f=1} f&&/^    if: \$\{\{ vars.FM_CI_RUN_HERDR == .true. \}\}$/{ok=1} /^  tests-timing-aggregate:/{f=0} END{exit !ok}' "$ci" \
+        || fail "real-herdr-gated is excluded, so tests-herdr must be gated on vars.FM_CI_RUN_HERDR"
+      ;;
+  esac
+  grep -qF -- "--exclude-family \"\$family\"" "$ci" || fail "the serial shards must pass the excluded families"
+  grep -q -- '--check-exclusions' "$ci" || fail "the aggregate job must prove the exclusions"
+  pass "ci.yml states its excluded families and keeps the Herdr switch in step"
+}
+
 test_portable_serial_hint_drift_guard() {
   local tmp out rc
   # A one-time re-pack rots again unless something notices. The drift guard must
@@ -2178,6 +2262,8 @@ test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_budget_is_reported_and_bounded
 test_portable_serial_packing_follows_measured_timings
 test_portable_serial_hint_drift_guard
+test_check_exclusions_reads_the_recorded_run
+test_ci_workflow_states_its_exclusions
 test_portable_serial_hints_refresh_in_place
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated

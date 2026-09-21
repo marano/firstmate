@@ -96,6 +96,16 @@ The share is wide because one script's duration varies by up to about 55% betwee
 A red step is the signal to run the refresh above as its own follow-up change.
 The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 19.7 minutes) bounds CI end to end, so more serial shards buy nothing.
 
+## Excluded families
+
+`.github/workflows/ci.yml` lists the families it does not run in `FM_CI_EXCLUDED_FAMILIES` at the top of the file, with the reason for each; a green run does not vouch for them.
+The serial shards pass each one as `--exclude-family`, which drops the family after the shard is packed, so the shards are not re-packed and the heaviest stays under the stock Bash 3.2 lane.
+The Herdr job is skipped unless the repository variable `FM_CI_RUN_HERDR` is `true`; re-enabling it means setting that and removing `real-herdr-gated` from the list, and the proof step reds if only one is done.
+The stock-bash lane picks its own subset and is not affected.
+The aggregate job's "Prove exclusions" step runs `bin/fm-test-run.sh --check-exclusions` on every run, reading the recorded timings rather than the workflow text.
+It names each excluded script that executed (`FM_EXCLUSION_EXECUTED`) and each other script that did not (`FM_EXCLUSION_DROPPED`), refuses an unknown family name, and writes the excluded families to the job summary.
+Excluding a family is a cost decision, not a verdict on its tests.
+
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` verifies that all three parallel lanes partition the proven-isolated set.
