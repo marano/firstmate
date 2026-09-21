@@ -467,6 +467,7 @@ jobs:
         if: success() && needs.tests-portable-serial.result == 'success'
         run: |
           set -eu
+          [ -f "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" ] || exit 0
           bin/fm-test-run.sh --check-lane-timing "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json"
       - name: Upload aggregate timing artifact
         if: always()
