@@ -38,6 +38,60 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# This file is also the one owner of the PR-bound done rule: a PR-based mode
+# (no-mistakes, direct-PR) must never authorize any `done:` status template whose
+# body carries no PR URL, because such a line reads to the supervisor exactly like
+# the delivered one and invites an undelivered task to be recorded as delivered.
+# fm_dod_unbound_done_templates is the checker, fm_dod_assert_done_pr_bound the
+# guard, and fm_dod_block runs that guard over its own output so a reintroduced
+# bare gate refuses brief generation instead of reaching a worker. local-only is
+# exempt by design: its `done: ready in branch` line is correct with no PR.
+# The no-mistakes implementation-complete handoff that replaced the bare gate uses
+# `blocked:` rather than the declared-wait verb because firstmate itself must act
+# to clear it: bin/fm-classify-lib.sh surfaces a blocked span immediately, while a
+# declared wait is absorbed and only re-surfaces on FM_PAUSE_RESURFACE_SECS
+# (4h by default), which would delay every no-mistakes handoff by up to that long.
+
+# Report 0 for a delivery mode whose every `done:` line must carry a PR URL.
+fm_dod_pr_bound_mode() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print every `done:` status template in <text> that a PR-based mode must not
+# authorize - one whose body carries no PR URL - and exit 0 when at least one was
+# printed, grep-style. A PR URL is the literal `https://` form or either of the
+# two placeholder spellings the briefs and AGENTS.md use, `{url}` and `<url>`. A
+# backtick span of exactly `done:` with no body is a reference to done lines
+# rather than a template and is never reported, and a mode that is not PR-based
+# reports nothing.
+fm_dod_unbound_done_templates() {  # <mode> <text>
+  fm_dod_pr_bound_mode "$1" || return 1
+  printf '%s\n' "$2" | awk '
+    {
+      n = split($0, part, "`")
+      for (i = 2; i <= n; i += 2) {
+        s = part[i]
+        if (s !~ /^done:[[:space:]]*[^[:space:]]/) continue
+        if (s ~ /PR[[:space:]]+([{]url[}]|[<]url[>]|https:\/\/)/) continue
+        print s
+        found = 1
+      }
+    }
+    END { exit !found }
+  '
+}
+
+# Refuse <text> when it authorizes a done line with no PR URL under <mode>.
+fm_dod_assert_done_pr_bound() {  # <mode> <label> <text>
+  local offenders
+  offenders=$(fm_dod_unbound_done_templates "$1" "$3") || return 0
+  printf 'error: %s: mode=%s must never authorize a done line with no PR URL, but does: %s\n' \
+    "$2" "$1" "$(printf '%s' "$offenders" | tr '\n' '|')" >&2
+  return 1
+}
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -293,7 +347,10 @@ If you cannot deliver one of the items, do not silently drop it: append one stat
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [<delivers-csv>]
+# Render the mode block. fm_dod_block is the entry point: it guards this output
+# before any caller can see it, so the rendering stays one plain case statement
+# and no heredoc here is ever textually nested inside a command substitution.
+_fm_dod_render_block() {  # <mode> <task-id> [<delivers-csv>]
   local mode=$1 id=$2 delivers=${3-} delivers_block=''
   if [ -n "$delivers" ]; then
     delivers_block=$(fm_dod_delivers_block "$delivers")$'\n'
@@ -324,8 +381,11 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-${delivers_block}The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+${delivers_block}This task ships **no-mistakes**: it has exactly one \`done:\`, that line carries the PR URL, and you write it only after the pipeline reports CI green.
+Committing the implementation is not done.
+Neither is your project's own gate: its CI script, test suite, lint, or build is evidence for the pipeline to consume, never the validation this contract requires, and never a substitute for the PR.
+When the implementation is committed on your branch, append \`blocked: implementation committed <sha>, needs the instruction to run /no-mistakes\` to the status file and stop.
+That line asks firstmate to act and is not a completion; it is not a declared wait either, because this one does not clear on its own.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -339,6 +399,7 @@ The \`--intent\` string you pass must be self-sufficient: that string plus the c
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+Do not announce the pipeline and stop: the \`working:\` line saying the run started is written after your first \`no-mistakes axi run --wait\` call returns, and names the run id it returned.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
 So drive with \`no-mistakes axi run --wait\` and answer gates with \`no-mistakes axi respond --wait\`; \`--wait\` bounds the hold so the call returns a structured result within your harness's command cap instead of running out the clock.
@@ -366,4 +427,11 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+}
+
+fm_dod_block() {  # <mode> <task-id> [<delivers-csv>]
+  local block
+  block=$(_fm_dod_render_block "$1" "$2" "${3-}") || return 1
+  fm_dod_assert_done_pr_bound "$1" "fm_dod_block" "$block" || return 1
+  printf '%s\n' "$block"
 }
