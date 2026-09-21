@@ -24,6 +24,8 @@ So `/ask` buys exactly one picker call, not one question at a time: batch every 
 
 ## 0. Take the helm and check the posture
 
+Run `bin/fm-ask.sh round-start` exactly once, first, before anything else: it is the one call that opens this invocation, and `present` refuses without it.
+Never run it again in the same invocation; only the captain typing `/ask` starts another.
 If no `SESSION START` digest for this home is visible in this session, run `bin/fm-session-start.sh` once and read it first.
 A captain typing `/ask` during away mode is an unmarked message, so the `/afk` return owner runs first under `AGENTS.md` section 8, and this skill proceeds only after its catch-up clears.
 If `bin/fm-ask.sh inventory` still refuses for the away posture, tell him in one plain sentence that decisions are being held for his return and stop; never open the picker while away.
@@ -39,7 +41,7 @@ Before presenting anything:
 
 ## 2. Build the inventory from durable records
 
-Run `bin/fm-ask.sh inventory`; it is also what marks this new invocation, so run it once at the start of every `/ask`.
+Run `bin/fm-ask.sh inventory`; it is a read-only build of the list and marks nothing.
 Its `CAPTAIN CALLS` are the live tasks held for the captain, and only those can be presented.
 A decision stated to him in prose this session and still unanswered, or a worker decision that `ask-user-authority` genuinely escalates, is first held through `captain-hold-lifecycle`; hold a worker's keyed decision under that same key so one answer closes both records.
 A decision he has already answered in his own words is closed whatever its record says: record his words through `bin/fm-captain-hold.sh answer` and never ask him twice.

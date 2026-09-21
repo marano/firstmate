@@ -94,6 +94,7 @@ test_refuses_while_away_record_exists() {
   expect_code 3 "$?" "present while the away flag exists"
   assert_absent "$home/state/.ask-presented" "a refused presentation was recorded as presented"
   rm -f "$home/state/.afk"
+  ask "$home" round-start >/dev/null || fail "the round could not start after the away posture ended"
   ask "$home" present sample-route >/dev/null 2> "$home/back.err" \
     || fail "the call could not be presented after the away posture ended: $(cat "$home/back.err")"
   pass "refuses while the away record exists"
@@ -106,6 +107,7 @@ test_empty_inventory_says_so_plainly() {
   rc=$?
   expect_code 0 "$rc" "inventory with nothing open"
   assert_equals "No open captain decisions." "$out" "an empty inventory must say so in one plain line and nothing else"
+  ask "$home" round-start >/dev/null
   ask "$home" present anything > /dev/null 2>&1
   expect_code 6 "$?" "presenting from an empty inventory"
   assert_absent "$home/state/.ask-presented" "an empty inventory recorded a presentation"
@@ -142,6 +144,7 @@ test_skill_contract_permits_one_picker_call_per_invocation() {
     hold_call "$home" "sample-$i" "Choose $i"
     ids="${ids:+$ids }sample-$i"
   done
+  ask "$home" round-start >/dev/null
   # shellcheck disable=SC2086 # One id per presented call, deliberately split.
   ask "$home" present $ids >/dev/null 2> "$home/over.err"
   expect_code 8 "$?" "presenting one more call than the skill's declared cap"
@@ -168,7 +171,7 @@ test_second_present_and_open_cycle_refused() {
   hold_call "$home" sample-cache "Choose cache"
   hold_call "$home" sample-name "Choose name"
 
-  ask "$home" inventory >/dev/null || fail "the invocation's inventory failed"
+  ask "$home" round-start >/dev/null || fail "the invocation's round could not start"
   ask "$home" present sample-route >/dev/null || fail "the first picker call could not be presented"
   assert_present "$home/state/.ask-round" "opening the picker did not spend the invocation's round"
 
@@ -178,7 +181,7 @@ test_second_present_and_open_cycle_refused() {
   ask "$home" present sample-cache > "$home/second.out" 2> "$home/second.err"
   rc=$?
   expect_code 7 "$rc" "opening a second picker call after recording the first answer"
-  assert_grep "already opened its picker call" "$home/second.err" \
+  assert_grep "one picker call is gone" "$home/second.err" \
     "the refusal must say this invocation's picker call is spent"
   assert_grep "plain text" "$home/second.err" \
     "the refusal must route the rest to plain text"
@@ -192,12 +195,38 @@ test_second_present_and_open_cycle_refused() {
   ask "$home" present sample-cache >/dev/null 2>&1
   expect_code 7 "$?" "opening a second picker call after dismissing the first"
 
-  # Only a new invocation, which starts at the inventory, opens another round.
-  ask "$home" inventory >/dev/null || fail "the next invocation's inventory failed"
-  assert_absent "$home/state/.ask-round" "a new invocation did not clear the spent round"
+  # Only a new invocation, which starts its own round, opens another.
+  ask "$home" round-start >/dev/null || fail "the next invocation's round could not start"
   ask "$home" present sample-cache >/dev/null 2> "$home/next.err" \
     || fail "a new invocation could not open its own picker call: $(cat "$home/next.err")"
   pass "one invocation spends one picker call and the second is refused"
+}
+
+# The finding's exact trace: a read-only inventory after the answers are
+# recorded must not reopen the round. Reds if inventory clears or recreates it.
+test_inventory_after_recorded_answers_does_not_reopen_the_round() {
+  local home
+  home=$(make_home inventory-readonly)
+  hold_call "$home" sample-route "Choose route"
+  hold_call "$home" sample-cache "Choose cache"
+  hold_call "$home" sample-name "Choose name"
+
+  ask "$home" present sample-name >/dev/null 2> "$home/unstarted.err"
+  expect_code 9 "$?" "presenting before any round was started"
+  ask "$home" inventory >/dev/null
+  ask "$home" present sample-name >/dev/null 2>&1
+  expect_code 9 "$?" "an inventory must not start a round"
+
+  ask "$home" round-start >/dev/null || fail "could not start the round"
+  ask "$home" present sample-route sample-cache >/dev/null || fail "the one picker call could not be presented"
+  answer_call "$home" sample-route "North."
+  answer_call "$home" sample-cache "East."
+  ask "$home" inventory > "$home/inv.out" 2>&1 || fail "inventory failed: $(cat "$home/inv.out")"
+  assert_no_grep "present again" "$home/inv.out" "the inventory must never suggest presenting again"
+  assert_no_grep "before presenting" "$home/inv.out" "the inventory must never suggest presenting"
+  ask "$home" present sample-name >/dev/null 2>&1
+  expect_code 7 "$?" "presenting a third call after an inventory that followed the recorded answers"
+  pass "an inventory after recorded answers does not reopen the round"
 }
 
 # The rule the captain restated: several calls go into ONE picker call
@@ -209,6 +238,7 @@ test_calls_are_batched_into_one_picker_call() {
   hold_call "$home" sample-cache "Choose cache"
   hold_call "$home" sample-name "Choose name"
 
+  ask "$home" round-start >/dev/null || fail "could not start the round"
   ask "$home" present sample-route sample-cache sample-name > "$home/batch.out" 2> "$home/batch.err" \
     || fail "several calls could not be presented together: $(cat "$home/batch.err")"
   assert_grep "sample-route sample-cache sample-name" "$home/batch.out" \
@@ -231,7 +261,7 @@ test_calls_are_batched_into_one_picker_call() {
   expect_code 2 "$?" "dismissing a call that is no longer outstanding"
 
   # Asking one decision twice in a single call is a mistake, not a batch.
-  ask "$home" inventory >/dev/null
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-route sample-route >/dev/null 2> "$home/dup.err"
   expect_code 2 "$?" "naming the same call twice in one picker call"
   assert_grep "named twice" "$home/dup.err" "the refusal must say the call was named twice"
@@ -245,8 +275,9 @@ test_unrecorded_batch_blocks_the_next_invocation() {
   hold_call "$home" sample-cache "Choose cache"
   hold_call "$home" sample-name "Choose name"
 
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-route >/dev/null || fail "the first live call could not be presented"
-  ask "$home" inventory >/dev/null || fail "the next invocation's inventory failed"
+  ask "$home" round-start >/dev/null || fail "the next invocation's round could not start"
   ask "$home" present sample-cache > "$home/next.out" 2> "$home/next.err"
   rc=$?
   expect_code 5 "$rc" "presenting again before the earlier answer is recorded"
@@ -263,19 +294,19 @@ test_unrecorded_batch_blocks_the_next_invocation() {
   in_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold sample-cache \
     --reason "captain said later" --until 2099-01-01 >/dev/null \
     || fail "could not defer the call"
-  ask "$home" inventory >/dev/null
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-name >/dev/null 2>&1 || fail "a deferred call still blocked the next invocation"
 
   # A dismissed picker frees the slot only through the explicit record.
-  ask "$home" inventory >/dev/null
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-cache >/dev/null 2>&1
   expect_code 6 "$?" "presenting a call the captain deferred"
   hold_call "$home" sample-last "Choose last"
-  ask "$home" inventory >/dev/null
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-last >/dev/null 2>&1
   expect_code 5 "$?" "presenting past an unanswered, undismissed call"
   ask "$home" dismissed sample-name >/dev/null || fail "could not record a dismissed picker"
-  ask "$home" inventory >/dev/null
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-last >/dev/null 2>&1 || fail "a dismissed presentation still blocked the next invocation"
   pass "an unrecorded answer is recorded before anything is presented again"
 }
@@ -297,6 +328,7 @@ test_firstmate_own_decision_never_presented() {
   assert_grep "sample-scope" "$home/calls.out" "the escalated call is not listed as a captain call"
   assert_no_grep "nm-7-review" "$home/calls.out" "firstmate's own decision was listed as a captain call"
 
+  ask "$home" round-start >/dev/null
   ask "$home" present nm-7-review > "$home/present.out" 2> "$home/present.err"
   rc=$?
   expect_code 6 "$rc" "presenting a decision that is firstmate's own"
@@ -310,6 +342,7 @@ test_queued_wakes_block_the_picker() {
   hold_call "$home" sample-route "Choose route"
   queue_wake "$home" signal worker-a
 
+  ask "$home" round-start >/dev/null
   ask "$home" present sample-route > "$home/present.out" 2> "$home/present.err"
   rc=$?
   expect_code 4 "$rc" "presenting while a wake is queued"
@@ -349,6 +382,7 @@ test_refuses_while_away_record_exists
 test_empty_inventory_says_so_plainly
 test_skill_contract_permits_one_picker_call_per_invocation
 test_second_present_and_open_cycle_refused
+test_inventory_after_recorded_answers_does_not_reopen_the_round
 test_calls_are_batched_into_one_picker_call
 test_unrecorded_batch_blocks_the_next_invocation
 test_firstmate_own_decision_never_presented

@@ -14,6 +14,10 @@
 # reads chat, reports, or prose to decide what is a captain call.
 #
 # Usage:
+#   fm-ask.sh round-start
+#     Open this invocation's round. Run it exactly once per captain /ask, first,
+#     before the posture check. It is the only thing that creates the round and
+#     nothing else clears it; without it `present` refuses.
 #   fm-ask.sh inventory
 #     Print the live captain calls that may be presented, the open worker
 #     decisions that are firstmate's own and must never be presented, any
@@ -22,7 +26,7 @@
 #     line is exactly "No open captain decisions."
 #   fm-ask.sh present <task-id>...
 #     Check that every <task-id> may be presented now, then record them as the
-#     one outstanding presentation and open this invocation's round. Run it
+#     one outstanding presentation and spend this invocation's round. Run it
 #     once, immediately before opening the picker, naming every call that goes
 #     into that single picker call.
 #   fm-ask.sh dismissed <task-id>...
@@ -43,13 +47,15 @@
 #
 # REFUSALS. Every subcommand refuses in the away posture; `present` adds the
 # rest, in this order:
+#   9  no round was started: `round-start` has not run for this invocation.
 #   3  away posture: bin/fm-afk-return.sh guard refuses, because the away or
 #      quiet record exists or the return catch-up has not cleared. Away mode
 #      holds decisions for the captain's return by design, and a picker there
 #      would stop that supervision too.
-#   7  this invocation already opened its picker call. Recording the answers
-#      does not buy another: whatever is left goes to the captain in plain
-#      text, and he types /ask again when he wants another round.
+#   7  this invocation's one picker call is gone. Recording the answers or
+#      dismissing the picker does not buy another: whatever is left goes to
+#      the captain in plain text, and he types /ask again when he wants
+#      another round.
 #   4  queued wake records are unhandled. The picker is the last act of the
 #      turn, so everything that does not need the captain happens first:
 #      handle and acknowledge the queue, then ask.
@@ -68,13 +74,17 @@
 # counts as recorded once its task has left the live captain calls, whichever
 # owning path closed, released, or deferred it.
 #
-# ROUND. state/.ask-round marks that this invocation's one picker call has
-# been opened, and it outlives both the recorded answers and a dismissal, so
-# neither reopens the picker. This script cannot see chat, so `inventory` -
-# the first thing the skill runs on every /ask - is what marks a new
-# invocation and clears the round. The skill owns the rule that only the
-# captain typing /ask starts one; a follow-up, a complication, or a re-ask
-# reaches him in plain text instead.
+# ROUND. state/.ask-round is created only by `round-start`, empty, and
+# `present` spends it by writing the presented ids into it. It outlives both the
+# recorded answers and a dismissal, so neither reopens the picker, and no other
+# subcommand creates or clears it: `inventory` is strictly read-only with
+# respect to it. This does NOT make a second picker call physically impossible:
+# an agent that calls `round-start` twice still gets two. What it buys is a
+# smaller discipline surface: instead of "call inventory exactly once, in a
+# workflow whose own output invites calling it again", the rule is "call
+# round-start once at the top, where nothing suggests otherwise". The skill owns
+# the rule that only the captain typing /ask starts a round; a follow-up, a
+# complication, or a re-ask reaches him in plain text instead.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, and FM_DATA_OVERRIDE select the home,
 # exactly as for bin/fm-captain-hold.sh.
@@ -170,8 +180,6 @@ command_inventory() {
   local own task key verb note prior queued
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   refuse_if_away
-  # A fresh /ask invocation: the previous round's picker call is spent.
-  rm -f "$ROUND"
   read_calls_or_fail
   own=
   while IFS=$'\t' read -r task key verb note; do
@@ -186,7 +194,7 @@ EOF
   if [ -z "$CALLS" ]; then
     printf '%s\n' "No open captain decisions."
   else
-    printf '%s\n' "CAPTAIN CALLS (live; present every one that fits in ONE picker call, most impactful first):"
+    printf '%s\n' "CAPTAIN CALLS (live):"
     printf '%s\n' "$CALLS" | awk -F '\t' '{ printf "  %s [%s]: %s\n", $1, $2, $3 }'
   fi
   if [ -n "$own" ]; then
@@ -195,11 +203,11 @@ EOF
   fi
   prior=$(unrecorded "$CALLS")
   if [ -n "$prior" ]; then
-    printf '%s\n' "PRESENTED AND NOT YET RECORDED: $prior - record his answers through their owner before presenting again, or run 'bin/fm-ask.sh dismissed $prior' if he gave none."
+    printf '%s\n' "PRESENTED AND NOT YET RECORDED: $prior - record his answers through their owner, or run 'bin/fm-ask.sh dismissed $prior' if he gave none."
   fi
   queued=$(queued_wakes) || queued='unknown'
   if [ "$queued" != 0 ]; then
-    printf '%s\n' "QUEUED WAKES: $queued unhandled - handle and acknowledge them before presenting anything."
+    printf '%s\n' "QUEUED WAKES: $queued unhandled - handle and acknowledge them first."
   fi
 }
 
@@ -210,6 +218,17 @@ round_ids_suffix() {
   ids=$(tr '\n' ' ' < "$ROUND")
   ids=${ids% }
   [ -z "$ids" ] || printf ' (%s)' "$ids"
+}
+
+command_round_start() {
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  refuse_if_away
+  if ! : > "$ROUND.tmp.$$" || ! mv "$ROUND.tmp.$$" "$ROUND"; then
+    rm -f "$ROUND.tmp.$$"
+    printf '%s\n' "fm-ask: could not start the round" >&2
+    exit 2
+  fi
+  printf '%s\n' "round started: one picker call this invocation"
 }
 
 command_present() {
@@ -224,8 +243,12 @@ command_present() {
     seen+=("$id")
   done
   refuse_if_away
-  if [ -e "$ROUND" ]; then
-    printf '%s\n' "fm-ask: refused - this /ask invocation already opened its picker call$(round_ids_suffix); a second one wedges supervision. Give him the rest in plain text this turn and say he can type /ask again for another round." >&2
+  if [ ! -e "$ROUND" ]; then
+    printf '%s\n' "fm-ask: refused - no round was started for this /ask invocation; run 'bin/fm-ask.sh round-start' once at the top of the invocation." >&2
+    exit 9
+  fi
+  if [ -s "$ROUND" ]; then
+    printf '%s\n' "fm-ask: refused - this /ask invocation's one picker call is gone$(round_ids_suffix); a second one wedges supervision. Give him the rest in plain text this turn and say he can type /ask again for another round." >&2
     exit 7
   fi
   queued=$(queued_wakes) || queued='unknown'
@@ -294,6 +317,7 @@ EOF
 }
 
 case "${1:-}" in
+  round-start) shift; command_round_start "$@" ;;
   inventory) shift; command_inventory "$@" ;;
   present) shift; command_present "$@" ;;
   dismissed) shift; command_dismissed "$@" ;;
