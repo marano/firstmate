@@ -68,18 +68,21 @@
 #
 # Standing merge authority covers only a validated pull request, so after either
 # live forge read and before the merge, the verified head must be proven
-# validated by the no-mistakes pipeline's own run record, read through
-# `no-mistakes axi status --run <id>`. Nothing a worker can edit is proof: a
-# no-mistakes attestation in the pull request body is never accepted, and the
-# run id is only a pointer to the record. The candidate runs are the last
-# run=<id> in the task's status log and the run `no-mistakes axi status`
-# reports from the task's local copy. One proves the head when its record names
-# this pull request and its head branch, its head_sha equals the verified live
-# head exactly, and its steps table lists review and test both completed with no
-# other step failed; ci is ignored, covered by the live green check above, and
-# any other step that was skipped, configured off, or not yet run does not refuse. A task that
-# records mode direct-PR or local-only has no run behind it by definition, and
-# every other recorded mode, or none, is held to the no-mistakes proof. An unproven head is refused, naming the missing evidence
+# validated by the no-mistakes pipeline's own run record. Nothing a worker can
+# edit is proof: a no-mistakes attestation in the pull request body is never
+# accepted, and a run id is only a pointer to the record.
+# bin/fm-validation-receipt-lib.sh is the one owner of which runs are
+# candidates for a given pull request, of what a record must say to prove a
+# head, and of the durable receipt this gate falls back to; that header also
+# owns why the candidate list is bound to the pull request rather than to the
+# lane's newest run, and the receipt's exact trust boundary. This gate reads
+# each candidate's record in turn and merges on the first that proves the
+# verified live head. Only when the pipeline cannot be read AT ALL for the
+# receipt's own run does the receipt answer, so a record that still answers
+# always decides and a receipt can never overrule one that contradicts it.
+# A task that records mode direct-PR or local-only has no run behind it by
+# definition, and every other recorded mode, or none, is held to the
+# no-mistakes proof. An unproven head is refused, naming the missing evidence
 # per candidate, unless --unvalidated is passed for an explicit captain
 # instruction to merge this pull request without a validation run. That waiver
 # is refused while the away-posture record exists, and it is deliberately
@@ -157,6 +160,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-validation-receipt-lib.sh
+. "$SCRIPT_DIR/fm-validation-receipt-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -1310,99 +1315,17 @@ gitlab_delete_merged_branch() {
 }
 
 TASK_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-FM_PR_NM_TIMEOUT=${FM_PR_MERGE_NM_TIMEOUT:-20}
-case "$FM_PR_NM_TIMEOUT" in ''|*[!0-9]*) FM_PR_NM_TIMEOUT=20 ;; esac
-
-# The run id the task's status log names last, or nothing. The worker writes
-# that log, so the id is only a pointer; validation_run_proves_head reads the
-# pipeline's own record behind it.
-recorded_validation_run_id() {
-  local log="$STATE/$ID.status" id
-  [ -f "$log" ] && [ ! -L "$log" ] || return 0
-  id=$(grep -oE '(^|[[:space:]])run=[A-Za-z0-9_-]+' "$log" 2>/dev/null | tail -1 || true)
-  printf '%s' "${id##*run=}"
-}
-
-# The run no-mistakes itself reports for the task's local copy, or nothing.
-local_copy_run_id() {
-  local wt out
-  wt=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -n "$wt" ] && [ -d "$wt" ] || return 0
-  out=$(fm_nm_run_checked "$wt" "$FM_PR_NM_TIMEOUT" axi status) || return 0
-  fm_nm_strip_quotes "$(fm_nm_field "$out" id)"
-}
-
-# 0 when the pipeline's record for run $1 proves the verified head of this pull
-# request, whose head branch is $2 (empty when the forge did not name one).
-# Otherwise sets FM_PR_VALIDATION_REASON to one plain sentence naming the first
-# piece of evidence the record lacks.
-FM_PR_VALIDATION_REASON=
-validation_run_proves_head() {  # <run-id> <head-branch>
-  local run=$1 branch=$2 out rc=0 pr canon run_branch run_head row step rest status
-  local saw_review=0 saw_test=0 incomplete='' failed=''
-  out=$(fm_nm_run_bounded "$STATE" "$FM_PR_NM_TIMEOUT" axi status --run "$run" 2>&1) || rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-    out=$(printf '%s\n' "$out" | head -1)
-    FM_PR_VALIDATION_REASON="run $run could not be read from no-mistakes${out:+ ($out)}"
-    return 1
-  fi
-  if [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")" != "$run" ]; then
-    FM_PR_VALIDATION_REASON="no-mistakes answered for run $run with a record that does not carry that id"
-    return 1
-  fi
-  pr=$(fm_nm_strip_quotes "$(fm_nm_field "$out" pr)")
-  canon=$(fm_pr_url_parse "$pr" && printf '%s' "$FM_PR_URL") || canon=
-  if [ -z "$canon" ] || [ "$canon" != "$URL" ]; then
-    FM_PR_VALIDATION_REASON="run $run is for ${pr:-no pull request}, not $URL"
-    return 1
-  fi
-  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
-  if [ -n "$branch" ] && [ "$run_branch" != "$branch" ]; then
-    FM_PR_VALIDATION_REASON="run $run validated branch ${run_branch:-unknown}, not the pull request's head branch $branch"
-    return 1
-  fi
-  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head_sha)" | tr '[:upper:]' '[:lower:]')
-  if [ "$run_head" != "$(printf '%s' "$FM_PR_MERGE_HEAD" | tr '[:upper:]' '[:lower:]')" ]; then
-    FM_PR_VALIDATION_REASON="run $run validated head ${run_head:-unknown}, not the pull request's current head $FM_PR_MERGE_HEAD"
-    return 1
-  fi
-  while IFS= read -r row; do
-    row=$(fm_nm_trim "$row")
-    [ -n "$row" ] || continue
-    step=$(fm_nm_trim "${row%%,*}")
-    rest=${row#*,}
-    status=$(fm_nm_strip_quotes "${rest%%,*}")
-    case "$step" in
-      ci) continue ;;
-      review|test)
-        [ "$step" = review ] && saw_review=1 || saw_test=1
-        [ "$status" = completed ] || incomplete="${incomplete:+$incomplete, }$step (${status:-no status})"
-        ;;
-      *)
-        [ "$status" != failed ] || failed="${failed:+$failed, }$step (failed)"
-        ;;
-    esac
-  done <<ROWS
-$(fm_nm_steps_rows "$out")
-ROWS
-  if [ "$saw_review" -ne 1 ] || [ "$saw_test" -ne 1 ]; then
-    FM_PR_VALIDATION_REASON="run $run's record lists no review and test steps"
-    return 1
-  fi
-  if [ -n "$incomplete" ]; then
-    FM_PR_VALIDATION_REASON="run $run did not complete its review and test steps: $incomplete"
-    return 1
-  fi
-  if [ -n "$failed" ]; then
-    FM_PR_VALIDATION_REASON="run $run has failed steps: $failed"
-    return 1
-  fi
-}
+FM_PR_NM_TIMEOUT=$(fm_validation_nm_timeout)
 
 # The validation gate for the verified head; $1 is the pull request's head
-# branch. The header above owns the evidence rule and the --unvalidated waiver.
+# branch. bin/fm-validation-receipt-lib.sh owns which run records are
+# candidates for this pull request, what a record must say to prove a head, and
+# the durable receipt; this script's header owns the --unvalidated waiver.
 require_validation_run() {  # <head-branch>
-  local branch=$1 source run seen='' reasons=''
+  local branch=$1 run reasons='' seen=0
+  # 'unread' until a candidate read actually gets the receipt's own run record
+  # back from the pipeline; only 'unread' lets the receipt answer below.
+  local receipt_run='' receipt_record=unread
   case "$TASK_MODE" in
     direct-PR|local-only)
       if [ "$UNVALIDATED" = true ]; then
@@ -1415,28 +1338,48 @@ require_validation_run() {  # <head-branch>
       return 1
       ;;
   esac
+  if fm_validation_receipt_read "$STATE" "$ID" "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER"; then
+    receipt_run=$FM_VALIDATION_RECEIPT_RUN
+  fi
   if ! command -v no-mistakes >/dev/null 2>&1; then
+    # Nothing can be read, so the receipt is in exactly the window it exists for.
     reasons="  - the no-mistakes command is not installed, so no validation run can be read
 "
   else
-    for source in recorded local; do
-      case "$source" in
-        recorded) run=$(recorded_validation_run_id) ;;
-        local) run=$(local_copy_run_id) ;;
-      esac
+    while IFS= read -r run || [ -n "$run" ]; do
       [ -n "$run" ] || continue
-      case "$run" in *[!A-Za-z0-9_-]*) continue ;; esac
-      case " $seen " in *" $run "*) continue ;; esac
-      seen="$seen $run"
-      if validation_run_proves_head "$run" "$branch"; then
+      seen=1
+      if fm_validation_run_record_proves "$STATE" "$FM_PR_NM_TIMEOUT" "$run" \
+        "$URL" "$branch" "$FM_PR_MERGE_HEAD"; then
         printf 'verified: no-mistakes run %s validated head %s of %s\n' \
           "$run" "$FM_PR_MERGE_HEAD" "$URL" >&2
         return 0
       fi
-      reasons="$reasons  - $FM_PR_VALIDATION_REASON
+      if [ "$run" = "$receipt_run" ] && [ "$FM_VALIDATION_PROOF_UNREADABLE" -eq 0 ]; then
+        receipt_record=answered
+      fi
+      reasons="$reasons  - $FM_VALIDATION_PROOF_REASON
 "
-    done
-    [ -n "$seen" ] || reasons="  - task $ID records no validation run id, and no-mistakes reports no run for its local copy
+    done <<CANDIDATES
+$(fm_validation_run_candidates "$STATE" "$ID" "$META" "$URL" \
+  "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" || true)
+CANDIDATES
+    [ "$seen" -eq 1 ] || reasons="  - task $ID records no validation run id, and no-mistakes reports no run for its local copy
+"
+  fi
+  # The durable receipt answers only where the pipeline's own record for its own
+  # run cannot be read at all. A record that still answers has already decided
+  # above, so a receipt never overrules a record that contradicts it.
+  if [ -n "$receipt_run" ] && receipt_proves_head "$branch"; then
+    if [ "$receipt_record" = unread ]; then
+      printf 'verified: no-mistakes run %s validated head %s of %s, proven by the durable validation receipt because the pipeline no longer answers for that run\n' \
+        "$receipt_run" "$FM_PR_MERGE_HEAD" "$URL" >&2
+      return 0
+    fi
+    reasons="$reasons  - the durable validation receipt names run $receipt_run, whose own record the pipeline still answers for and does not prove this head
+"
+  elif [ -n "$receipt_run" ]; then
+    reasons="$reasons  - $FM_PR_RECEIPT_REASON
 "
   fi
   if [ "$UNVALIDATED" = true ]; then
@@ -1451,6 +1394,22 @@ require_validation_run() {  # <head-branch>
   echo "error: a no-mistakes attestation in the pull request body is not proof, because a worker can edit it; only the pipeline's own run record for this exact head is" >&2
   echo "error: pass --unvalidated only on an explicit captain instruction to merge this pull request without a validation run" >&2
   return 1
+}
+
+# 0 when the receipt already read into FM_VALIDATION_RECEIPT_* binds exactly the
+# head this merge verified live, on the pull request's own head branch $1.
+# Otherwise FM_PR_RECEIPT_REASON names what it binds instead.
+FM_PR_RECEIPT_REASON=
+receipt_proves_head() {  # <head-branch>
+  local branch=$1
+  if [ "$FM_VALIDATION_RECEIPT_HEAD" != "$(printf '%s' "$FM_PR_MERGE_HEAD" | tr '[:upper:]' '[:lower:]')" ]; then
+    FM_PR_RECEIPT_REASON="the durable validation receipt binds head $FM_VALIDATION_RECEIPT_HEAD, not the pull request's current head $FM_PR_MERGE_HEAD"
+    return 1
+  fi
+  if [ -n "$branch" ] && [ "$FM_VALIDATION_RECEIPT_BRANCH" != "$branch" ]; then
+    FM_PR_RECEIPT_REASON="the durable validation receipt binds branch $FM_VALIDATION_RECEIPT_BRANCH, not the pull request's head branch $branch"
+    return 1
+  fi
 }
 
 # Record before either forge call. This arms the merge poll without claiming a

@@ -2502,6 +2502,230 @@ test_local_copy_run_proves_the_head_without_a_recorded_id() {
   pass "fm-pr-merge finds the validating run from the task's local copy when none is recorded"
 }
 
+# One fm-pr-check.sh run in a merge case's sandbox, so a case can bind a pull
+# request exactly the way firstmate does before a merge and get the validation
+# receipt that binding captures. Args: case_dir [fm-pr-check.sh args...]
+run_pr_check() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="${FM_TEST_HOME:-$case_dir/home}" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
+  FM_TEST_GH_HEAD="$case_dir/github-head" \
+  FM_TEST_GLAB_LOG="$case_dir/glab.log" \
+  FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_NM_DIR="$case_dir" \
+  FM_TEST_NM_DEFAULT_RUN="$NM_DEFAULT_RUN" \
+  FM_TEST_NM_RECORD="$NM_RECORD" \
+  HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" "$@"
+}
+
+# The receipt a case captured, as "<head> <branch> <run>", or nothing.
+receipt_binding() {
+  local record=$1/state/task-x1.validation-receipt
+  [ -f "$record" ] || return 0
+  awk 'NR==6{h=$0} NR==7{b=$0} NR==8{printf "%s %s %s", h, b, $0}' "$record"
+}
+
+# REGRESSION 1 (retention): a pull request validated earlier in the same lane is
+# still merge-provable after two later runs have completed for other pull
+# requests and the pipeline has stopped answering for its own run.
+# Red by name on either of these mutants:
+#   - bin/fm-pr-check.sh does not capture the receipt when it binds the PR;
+#   - bin/fm-pr-merge.sh does not fall back to the receipt.
+test_earlier_pr_still_merges_after_later_runs_evict_its_record() {
+  local case_dir head=7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a
+  local url=https://github.com/example/repo/pull/140
+  local early=01TESTEARLYRUN later=01TESTLATERRUN latest=01TESTLATESTRUN
+  case_dir=$(make_case earlier-pr-after-eviction)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR %s checks green run=%s\n' "$url" "$early" \
+    > "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" "$early" fm/example-branch "$head" "$url"
+  : > "$case_dir/nm-default-absent"
+
+  run_pr_check "$case_dir" task-x1 "$url" > "$case_dir/check.out" 2> "$case_dir/check.err" \
+    || fail "earlier-pr-after-eviction: binding the pull request failed"
+  assert_grep "recorded: no-mistakes run $early validated head $head of $url" \
+    "$case_dir/check.err" "earlier-pr-after-eviction: the capture did not name the proving run"
+  [ "$(receipt_binding "$case_dir")" = "$head fm/example-branch $early" ] \
+    || fail "earlier-pr-after-eviction: the receipt did not bind the head to the run that validated it"
+
+  # The lane ships two more pull requests. The shared pipeline keeps only its
+  # two newest run records, so nothing answers for the early run any more.
+  write_nm_run "$case_dir" "$later" fm/later-branch \
+    1111111111111111111111111111111111111111 https://github.com/example/repo/pull/141
+  write_nm_run "$case_dir" "$latest" fm/latest-branch \
+    2222222222222222222222222222222222222222 https://github.com/example/repo/pull/142
+  rm -f "$case_dir/nm-run-$early"
+
+  run_validation_case "$case_dir" 140
+  expect_code 0 "$(cat "$case_dir/rc")" \
+    "earlier-pr-after-eviction: a head the pipeline validated must stay merge-provable"
+  assert_grep "axi status --run $early" "$case_dir/nm.log" \
+    "earlier-pr-after-eviction: the receipt answered without re-reading the pipeline's own record"
+  assert_grep "no-mistakes run $early validated head $head of $url, proven by the durable validation receipt" \
+    "$case_dir/stderr" "earlier-pr-after-eviction: the receipt was not named as the evidence"
+  assert_logged_gh_merge "$case_dir" 140 example/repo --squash
+  pass "fm-pr-merge merges an earlier PR from a receipt once the pipeline stops answering for its run"
+}
+
+# REGRESSION 2 (reachability): a pull request whose task records a stale run id
+# from an earlier pull request, and whose recorded local copy sits on another
+# branch, is still merge-provable at its own validated head - with no receipt,
+# as every task bound before this contract shipped.
+# Red by name on this mutant: bin/fm-validation-receipt-lib.sh resolves the run
+# id from the last run= token in the whole status log plus the local copy,
+# instead of preferring the ids the ready line reported beside THIS pull
+# request.
+test_stale_run_pointer_and_wandering_local_copy_still_prove_the_head() {
+  local case_dir head=7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b i
+  local url=https://github.com/example/repo/pull/150
+  local mine=01TESTMINERUN
+  case_dir=$(make_case stale-run-pointer)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+
+  # This pull request's own ready line, then enough later lines that a scan
+  # which merely walked run= tokens newest-first would never reach it.
+  printf 'done: PR %s checks green run=%s\n' "$url" "$mine" \
+    > "$case_dir/state/task-x1.status"
+  for i in 1 2 3 4 5 6; do
+    printf 'done: PR https://github.com/example/repo/pull/15%s checks green run=01TESTOTHER%s\n' \
+      "$i" "$i" >> "$case_dir/state/task-x1.status"
+    write_nm_run "$case_dir" "01TESTOTHER$i" "fm/other-branch-$i" \
+      "$(printf '3%.0s' 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9)$i" \
+      "https://github.com/example/repo/pull/15$i"
+  done
+  write_nm_run "$case_dir" "$mine" fm/example-branch "$head" "$url"
+
+  # The recorded local copy is checked out on another branch, so the pipeline
+  # answers there for that branch's run rather than for this pull request's.
+  printf '01TESTWANDERED\n' > "$case_dir/nm-local-run"
+  write_nm_run "$case_dir" 01TESTWANDERED fm/wandered-branch \
+    4444444444444444444444444444444444444444 https://github.com/example/repo/pull/199
+  : > "$case_dir/nm-default-absent"
+
+  run_validation_case "$case_dir" 150
+  expect_code 0 "$(cat "$case_dir/rc")" \
+    "stale-run-pointer: the run reported beside this PR must still prove its head"
+  assert_grep "verified: no-mistakes run $mine validated head $head of $url" \
+    "$case_dir/stderr" "stale-run-pointer: the PR's own run was not the proving evidence"
+  # This task was bound before receipts existed, so the pipeline's own record
+  # has to be what proves it; the merge's own re-binding must not be the reason.
+  assert_no_grep 'durable validation receipt' "$case_dir/stderr" \
+    "stale-run-pointer: a receipt answered where the pipeline's own record had to"
+  assert_logged_gh_merge "$case_dir" 150 example/repo --squash
+  pass "fm-pr-merge reaches a PR's own run past a stale pointer and a wandering local copy"
+}
+
+# The receipt is weaker evidence than the record and must never outrank it.
+# Two ways it must lose: the record still answers and does not prove the head,
+# and the head moved past what the receipt binds.
+test_receipt_never_overrules_a_record_that_still_answers() {
+  local case_dir head=7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c
+  local moved=5555555555555555555555555555555555555555
+  local url=https://github.com/example/repo/pull/160
+  local run=01TESTCONTRARUN
+  case_dir=$(make_case receipt-contradicted)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR %s checks green run=%s\n' "$url" "$run" \
+    > "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" "$run" fm/example-branch "$head" "$url"
+  : > "$case_dir/nm-default-absent"
+  run_pr_check "$case_dir" task-x1 "$url" >/dev/null 2>&1 \
+    || fail "receipt-contradicted: binding the pull request failed"
+  [ -f "$case_dir/state/task-x1.validation-receipt" ] \
+    || fail "receipt-contradicted: no receipt was captured to contradict"
+
+  # Same head, but the pipeline's own record for that run no longer proves it.
+  write_nm_run "$case_dir" "$run" fm/example-branch "$head" "$url" review=skipped
+  run_validation_case "$case_dir" 160
+  expect_code 1 "$(cat "$case_dir/rc")" \
+    "receipt-contradicted: a receipt must not merge past a record that still answers"
+  assert_grep "run $run did not complete its review and test steps: review (skipped)" \
+    "$case_dir/stderr" "receipt-contradicted: the record's own verdict was not reported"
+  assert_grep "durable validation receipt names run $run, whose own record the pipeline still answers for" \
+    "$case_dir/stderr" "receipt-contradicted: the refusal did not say why the receipt was not used"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "receipt-contradicted: gh pr merge ran on a head only a receipt covered"
+
+  # The record is gone entirely, but the head has moved past what the receipt
+  # binds, so the receipt covers a commit nothing validated.
+  rm -f "$case_dir/nm-run-$run"
+  write_github_live_json "$case_dir" "$moved"
+  run_validation_case "$case_dir" 160
+  expect_code 1 "$(cat "$case_dir/rc")" \
+    "receipt-moved-head: a receipt must not merge a head it does not bind"
+  assert_grep "durable validation receipt binds head $head, not the pull request's current head $moved" \
+    "$case_dir/stderr" "receipt-moved-head: the receipt's stale binding was not reported"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "receipt-moved-head: gh pr merge ran on a head no run validated"
+  pass "fm-pr-merge never lets a durable receipt outrank or outlive the record"
+}
+
+# A validation receipt is firstmate's own private record, so anything that is
+# not one exactly proves nothing at all. Every shape is checked where the
+# receipt is the only evidence left - the pipeline answers for no run - so a
+# shape wrongly accepted would merge a head on the strength of that file alone,
+# and the intact control proves the other shapes are not passing vacuously.
+test_a_tampered_receipt_proves_nothing() {
+  local case_dir head=7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d
+  local url=https://github.com/example/repo/pull/170 record shape
+  local injected="$TMP_ROOT/receipt-injection"
+
+  for shape in intact truncated extra-line wrong-version foreign-pr bad-head \
+    injected-run world-readable; do
+    case_dir=$(make_case "tampered-receipt-$shape")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    printf 'done: PR %s checks green run=01TESTGONERUN\n' "$url" \
+      > "$case_dir/state/task-x1.status"
+    : > "$case_dir/nm-default-absent"
+    record="$case_dir/state/task-x1.validation-receipt"
+    printf '%s\n' fm-validation-receipt-v1 github github.com example/repo 170 \
+      "$head" fm/example-branch 01TESTGONERUN > "$record"
+    case "$shape" in
+      truncated)     sed '$d' "$record" > "$record.new"; mv "$record.new" "$record" ;;
+      extra-line)    printf 'trailing\n' >> "$record" ;;
+      wrong-version) sed '1s/.*/fm-validation-receipt-v2/' "$record" > "$record.new"
+                     mv "$record.new" "$record" ;;
+      foreign-pr)    sed '5s/.*/999/' "$record" > "$record.new"; mv "$record.new" "$record" ;;
+      bad-head)      sed '6s/.*/not-a-commit/' "$record" > "$record.new"
+                     mv "$record.new" "$record" ;;
+      injected-run)  sed "8s|.*|01TEST;touch $injected|" "$record" > "$record.new"
+                     mv "$record.new" "$record" ;;
+    esac
+    chmod 0600 "$record"
+    [ "$shape" != world-readable ] || chmod 0644 "$record"
+
+    run_validation_case "$case_dir" 170
+    if [ "$shape" = intact ]; then
+      expect_code 0 "$(cat "$case_dir/rc")" \
+        "tampered-receipt: the intact control must merge, or every shape below passes vacuously"
+      assert_grep 'proven by the durable validation receipt' "$case_dir/stderr" \
+        "tampered-receipt: the intact control did not merge on the receipt"
+      continue
+    fi
+    expect_code 1 "$(cat "$case_dir/rc")" \
+      "tampered-receipt: a $shape receipt must prove nothing"
+    assert_grep "refusing to merge $url: no validation run is proven for its head $head" \
+      "$case_dir/stderr" "tampered-receipt: a $shape receipt did not refuse for want of proof"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "tampered-receipt: gh pr merge ran on a $shape receipt"
+  done
+  assert_absent "$injected" "tampered-receipt: receipt bytes reached a shell"
+  pass "fm-pr-merge treats anything but an exact validation receipt as no evidence"
+}
+
 test_unvalidated_waiver_is_explicit_and_attended_only() {
   local case_dir head=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f
   # --attended-override is what a merge-queue retry hint asks for, so it must
@@ -3790,6 +4014,10 @@ test_run_at_an_older_head_is_refused
 test_run_with_other_steps_skipped_still_merges
 test_run_that_skipped_a_step_or_names_another_pr_is_refused
 test_local_copy_run_proves_the_head_without_a_recorded_id
+test_earlier_pr_still_merges_after_later_runs_evict_its_record
+test_stale_run_pointer_and_wandering_local_copy_still_prove_the_head
+test_receipt_never_overrules_a_record_that_still_answers
+test_a_tampered_receipt_proves_nothing
 test_unvalidated_waiver_is_explicit_and_attended_only
 test_direct_pr_merges_only_on_an_explicit_instruction
 test_task_without_a_mode_needs_the_validation_proof
