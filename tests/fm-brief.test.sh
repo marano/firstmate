@@ -447,6 +447,168 @@ test_no_mistakes_dod_requires_run_id() {
   pass "fm-brief.sh: no-mistakes DOD refuses a done report with no validation run id"
 }
 
+# A `done:` line is the supervisor's delivery signal, so for a PR-based mode it
+# must never be writable without the PR URL that proves delivery. Three workers
+# stopped undelivered on 2026-09-20; one of them reported `done:` with no PR
+# because the no-mistakes definition of done ITSELF instructed a bare
+# `done: {summary}` stop before any pipeline run. Naming the PR in the terminal
+# done line could not catch that, because the same block authorized an earlier
+# bare one. So the rule is enforced over the rendered artifact rather than
+# recommended in it: for no-mistakes and direct-PR, no `done:` template may lack
+# a PR URL. local-only is exempt - its `done: ready in branch` line is correct.
+test_pr_modes_never_authorize_a_done_without_a_pr_url() {
+  local home id mode brief offenders
+
+  # The checker's own contract, driven through its public interface.
+  # shellcheck source=bin/fm-dod-lib.sh
+  . "$ROOT/bin/fm-dod-lib.sh"
+
+  # MUTANT: the exact pre-fix gate text must be reported for a PR-based mode.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  offenders=$(fm_dod_unbound_done_templates no-mistakes \
+    'When you believe it is complete, append `done: {summary}` to the status file and stop.') \
+    || fail "checker accepted a bare \`done: {summary}\` gate under no-mistakes"
+  assert_contains "$offenders" "done: {summary}" \
+    "checker did not name the unbound done template it rejected"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates direct-PR 'append `done: shipped it` and stop' >/dev/null \
+    || fail "checker accepted a bare done template under direct-PR"
+
+  # The same text under local-only is correct, not an offence.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates local-only \
+    'append `done: ready in branch fm/x` to the status file' >/dev/null \
+    && fail "checker reported an offence for local-only, which has no PR to name"
+
+  # A PR-bound template and a bare `done:` reference are both legitimate.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates no-mistakes \
+    'append `done: PR {url} checks green run={run-id}` and stop' >/dev/null \
+    && fail "checker rejected a done template that does carry the PR URL"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates no-mistakes \
+    'reports `done: PR <url> checks green run=<run-id>` after CI is green' >/dev/null \
+    && fail "checker rejected the <url> placeholder spelling AGENTS.md section 7 uses"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates direct-PR \
+    'append `done: PR https://example.test/pull/1` and stop' >/dev/null \
+    && fail "checker rejected a done template carrying a literal https PR URL"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the literal braces and backticks are fixture text
+  fm_dod_unbound_done_templates no-mistakes \
+    'a `done:` line with no run id is not a complete report' >/dev/null \
+    && fail "checker treated a bare \`done:\` reference as an authorized template"
+
+  # And the real generated briefs are clean under it.
+  home="$TMP_ROOT/pr-bound-done-home"
+  mkdir -p "$home/data"
+  for id_mode in "brief-prbound-f1:no-mistakes" "brief-prbound-f2:direct-PR" "brief-prbound-f3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$id: --mode $mode brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    offenders=$(fm_dod_unbound_done_templates "$mode" "$(cat "$brief")") \
+      && fail "$id: mode=$mode brief authorizes a done line with no PR URL: $offenders"
+  done
+
+  # The no-mistakes brief must carry the handoff that replaced the bare gate,
+  # and must no longer carry the gate itself.
+  brief="$home/data/brief-prbound-f1/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes brief still instructs a bare done gate before the pipeline"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are fixture text
+  assert_grep '`blocked: implementation committed <sha>, needs the instruction to run /no-mistakes`' "$brief" \
+    "no-mistakes brief lost the handoff line that replaced the bare done gate"
+  assert_grep "asks firstmate to act and is not a completion" "$brief" \
+    "no-mistakes brief does not say the handoff line is not a completion"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes brief lost the sentence naming who clears the handoff"
+  assert_grep "never the validation this contract requires, and never a substitute for the PR" "$brief" \
+    "no-mistakes brief does not say the project's own gate is not the delivery pipeline"
+  pass "fm-brief.sh: no PR-based brief can authorize a done line without a PR URL"
+}
+
+# The guard must refuse at generation time, not merely be available. MUTANT:
+# reintroduce the bare `done: {summary}` gate into a copy of the definition-of-done
+# library and run the real generator against it - brief generation must fail and
+# leave no brief behind, so the defect cannot reach a worker.
+test_reintroduced_bare_done_gate_refuses_brief_generation() {
+  local sandbox out status
+  sandbox="$TMP_ROOT/bare-done-mutant"
+  mkdir -p "$sandbox/home/data"
+  cp -R "$ROOT/bin" "$sandbox/bin"
+  # Rewrite the handoff line back into the pre-fix bare done gate.
+  awk '
+    {
+      if (index($0, "needs the instruction to run /no-mistakes\\`") > 0 && index($0, "append") > 0) {
+        print "When you believe it is complete, append \\`done: {summary}\\` to the status file and stop."
+        mutated = 1
+        next
+      }
+      print
+    }
+    END { exit !mutated }
+  ' "$ROOT/bin/fm-dod-lib.sh" > "$sandbox/bin/fm-dod-lib.sh" \
+    || fail "mutation found no handoff line to rewrite - the fixture no longer matches the source"
+
+  out=$(FM_HOME="$sandbox/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$sandbox/bin/fm-brief.sh" brief-mutant-g1 some-proj --mode no-mistakes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a reintroduced bare done gate still generated a no-mistakes brief"
+  assert_contains "$out" "must never authorize a done line with no PR URL" \
+    "refusal did not explain which contract the rendered brief broke"
+  assert_contains "$out" "done: {summary}" \
+    "refusal did not name the offending done template"
+  assert_absent "$sandbox/home/data/brief-mutant-g1/brief.md" \
+    "refused generation still left a brief carrying the bare done gate"
+
+  # The same mutation under local-only stays legal, so the guard is mode-specific
+  # rather than a blanket ban on a done line with no PR.
+  FM_HOME="$sandbox/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$sandbox/bin/fm-brief.sh" brief-mutant-g2 some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "the PR-bound done guard wrongly refused a local-only brief"
+  pass "fm-brief.sh: reintroducing a bare done gate refuses brief generation"
+}
+
+# Two of the three 2026-09-20 stops were `working:` lines whose last clause
+# promised the next action ("taking it through no-mistakes now", "handing the CI
+# gate back"), written and then not performed. The nonterminal-working rule has
+# shipped since #758 and did not hold, because it fires at turn end - a moment a
+# worker completing a narration has already passed. MUTANT: delete either
+# sentence below and this reds. The rule is restated at composition time, about
+# the text being written, and pinned to the exact transition that stalled.
+test_ship_status_protocol_forbids_announcing_an_unperformed_action() {
+  local home id brief
+  home="$TMP_ROOT/past-tense-home"
+  mkdir -p "$home/data"
+  id="brief-past-tense-h1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "Report in the past tense, about what has already happened." "$brief" \
+    "ship status protocol lost the past-tense reporting rule"
+  assert_grep "announces an action you have not performed yet" "$brief" \
+    "ship status protocol does not forbid announcing an unperformed action"
+  assert_grep "Perform the" "$brief" \
+    "ship status protocol does not require the action before the report"
+  # The nonterminal rule stays: the new rule is additional, not a replacement.
+  assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+    "the past-tense rule replaced the nonterminal-working rule instead of joining it"
+
+  # And the exact transition all three stops shared is pinned in the pipeline
+  # contract, so "starting no-mistakes now" has a defined right moment.
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'Do not announce the pipeline and stop' "$brief" \
+    "no-mistakes DOD does not forbid announcing the run and stopping"
+  # shellcheck disable=SC2016  # single quotes are deliberate: backticks must stay literal
+  assert_grep 'is written after your first `no-mistakes axi run --wait` call returns' "$brief" \
+    "no-mistakes DOD does not say when the run-started line may be written"
+  pass "fm-brief.sh: ship status protocol forbids reporting an action before performing it"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -1135,6 +1297,9 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_waits_instead_of_polling
 test_no_mistakes_dod_requires_run_id
+test_pr_modes_never_authorize_a_done_without_a_pr_url
+test_reintroduced_bare_done_gate_refuses_brief_generation
+test_ship_status_protocol_forbids_announcing_an_unperformed_action
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

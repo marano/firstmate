@@ -77,6 +77,8 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# A rendered ship brief for a PR-based mode is refused when it authorizes any
+# `done:` status template carrying no PR URL; bin/fm-dod-lib.sh owns that rule.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -570,6 +572,11 @@ $PAUSE_RULE
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   Report in the past tense, about what has already happened. Never append a status line
+   whose last clause announces an action you have not performed yet - "starting X now",
+   "taking it through Y now", "handing Z back" - and never end a turn on one. Perform the
+   action first, then report it with its result; until you have, there is nothing to append
+   and nothing to stop for.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -601,6 +608,7 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+fm_dod_assert_done_pr_bound "$MODE" "$BRIEF" "$(cat "$BRIEF")" || { rm -f "$BRIEF"; exit 1; }
 if [ -n "$DELIVERS" ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE, delivers=$DELIVERS; replace one {TASK:<id>} slot per delivered item and {FIRSTMATE_SPEC})"
 else
