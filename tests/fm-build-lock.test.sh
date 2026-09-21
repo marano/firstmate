@@ -1346,9 +1346,46 @@ nested_high_slot_case() {  # <name> <inner-prefix...>
   settle_root "$lockroot"
 }
 
-nested_high_slot_case variables
 nested_high_slot_case ancestor env -u FM_BUILD_LOCK_HELD_BY -u FM_BUILD_LOCK_HELD_LOCK
-pass "a nested invocation inside a high slot runs through, by hold variables or by a live ancestor"
+pass "a nested invocation under an ancestor holding a high slot runs straight through"
+
+# --- the hold VARIABLES alone recognise a high slot -------------------------
+# Driven from this suite rather than from inside the holder, because an
+# invocation nested under the holder is also its descendant, so the ancestor
+# check would let it through whatever the variables said. That is not a detail:
+# it is what let a mutant comparing FM_BUILD_LOCK_HELD_LOCK only against slot
+# 1's path survive the case above. Here nothing but the variables can work,
+# because the holder is a sibling of this shell rather than an ancestor.
+# Mutant: compare FM_BUILD_LOCK_HELD_LOCK only with slot 1's path; the
+# invocation then queues behind two held slots and the bounded wait reds.
+
+VARS_ROOT=$(slot_root nested-vars 2)
+VARS_A=
+VARS_B=
+hold_slot VARS_A "$VARS_ROOT" vars-a
+hold_slot VARS_B "$VARS_ROOT" vars-b
+VARS_SLOT2="$VARS_ROOT/fm-build-lock.slot2"
+await_path "$VARS_SLOT2" || fail "the second hold-variable fixture never took slot 2"
+VARS_PID=$(cat "$VARS_SLOT2/pid" 2>/dev/null || true)
+case "$VARS_PID" in
+  ''|*[!0-9]*) fail "slot 2 recorded no holder for the hold-variable case" ;;
+esac
+VARS_OUT="$TMP_ROOT/nested-vars.out"
+FM_BUILD_LOCK_DIR="$VARS_ROOT" FM_BUILD_LOCK_HELD_BY="$VARS_PID" FM_BUILD_LOCK_HELD_LOCK="$VARS_SLOT2" \
+  "$SCRIPT" printf 'by-variables\n' >"$VARS_OUT" 2>/dev/null &
+VARS_INNER=$!
+await_pid_exit "$VARS_INNER" 100 \
+  || fail "hold variables naming slot 2 did not pass an invocation through while both slots were held"
+wait "$VARS_INNER" 2>/dev/null || true
+assert_equals 'by-variables' "$(cat "$VARS_OUT" 2>/dev/null || true)" \
+  "the invocation carrying slot 2's hold variables must run"
+if ! kill -0 "$VARS_A" 2>/dev/null || ! kill -0 "$VARS_B" 2>/dev/null; then
+  fail "a hold-variable fixture ended before the case could check it"
+fi
+release_slot "$VARS_A" vars-a
+release_slot "$VARS_B" vars-b
+settle_root "$VARS_ROOT"
+pass "hold variables naming a high slot pass an invocation through with no ancestor to fall back on"
 
 # --- --status names every slot and every holder -----------------------------
 # Mutant: print slot 1 only.
@@ -1619,6 +1656,15 @@ await_path "$EXLOW_ROOT/fm-build-lock.slot2" \
   || fail "the whole-machine run never reserved the free slot while draining"
 FM_BUILD_LOCK_DIR="$EXLOW_ROOT" "$SCRIPT" --set-slots 1 >/dev/null 2>&1 \
   || fail "--set-slots 1 failed"
+# The lowered count must not be read as "you already hold enough". Requiring the
+# number of held slots to EQUAL the count instead of requiring every slot 1..n
+# lets this run start HOLDING ONLY SLOT 2, beside the fixture still holding slot
+# 1 - measured, and invisible to a case that only waits for the run to finish.
+sleep 2
+kill -0 "$EXLOW_WHOLE" 2>/dev/null \
+  || fail "a whole-machine run started while an ordinary holder still held a slot under the lowered count"
+assert_equals '' "$(cat "$TMP_ROOT/exlow.out" 2>/dev/null || true)" \
+  "a whole-machine run ran beside a live holder after the count was lowered"
 release_slot "$EXLOW_A" exlow-a
 await_pid_exit "$EXLOW_WHOLE" 300 \
   || fail "a whole-machine run holding more slots than a lowered count never started"
@@ -1651,11 +1697,22 @@ interrupted_reservation_case() {  # <name> <signal>
   local draining=$!
   await_grep 'WAITING, not wedged' "$err" || fail "the $name whole-machine run never got into line"
   # It is the head, so it reserves the free slot and keeps it across polls.
-  await_path "$lockroot/fm-build-lock" || fail "the $name whole-machine run never reserved a slot"
+  await_path "$lockroot/fm-build-lock.slot2" || fail "the $name whole-machine run never reserved a slot"
   assert_contains "$(FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status)" 'draining for a whole-machine run' \
     "--status must show the $name reservation while it drains"
   kill -"$signal" "$draining" 2>/dev/null || true
   wait "$draining" 2>/dev/null || true
+  # A signal its trap can run must give the slot back THERE AND THEN. Asserting
+  # only that the next waiter gets in cannot tell a release from a later
+  # dead-holder reclaim, and that is exactly what let a mutant releasing nothing
+  # on an interrupted drain survive this case before. SIGKILL runs no trap, so
+  # there the reclaim IS the mechanism under test and the slot may persist.
+  if [ "$signal" != 9 ]; then
+    [ ! -e "$lockroot/fm-build-lock.slot2" ] && [ ! -L "$lockroot/fm-build-lock.slot2" ] \
+      || fail "a $name-interrupted whole-machine run left its reserved slot for someone else to reclaim"
+    [ ! -e "$lockroot/fm-build-lock.slot2.info" ] \
+      || fail "a $name-interrupted whole-machine run left its reserved slot's holder record behind"
+  fi
   FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" printf 'behind\n' >"$waiter_out" 2>"$waiter_err" &
   local behind=$!
   await_pid_exit "$behind" 200 \
