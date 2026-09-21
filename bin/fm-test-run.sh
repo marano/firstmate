@@ -57,8 +57,8 @@
 #                   script did,
 #                   each named on failure. Records from the stock-bash lane are
 #                   ignored: it selects its own subset and keeps its own set.
-#                   CI runs it in the aggregate job against the families named
-#                   in ci.yml's FM_CI_EXCLUDED_FAMILIES.
+#                   CI runs it in the aggregate job with no flags, proving the
+#                   built-in default exclusions.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
