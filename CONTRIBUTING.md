@@ -111,6 +111,7 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane (off unless `FM_CI_RUN_HERDR` is `true`), lint, invariants, the coverage guard, and the stock macOS Bash 3.2 behavior lane in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+A default selection (`--all`, `--lane`, `--changed`) leaves out the tests `bin/fm-test-run.sh --list-default-exclusions` names, and naming a script or passing `--include-excluded` runs them anyway.
 Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated; pushes to `main` are never cancelled, and the workflow owns that contract and its rationale.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Leave the `sleep 0.1` cadence in the suites' bounded condition waits alone.

@@ -49,10 +49,12 @@
 #                   FM_PORTABLE_SERIAL_HINTS_FILE replaces the table (tests).
 #
 # Exclusion proof (no suite execution; inputs are lane or aggregate timing JSON):
-#   fm-test-run.sh --check-exclusions --exclude-family <name> [--exclude-family ...] <timing.json...>
+#   fm-test-run.sh --check-exclusions [--exclude-family <name>...] [--exclude-script <path>...] <timing.json...>
+#                   (with neither flag it proves the built-in default exclusions)
 #                   prove, from what the run itself recorded and not from the
-#                   workflow text, that (1) no script of an excluded family
-#                   executed and (2) every script outside those families did,
+#                   workflow text, that (1) no script of an excluded family or
+#                   named as an excluded script executed and (2) every other
+#                   script did,
 #                   each named on failure. Records from the stock-bash lane are
 #                   ignored: it selects its own subset and keeps its own set.
 #                   CI runs it in the aggregate job against the families named
@@ -77,6 +79,21 @@
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
 #                   dedicated required Herdr lane owns that coverage)
+#   --exclude-script <path>
+#                   drop this one script after selection (repeatable). The path
+#                   must name an existing tests/*.test.* script; a typo is refused.
+#   --include-excluded
+#                   run the tests this home does not spend time on by default
+#                   (--list-default-exclusions names them and why). Without it
+#                   --all, --lane, --proven-isolated and --changed leave them out,
+#                   locally and in CI alike; naming a script path or --family
+#                   explicitly always runs it. Example, to bring Orca back:
+#                     bin/fm-test-run.sh tests/fm-backend-orca.test.sh
+#                   or the whole default selection plus everything excluded:
+#                     bin/fm-test-run.sh --all --include-excluded
+#                   FM_TEST_INCLUDE_EXCLUDED=1 in the environment does the same.
+#   --list-default-exclusions
+#                   print every default exclusion as <family:name|path><TAB><reason>
 #   --require-ok-count <script>=<count>
 #                   fail the run unless <script> printed exactly <count> lines
 #                   starting "ok - " (repeatable). Exit status alone cannot see a
@@ -237,6 +254,8 @@ BASE_REF=origin/main
 JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
+EXCLUDE_SCRIPTS=()
+INCLUDE_EXCLUDED=${FM_TEST_INCLUDE_EXCLUDED:-0}
 FAIL_ON_GATE_SKIP=
 REQUIRE_OK_COUNTS=()
 JOBS=1
@@ -1506,6 +1525,24 @@ run_coverage_guard() {
   [ "$p3_ms" -ge "$parallel_min_ms" ] || parallel_min_ms=$p3_ms
   parallel_imbalance_ms=$((parallel_max_ms - parallel_min_ms))
 
+  # A default exclusion must name a real family or script: a stale entry would
+  # read as a deliberate choice while excluding nothing. The excluded tests stay
+  # in their lanes above, so the guard above still accounts for every file.
+  local key reason known_fams
+  known_fams=$(list_known_families)
+  while IFS=$'\t' read -r key reason; do
+    [ -n "$key" ] || continue
+    [ -n "$reason" ] || { log "coverage guard: default exclusion has no reason: $key"; rm -rf "$tmp"; return 1; }
+    case "$key" in
+      family:*)
+        printf '%s\n' "$known_fams" | grep -qxF "${key#family:}" \
+          || { log "coverage guard: default exclusion names an unknown family: $key"; rm -rf "$tmp"; return 1; } ;;
+      *)
+        grep -qxF "$key" "$tmp/all" \
+          || { log "coverage guard: default exclusion names a test that does not exist: $key"; rm -rf "$tmp"; return 1; } ;;
+    esac
+  done < <(list_default_exclusions)
+
   printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_max_ms=%s serial_shard_budget_ms=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
@@ -1722,56 +1759,75 @@ PY
 #   - a script outside the excluded families that did not execute was dropped
 check_excluded_families() {
   local ex known inv rc=0
-  [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ] || die "--check-exclusions requires at least one --exclude-family"
+  if [ "${#EXCLUDE_FAMILIES[@]}" -eq 0 ] && [ "${#EXCLUDE_SCRIPTS[@]}" -eq 0 ]; then
+    load_default_exclusions
+  fi
   [ "$#" -gt 0 ] || die "--check-exclusions requires at least one input timing JSON"
   command -v python3 >/dev/null 2>&1 || die "--check-exclusions requires python3"
   known=$(list_known_families)
-  for ex in "${EXCLUDE_FAMILIES[@]}"; do
+  for ex in "${EXCLUDE_FAMILIES[@]+"${EXCLUDE_FAMILIES[@]}"}"; do
     printf '%s\n' "$known" | grep -qxF "$ex" || die "--exclude-family '$ex' is not a known family (see --list-families)"
+  done
+  for ex in "${EXCLUDE_SCRIPTS[@]+"${EXCLUDE_SCRIPTS[@]}"}"; do
+    all_repo_tests | grep -qxF "$ex" || die "--exclude-script '$ex' is not a known test script"
   done
   inv=$(mktemp "${TMPDIR:-/tmp}/fm-test-inventory.XXXXXX") || return 1
   local f
   while IFS= read -r f; do
     printf '%s\t%s\n' "$f" "$(family_for_basename "$(basename "$f")")"
   done < <(all_repo_tests) >"$inv"
-  python3 - "$inv" "$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")" "$@" <<'PY' || rc=$?
+  python3 - "$inv" "$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]+"${EXCLUDE_FAMILIES[*]}"}")" "$(IFS=,; printf '%s' "${EXCLUDE_SCRIPTS[*]+"${EXCLUDE_SCRIPTS[*]}"}")" "$@" <<'PY' || rc=$?
 import json, sys
 from pathlib import Path
 
-inv_path, excluded_csv = sys.argv[1:3]
+inv_path, excluded_csv, scripts_csv = sys.argv[1:4]
 excluded = [e for e in excluded_csv.split(",") if e]
+excluded_scripts = [e for e in scripts_csv.split(",") if e]
 inventory = {}
 for line in Path(inv_path).read_text(encoding="utf-8").splitlines():
     path, family = line.split("\t")
     inventory[path] = family
 
 executed = {}
-for name in sys.argv[3:]:
+stock_ran = {}
+for name in sys.argv[4:]:
     doc = json.loads(Path(name).read_text(encoding="utf-8"))
     for s in doc.get("scripts") or []:
         selection = s.get("lane_selection") or doc.get("selection") or ""
+        if selection.startswith(("family=", "scripts")):
+            # An explicit on-demand run (the Herdr job names its family): the
+            # person asked for those scripts, so it neither proves nor breaks
+            # a default exclusion.
+            continue
         if "lane=stock-bash" in selection:
+            # It selects its own subset, so it cannot prove a script ran, but a
+            # script it did run still proves an exclusion failed.
+            stock_ran[s.get("path")] = s.get("family")
             continue
         executed[s.get("path")] = s.get("family")
 
 bad = []
-for path, ran_family in sorted(executed.items()):
+for path, ran_family in sorted({**stock_ran, **executed}.items()):
     fam = inventory.get(path, ran_family)
     if fam in excluded or ran_family in excluded:
         bad.append(f"FM_EXCLUSION_EXECUTED {path} family={fam}: the exclusion did not take effect")
+    elif path in excluded_scripts:
+        bad.append(f"FM_EXCLUSION_EXECUTED {path} script: the exclusion did not take effect")
 for path, fam in sorted(inventory.items()):
-    if fam not in excluded and path not in executed:
+    if fam not in excluded and path not in excluded_scripts and path not in executed:
         bad.append(f"FM_EXCLUSION_DROPPED {path} family={fam}: not excluded, yet it did not run")
 
 counts = {e: sum(1 for f in inventory.values() if f == e) for e in excluded}
 for line in bad:
     print(line)
+label = ",".join(excluded) + ("+" if excluded and excluded_scripts else "") + (f"{len(excluded_scripts)}scripts" if excluded_scripts else "")
 if bad:
-    print(f"FM_EXCLUSIONS failed excluded={','.join(excluded)} problems={len(bad)}")
+    print(f"FM_EXCLUSIONS failed excluded={label} problems={len(bad)}")
     sys.exit(1)
-skipped = sum(counts.values())
-detail = " ".join(f"{e}={counts[e]}" for e in excluded)
-print(f"FM_EXCLUSIONS ok excluded={','.join(excluded)} excluded_scripts={skipped} ({detail}) executed={len(executed)} inventory={len(inventory)}")
+by_script = [p for p in excluded_scripts if inventory.get(p) not in excluded]
+skipped = sum(counts.values()) + len(by_script)
+detail = " ".join([f"{e}={counts[e]}" for e in excluded] + ([f"scripts={len(by_script)}"] if by_script else []))
+print(f"FM_EXCLUSIONS ok excluded={label} excluded_scripts={skipped} ({detail}) executed={len(executed)} inventory={len(inventory)}")
 PY
   rm -f "$inv"
   return "$rc"
@@ -2300,13 +2356,69 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# Tests this home does not spend time on by default, for local and CI runs
+# alike: one table, one behaviour. A green default run does NOT vouch for them.
+# Nothing here is deleted: every file stays in the repository, stays in its
+# lane's membership (so the coverage guard still accounts for it), and runs on
+# demand - name the script or --family explicitly, or pass --include-excluded.
+# Applied after selection, so lane packing does not move. Each line is
+# <family:NAME | path><TAB><reason>. Reasons that name a card mean the exclusion
+# HIDES a known red; it does not answer it.
+list_default_exclusions() {
+  local t=$'\t'
+  cat <<EOF
+family:secondmate${t}this home has never registered a secondmate. NOT because they pass: tests/fm-remote-secondmate-trace-context.test.sh gave an unattributed red on 2026-09-21 (card fm-remote-clone-source-object-red, still open); excluding it hides that red, it does not answer it
+family:real-herdr-gated${t}this home runs tmux, not Herdr; CI's Herdr job is switched off unless FM_CI_RUN_HERDR is true
+tests/fm-pi-watch-extension.test.sh${t}Pi is not used here. KNOWN STANDING RED (card fm-pi-watch-shard-interference); its failing case is an OpenCode watch-plugin race, not Pi code - excluded, not fixed
+tests/fm-calm-pi-extension.test.sh${t}Pi is not used here. Reddened main at f902a5ff ("Pi did not restore the persisted session after restart") - excluded, not fixed
+tests/fm-pi-branch-extension.test.sh${t}Pi is not used here
+tests/fm-pi-branch-responsiveness-live-e2e.test.sh${t}Pi is not used here
+tests/fm-pi-primary-types.test.sh${t}Pi is not used here
+tests/fm-agy-harness.test.sh${t}agy harness is not used here
+tests/fm-send-agy-confirm.test.sh${t}agy harness is not used here
+tests/fm-muse-harness.test.sh${t}muse harness is not used here
+tests/fm-kimi-harness.test.sh${t}kimi harness is not used here
+tests/fm-rovo-harness.test.sh${t}rovo harness is not used here
+tests/fm-grok-harness.test.sh${t}grok harness is not used here
+tests/fm-omp-harness.test.sh${t}omp harness is not used here
+tests/fm-cursor-harness.test.sh${t}cursor harness is not used here
+tests/fm-cursor-primary.test.sh${t}cursor harness is not used here
+tests/fm-gemini-harness.test.sh${t}gemini harness is not used here
+tests/fm-backend-orca.test.sh${t}orca backend is not used here
+tests/fm-backend-zellij.test.sh${t}zellij backend is not used here
+tests/fm-backend-cmux.test.sh${t}cmux backend is not used here
+EOF
+}
+
+# Fill EXCLUDE_FAMILIES / EXCLUDE_SCRIPTS from the table for selections that
+# mean "the default set" and that the caller did not opt out of.
+load_default_exclusions() {
+  local key reason
+  while IFS=$'\t' read -r key reason; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      family:*) EXCLUDE_FAMILIES+=("${key#family:}") ;;
+      *) EXCLUDE_SCRIPTS+=("$key") ;;
+    esac
+  done < <(list_default_exclusions)
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
-  [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ] || return 0
+  [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ] || [ "${#EXCLUDE_SCRIPTS[@]}" -gt 0 ] || return 0
+  for s in "${EXCLUDE_SCRIPTS[@]+"${EXCLUDE_SCRIPTS[@]}"}"; do
+    [ -f "$s" ] || die "--exclude-script '$s' is not an existing script"
+  done
   for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
     fam=$(family_for_basename "$(basename "$s")")
     keep=1
+    for ex in "${EXCLUDE_SCRIPTS[@]+"${EXCLUDE_SCRIPTS[@]}"}"; do
+      if [ "$s" = "$ex" ]; then
+        keep=0
+        break
+      fi
+    done
     for ex in "${EXCLUDE_FAMILIES[@]+"${EXCLUDE_FAMILIES[@]}"}"; do
       if [ "$fam" = "$ex" ]; then
         keep=0
@@ -2558,6 +2670,23 @@ while [ "$#" -gt 0 ]; do
       EXCLUDE_FAMILIES+=("$2")
       shift 2
       ;;
+    --include-excluded)
+      INCLUDE_EXCLUDED=1
+      shift
+      ;;
+    --list-default-exclusions)
+      list_default_exclusions
+      exit 0
+      ;;
+    --exclude-script)
+      [ "$#" -gt 1 ] || die "--exclude-script requires a path"
+      EXCLUDE_SCRIPTS+=("$2")
+      shift 2
+      ;;
+    --exclude-script=*)
+      EXCLUDE_SCRIPTS+=("${1#--exclude-script=}")
+      shift
+      ;;
     --exclude-family=*)
       EXCLUDE_FAMILIES+=("${1#--exclude-family=}")
       shift
@@ -2708,9 +2837,22 @@ case "${MODE:-}" in
     ;;
 esac
 
+# The default exclusions govern the selections that mean "the default set".
+# An explicit script path or --family names what the person wants, so it runs.
+if [ "$INCLUDE_EXCLUDED" -eq 0 ]; then
+  case "${MODE:-}" in
+    all|lane|proven-isolated|changed)
+      load_default_exclusions
+      SELECTION_DESC="${SELECTION_DESC};default-exclusions"
+      ;;
+  esac
+fi
 apply_exclude_families
 if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
   SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
+fi
+if [ "${#EXCLUDE_SCRIPTS[@]}" -gt 0 ]; then
+  SELECTION_DESC="${SELECTION_DESC};exclude-script=${#EXCLUDE_SCRIPTS[@]}"
 fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"

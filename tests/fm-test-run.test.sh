@@ -11,6 +11,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
+# The suite below tests the runner over the FULL inventory; the default
+# exclusions are exercised on their own by
+# test_default_exclusions_govern_the_default_selection_and_stay_runnable.
+export FM_TEST_INCLUDE_EXCLUDED=1
 
 # The runner takes the machine-wide build lock per script. Every case here uses
 # a private lock root, forced on even on CI, so the suite neither queues behind
@@ -1262,14 +1266,14 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(out,
 # Fixture timing doc: every test script the repository has, minus the given
 # families and minus any extra path, in the shape a lane artifact records.
 exclusion_fixture() {  # <out.json> <selection> <excluded-family,...> [extra-path-to-drop]
-  local out=$1 selection=$2 fams=$3 drop=${4:-} f fam skip
+  local out=$1 selection=$2 fams=$3 drop=${4:-} f fam
   local listing=$out.list
   : >"$listing"
   for fam in $(printf '%s' "$fams" | tr ',' ' '); do
     "$RUNNER" --list --family "$fam" >>"$listing.skip"
   done
   [ -f "$listing.skip" ] || : >"$listing.skip"
-  "$RUNNER" --list --all | while IFS= read -r f; do
+  "$RUNNER" --list --all --include-excluded | while IFS= read -r f; do
     grep -qxF "$f" "$listing.skip" && continue
     [ "$f" = "$drop" ] && continue
     printf '%s\n' "$f"
@@ -1318,12 +1322,76 @@ test_check_exclusions_reads_the_recorded_run() {
   assert_contains "$out" "not a known family" "must say the name is unknown"
 
   # The stock-bash lane selects its own subset and keeps running the tests it
-  # selects, so its records must neither red the proof nor stand in for a shard.
-  exclusion_fixture "$tmp/stock.json" "lane=stock-bash" real-herdr-gated
+  # selects, so its records must not stand in for a shard, though an excluded script it ran still reds the proof.
+  exclusion_fixture "$tmp/stock.json" "lane=stock-bash" secondmate,real-herdr-gated
   out=$("$RUNNER" --check-exclusions --exclude-family secondmate --exclude-family real-herdr-gated "$tmp/ok.json" "$tmp/stock.json" 2>&1) \
-    || fail "stock-bash records must be ignored: $out"
+    || fail "a stock-bash record that honours the exclusions must pass: $out"
   rm -rf "$tmp"
   pass "exclusion proof reads the recorded run and names each broken obligation"
+}
+
+# Fixture timing doc from a list of paths on stdin, in the shape a lane records.
+timing_from_list() {  # <out.json> <selection>
+  python3 -c '
+import json, sys
+out, selection = sys.argv[1:3]
+rows = [{"path": p, "family": "x", "exit": 0, "duration_ms": 1} for p in sys.stdin.read().split()]
+json.dump({"selection": selection, "scripts": rows}, open(out, "w"))
+' "$1" "$2"
+}
+
+test_default_exclusions_govern_the_default_selection_and_stay_runnable() {
+  local tmp out rc all def n third orca=tests/fm-backend-orca.test.sh pi=tests/fm-pi-primary-types.test.sh
+  run_default() { env -u FM_TEST_INCLUDE_EXCLUDED "$RUNNER" "$@"; }
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-defex.XXXXXX")
+  # Local and CI share one table: the default selections leave the excluded
+  # tests out, and --include-excluded brings every one of them back.
+  all=$(run_default --list --all --include-excluded | wc -l | tr -d ' ')
+  def=$(run_default --list --all | wc -l | tr -d ' ')
+  [ "$def" -lt "$all" ] || fail "--all must leave the default exclusions out ($def vs $all)"
+  out=$(run_default --list --all)
+  assert_not_contains "$out" "$orca" "an unused backend must not run by default"
+  assert_not_contains "$out" "tests/fm-secondmate-safety.test.sh" "an excluded family must not run by default"
+  out=$(run_default --list --lane portable-parallel-1)
+  assert_not_contains "$out" "$pi" "a lane must inherit the default exclusions"
+  assert_contains "$(run_default --list --all --include-excluded)" "$orca" "--include-excluded must bring an excluded test back"
+  # On demand without reverting anything: a named script or family always runs.
+  assert_contains "$(run_default --list "$orca")" "$orca" "a named script must run"
+  assert_contains "$(run_default --list --family secondmate)" "tests/fm-secondmate-safety.test.sh" "a named family must run"
+  # Every table entry is real, has a reason, and stays in its lane so the
+  # coverage guard still accounts for the file.
+  run_default --check-coverage >/dev/null 2>&1 || fail "the coverage guard must stay green with the default exclusions"
+  n=$(run_default --list-default-exclusions | awk -F'\t' 'NF<2 || $2==""' | wc -l | tr -d ' ')
+  [ "$n" -eq 0 ] || fail "every default exclusion needs a reason"
+
+  # The proof, read from the recorded run. Truth: the default listing.
+  run_default --list --all | timing_from_list "$tmp/ok.json" "lane=portable-serial-1of5;default-exclusions"
+  out=$(run_default --check-exclusions "$tmp/ok.json" 2>&1) || fail "the recorded default run must prove the exclusions: $out"
+  assert_contains "$out" "FM_EXCLUSIONS ok" "the proof must pass on the exact default run"
+  # Mutant 1: an excluded Pi script ran anyway (a stale or typo'd exclusion).
+  { run_default --list --all; printf '%s\n' "$pi"; } | timing_from_list "$tmp/ran.json" "lane=portable-serial-1of5"
+  rc=0; out=$(run_default --check-exclusions "$tmp/ran.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an excluded script that executed must fail the proof"
+  assert_contains "$out" "FM_EXCLUSION_EXECUTED $pi" "must name the excluded script that ran"
+  # Mutant 2: a script nobody excluded quietly stopped running.
+  third=$(run_default --list --lane portable-parallel-1 | sed -n 1p)
+  run_default --list --all | grep -vxF "$third" | timing_from_list "$tmp/dropped.json" "lane=portable-serial-1of5"
+  rc=0; out=$(run_default --check-exclusions "$tmp/dropped.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dropped non-excluded script must fail the proof"
+  assert_contains "$out" "FM_EXCLUSION_DROPPED $third" "must name the dropped script"
+  # Mutant 3: the stock-bash lane ran an excluded script.
+  printf '%s\n' "$orca" | timing_from_list "$tmp/stock.json" "lane=stock-bash"
+  rc=0; out=$(run_default --check-exclusions "$tmp/ok.json" "$tmp/stock.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an excluded script run by the stock-bash lane must fail the proof"
+  assert_contains "$out" "FM_EXCLUSION_EXECUTED $orca" "must name it"
+  # An on-demand family run is not a default run and must not red the proof.
+  run_default --list --family real-herdr-gated | timing_from_list "$tmp/herdr.json" "family=real-herdr-gated"
+  out=$(run_default --check-exclusions "$tmp/ok.json" "$tmp/herdr.json" 2>&1) || fail "an explicit family run must not red the proof: $out"
+  # A misspelled script is refused outright.
+  rc=0; out=$(run_default --list --all --exclude-script tests/fm-no-such.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a misspelled --exclude-script must be refused"
+  rm -rf "$tmp"
+  pass "default exclusions govern the default selection, stay runnable on demand, and are proved from the recorded run"
 }
 
 # One shard of <n>, holding one script of the named measured duration. Every
@@ -2357,6 +2425,7 @@ test_portable_serial_lane_timing_underprediction_bound
 test_portable_serial_lane_timing_refuses_partial_input
 test_portable_serial_hint_gap_is_reported_not_gated
 test_check_exclusions_reads_the_recorded_run
+test_default_exclusions_govern_the_default_selection_and_stay_runnable
 test_portable_serial_hints_refresh_in_place
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated

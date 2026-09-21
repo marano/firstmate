@@ -114,15 +114,18 @@ This is also why the guard runs pre-merge now: a branch's per-script durations w
 
 The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 19.7 minutes) bounds CI end to end, so more serial shards buy nothing.
 
-## Excluded families
+## Default exclusions
 
-`.github/workflows/ci.yml` lists the families it does not run in `FM_CI_EXCLUDED_FAMILIES` at the top of the file, with the reason for each; a green run does not vouch for them.
-The serial shards pass each one as `--exclude-family`, which drops the family after the shard is packed, so the shards are not re-packed and the heaviest stays under the stock Bash 3.2 lane.
-The Herdr job is skipped unless the repository variable `FM_CI_RUN_HERDR` is `true`; re-enabling it means setting that and removing `real-herdr-gated` from the list, and the proof step reds if only one is done.
-The stock-bash lane picks its own subset and is not affected.
-The aggregate job's "Prove exclusions" step runs `bin/fm-test-run.sh --check-exclusions` on every run, reading the recorded timings rather than the workflow text.
-It names each excluded script that executed (`FM_EXCLUSION_EXECUTED`) and each other script that did not (`FM_EXCLUSION_DROPPED`), refuses an unknown family name, and writes the excluded families to the job summary.
-Excluding a family is a cost decision, not a verdict on its tests.
+`bin/fm-test-run.sh` owns one table of tests this home does not run by default, printed with a reason for each by `--list-default-exclusions`: the `secondmate` and `real-herdr-gated` families, and the Pi, unused-harness and unused-backend scripts.
+It governs `--all`, `--lane`, `--proven-isolated` and `--changed`, so a local run and every CI lane, the stock Bash 3.2 lane included, leave the same tests out; `ci.yml` carries no list of its own and only says so in its header.
+The exclusion is applied after selection, so the packed shards do not move.
+Nothing is deleted and the coverage guard still accounts for every file, because each excluded test stays in its lane's membership; the guard also refuses a table entry that names a missing test or family or lacks a reason.
+To run one anyway, name it (`bin/fm-test-run.sh tests/fm-backend-orca.test.sh`, or `--family <name>`), or pass `--include-excluded` (or set `FM_TEST_INCLUDE_EXCLUDED=1`) to a default selection.
+The Herdr job is skipped unless the repository variable `FM_CI_RUN_HERDR` is `true`; it names its family explicitly, so setting the variable is the only step.
+The aggregate job's "Prove exclusions" step runs `bin/fm-test-run.sh --check-exclusions` on every run, reading the recorded timings rather than any text.
+It names each excluded script that executed (`FM_EXCLUSION_EXECUTED`) and each other script that did not (`FM_EXCLUSION_DROPPED`), and writes the excluded list to the job summary.
+An explicit `--family` or script run, such as the Herdr job, neither proves nor breaks it.
+Excluding a test is a cost and flakiness decision, not a verdict on it: two of the excluded Pi tests were red at the time (cards `fm-pi-watch-shard-interference` and the `fm-calm-pi-extension` red on main), and excluding them hides those reds rather than fixing them.
 
 ## Coverage guard
 
