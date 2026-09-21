@@ -676,7 +676,7 @@ ok - live steering-inbox doorbell guard: 3 harness(es) honored the doorbell cont
 
 Not driven live, and untested rather than passed:
 
-- An idle worker with a stranded QUEUED doorbell that never clears, named as needing relaunch (`stuck-input`): that state has only been observed in the wild and was not produced on demand. No new attempt to produce it was made in this run; faking it by flipping the busy record while the worker was really mid-turn would test a false idle verdict, not the product. It stays covered only by the fake-pane cases in `tests/fm-task-inbox.test.sh`.
+- An idle worker with a stranded QUEUED doorbell that never clears, named as needing relaunch (`stuck-input`): that state has only been observed in the wild and was not produced on demand. A fresh attempt on 2026-09-21 (claude 2.1.278, real worker, a doorbell queued behind a foreground `sleep 30`, then Ctrl-C) did not strand it either: the queued text was submitted and answered, leaving a clean idle composer. Producing it on demand remains unachieved; faking it by flipping the busy record while the worker was really mid-turn would test a false idle verdict, not the product. It stays covered only by the fake-pane cases in `tests/fm-task-inbox.test.sh`.
 - That an interrupt cannot clear a stuck queued composer: observational only (the two incidents above), not reproducible on demand.
 
 ## Gemini
