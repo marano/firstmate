@@ -66,6 +66,10 @@ Escalate in order:
 1. Peek the pane, and check the task's steering inbox (`state/<id>.inbox/`) for unhandled `*.msg` records - a stale wake naming an unread firstmate instruction means the worker never acknowledged a durable steer, and the record itself shows exactly what was intended.
    A stale wake saying the worker cannot receive messages means its agent is alive and idle but text sits unsent in its composer or queue, so no doorbell can submit; nothing clears it automatically.
    Peek to confirm, clear it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt`, then re-send - the durable record is still waiting.
+   A stale wake saying the worker is unreachable means the opposite state: its agent never reached a turn boundary at all, so it read busy on every poll and no doorbell was ever typed.
+   The usual cause is a blocking harness prompt - a permission or confirmation dialog - holding the turn open until a human answers it, which no timeout ends.
+   Peek to see what is on the pane, then clear it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt` and re-send.
+   Re-sending is required rather than optional here: on Claude an interrupt fires no closing hook, so the worker still reads busy until its next completed turn and the watcher will not ring the doorbell for you, while `fm-send` rings regardless.
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
 3. If the crewmate is confused or looping, interrupt with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt`, then redirect with one corrective line through `fm-send`.
 4. If the crewmate is genuinely wedged after redirection, relaunch it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> relaunch --note '<progress so far>'`, which stops the agent, carries the brief plus that note into a replacement in the same local copy, and restores the prior record if the replacement cannot start.

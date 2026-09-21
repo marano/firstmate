@@ -218,6 +218,22 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
+### A blocking harness prompt reads busy forever
+
+Claude Code 2.1.278, 2026-09-20, in a throwaway tmux lab wired exactly as `fm-spawn` wires a claude worker (`bin/fm-busy-event.sh arm`, then the four lifecycle hooks) plus a `PreToolUse` guard answering `ask`.
+A `Bash` call parked the pane on the blocking confirmation dialog, and the record stayed open for as long as the dialog did:
+
+```
+v1 gen=g1789936140.53645.25268 seq=2 state=busy source=claude-hook event=user-prompt-submit ts=1789936183
+agent_state=alive
+classify=busy claude-hook
+composer=pending
+```
+
+No hook fires while that dialog is up, so `Stop` cannot close the turn and the pane classifies `busy` on every poll indefinitely.
+Answering `2. No` does not close it either: the denial is an interrupt, Claude fires no closing hook for one (the row above already records that), and the record still read `busy claude-hook` with the pane visibly idle until the next completed turn wrote `idle source=claude-hook event=stop`.
+This is why a busy verdict must never be read as "this worker is fine": `bin/fm-task-inbox-lib.sh` bounds how long an unbroken busy run may carry an unhandled steering-inbox record, and `tests/fm-task-inbox.test.sh` pins both that escalation and its refusal to fire inside the bound.
+
 Codex was probed two ways, both refused:
 
 ```sh

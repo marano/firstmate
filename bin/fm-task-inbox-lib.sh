@@ -28,9 +28,14 @@
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder:
-#                              "<msg>\t<count>\t<epoch>\t<stuck>", where <stuck>
-#                              counts the latest consecutive attempts that found
-#                              the composer holding unsent text
+#                              "<msg>\t<count>\t<epoch>\t<stuck>\t<busy-since>",
+#                              where <stuck> counts the latest consecutive
+#                              attempts that found the composer holding unsent
+#                              text, and <busy-since> is the epoch at which the
+#                              current unbroken run of busy observations started
+#                              (0 when the pane is not in one). A record written
+#                              before this field existed reads it as absent and
+#                              starts its busy run at the next busy observation.
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -51,9 +56,10 @@
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
-# while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation marker.
+# caller owns the busy and recovery-grade endpoint checks: a busy pane defers
+# its doorbell through fm_task_inbox_busy_action below, while a positively dead
+# or missing endpoint skips delivery and the ladder and escalates directly.
+# This library owns only the schedule and escalation marker.
 # When EVERY attempt of a spent budget found the composer provably holding
 # unsent text - skipped for it, or left with it after the submit - the
 # escalation is `stuck` rather than `escalate`: the agent is alive and idle
@@ -61,6 +67,20 @@
 # another doorbell would only queue behind it, so the worker cannot receive
 # messages until someone clears that composer. The ladder only names that
 # condition; it never interrupts or clears anything itself.
+#
+# Busy panes (fm_task_inbox_busy_action): a busy pane is a reason to defer a
+# doorbell, never a reason to stop counting. Busy means "do not type into it
+# now"; it does not mean "this worker is fine". A pane held on a blocking
+# harness prompt renders exactly one unbroken busy run - the harness opened a
+# turn it can never close - so an unbroken busy run carrying an unhandled
+# record past FM_TASK_INBOX_BUSY_MAX_SECS escalates as `wedged`, naming the
+# record and the run. Inside that bound a busy pane stays quiet, which is what
+# keeps a worker legitimately running a long suite with a steer queued behind
+# it from being alarmed on. The run is tracked in the same ladder file as the
+# delivery attempts, starts fresh whenever the oldest unhandled record changes,
+# and is ended by any delivery attempt, since an attempt means the pane was
+# reachable. A busy poll never rings and never spends delivery budget.
+#
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
@@ -78,6 +98,41 @@
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
+#   FM_TASK_INBOX_BUSY_MAX_SECS  default 1800; unbroken busy seconds carrying an
+#                              unhandled record before it escalates as wedged.
+#                              Zero and malformed settings take the default:
+#                              a bound of none would alarm on every busy
+#                              worker, which is the failure that makes the
+#                              alarm worthless.
+#                              Deliberately its own bound rather than the
+#                              watcher's BUSY_TURN_MAX_SECS: that one asks
+#                              whether any pane has gone too long with no
+#                              completed turn, while this one asks how long a
+#                              specific instruction may go unaccepted.
+#                              Half an hour is pinned from both sides. The
+#                              FLOOR is a legitimate uninterrupted turn: a
+#                              worker running a ~20 minute suite in one tool
+#                              call with a steer queued behind it is healthy,
+#                              and alarming on it is what would make this wake
+#                              worthless. The CEILING is the failure being
+#                              answered: on 2026-09-20 a worker sat on a
+#                              blocking permission dialog for about 75
+#                              minutes, and the oldest instruction in its
+#                              steering inbox went unaccepted for 51 of them,
+#                              measured from that record's own write and
+#                              acknowledgement times (the other, written
+#                              later, waited 34). This bound gates that
+#                              per-instruction span, not the pane's dwell.
+#                              BUSY_TURN_MAX_SECS's hour would never have
+#                              fired at all. Being wrong is cheap in one
+#                              direction only, which is why the bound sits
+#                              nearer the floor than the middle: .escalated
+#                              caps a mistaken wedge at ONE wake per record,
+#                              so a worker genuinely inside a very long turn
+#                              costs one line of attention rather than a loop,
+#                              while a missed wedge costs the whole lane for
+#                              as long as nobody looks. A home whose workers
+#                              routinely hold one turn for longer raises it.
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -91,6 +146,7 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
+FM_TASK_INBOX_BUSY_MAX_DEFAULT=1800
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
 
 fm_task_inbox_grace_secs() {
@@ -102,6 +158,15 @@ fm_task_inbox_grace_secs() {
 fm_task_inbox_ring_max() {
   local m=${FM_TASK_INBOX_RING_MAX:-$FM_TASK_INBOX_RING_MAX_DEFAULT}
   case "$m" in ''|*[!0-9]*) m=$FM_TASK_INBOX_RING_MAX_DEFAULT ;; esac
+  printf '%s' "$m"
+}
+
+# Unbroken busy seconds an unhandled record may carry before it escalates.
+# A zero or malformed setting falls back to the default rather than turning
+# the bound off: an unbounded busy pane is exactly the wedge this catches.
+fm_task_inbox_busy_max_secs() {
+  local m=${FM_TASK_INBOX_BUSY_MAX_SECS:-$FM_TASK_INBOX_BUSY_MAX_DEFAULT}
+  case "$m" in ''|*[!0-9]*|0) m=$FM_TASK_INBOX_BUSY_MAX_DEFAULT ;; esac
   printf '%s' "$m"
 }
 
@@ -360,10 +425,12 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #   stuck <record-path> <count>      attempt budget spent and every attempt
 #                             found the composer holding unsent text; surface
 #                             as a worker that cannot receive messages
+# The caller reaches this only for a pane it has not classified busy; a busy
+# pane goes to fm_task_inbox_busy_action instead.
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last stuck
+  local dir oldest base now grace max ladder rec_base count last stuck busy_since
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -379,8 +446,9 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   count=0
   last=0
   stuck=0
+  busy_since=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last stuck <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
 $ladder
 EOF
   if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
@@ -391,11 +459,18 @@ EOF
     count=0
     last=0
     stuck=0
+    busy_since=0
     rm -f "$dir/.escalated" 2>/dev/null || true
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   case "$stuck" in ''|*[!0-9]*) stuck=0 ;; esac
+  # busy_since is read and normalized but not consulted here: this decision is
+  # only ever asked for a pane the caller did NOT classify busy. Reading it is
+  # still required, because the last `read` variable absorbs every remaining
+  # field, so dropping it would hand the busy epoch to `stuck` and silently
+  # zero the composer-stuck count.
+  case "$busy_since" in ''|*[!0-9]*) busy_since=0 ;; esac
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
     printf 'quiet'
     return 0
@@ -422,18 +497,20 @@ EOF
 # permanently blocked composer can retry silently forever. <stuck> is 1 when
 # the attempt found the composer holding unsent text (fm_task_inbox_ring's 1
 # or 4); it extends the consecutive stuck count, and any other attempt resets
-# it. A positively dead or missing endpoint never enters the ladder: the
-# watcher escalates it directly. A concurrently removed inbox is a successful
+# it. An attempt also ends any busy run: the caller only attempts delivery on
+# a pane it did not classify busy, so the run was broken by definition. A
+# positively dead or missing endpoint never enters the ladder: the watcher
+# escalates it directly. A concurrently removed inbox is a successful
 # no-op; otherwise failure means the caller must surface the unwritable ladder
 # while the record remains unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [stuck]
-  local dir base ladder rec_base count last stuck
+  local dir base ladder rec_base count last stuck busy_since
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
   stuck=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last stuck <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
 $ladder
 EOF
   if [ "$rec_base" != "$base" ]; then
@@ -448,10 +525,65 @@ EOF
     stuck=0
   fi
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" "$stuck" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\t0\n' "$base" "$((count + 1))" "$(date +%s)" "$stuck" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi
+}
+
+# The busy-pane decision for one task, called once per poll for a pane the
+# caller HAS classified busy while <record-path> is the oldest unhandled
+# record. Records the busy observation and prints exactly one of:
+#   quiet                     the busy run is still inside the bound; the
+#                             doorbell is deferred, exactly as before
+#   wedged <record-path> <seconds>   the pane has been continuously busy for
+#                             <seconds> while this record stayed unhandled;
+#                             surface as a worker that cannot be reached
+# Returns 1 only when the run could not be persisted while the inbox still
+# exists, so the caller surfaces the same unwritable-ladder wake it already
+# surfaces for a delivery attempt: a busy run that cannot be recorded is a
+# ladder that can never reach `wedged`, which is the defect this branch exists
+# to prevent. A concurrently removed inbox is a quiet no-op.
+#
+# Delivery budget is deliberately untouched here. A busy pane is not an
+# attempt, so counting busy polls as rings would spend the budget a later idle
+# pane needs, and the two escalations answer different questions.
+fm_task_inbox_busy_action() {  # <state-dir> <task-id> <record-path>
+  local dir base ladder rec_base count last stuck busy_since now elapsed max
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  base=${3##*/}
+  count=0
+  last=0
+  stuck=0
+  busy_since=0
+  ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
+$ladder
+EOF
+  if [ "$rec_base" != "$base" ]; then
+    count=0
+    last=0
+    stuck=0
+    busy_since=0
+  fi
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  case "$stuck" in ''|*[!0-9]*) stuck=0 ;; esac
+  case "$busy_since" in ''|*[!0-9]*) busy_since=0 ;; esac
+  now=$(date +%s)
+  [ "$busy_since" -gt 0 ] && [ "$busy_since" -le "$now" ] || busy_since=$now
+  [ -d "$dir" ] || { printf 'quiet'; return 0; }
+  if ! { printf '%s\t%s\t%s\t%s\t%s\n' "$base" "$count" "$last" "$stuck" "$busy_since" > "$dir/.ring-state"; } 2>/dev/null; then
+    [ -d "$dir" ] || { printf 'quiet'; return 0; }
+    return 1
+  fi
+  elapsed=$((now - busy_since))
+  max=$(fm_task_inbox_busy_max_secs)
+  if [ "$elapsed" -ge "$max" ] && [ "$(cat "$dir/.escalated" 2>/dev/null || true)" != "$base" ]; then
+    printf 'wedged %s %s' "$3" "$elapsed"
+    return 0
+  fi
+  printf 'quiet'
 }
 
 # Mark the current oldest as escalated after its stale wake is durably queued,
