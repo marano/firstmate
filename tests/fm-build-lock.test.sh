@@ -879,6 +879,7 @@ hold_slot() {  # <pid-var> <root> <tag> [args-before-the-command...]
   FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" "$@" sh -c \
     "touch '$TMP_ROOT/$tag.held'; while [ ! -e '$TMP_ROOT/$tag.release' ]; do sleep 0.05; done" \
     >/dev/null 2>&1 &
+  # shellcheck disable=SC2031  # $! is the job started just above, not a subshell's
   printf -v "$var" '%s' "$!"
   await_path "$TMP_ROOT/$tag.held" || fail "the $tag fixture never took a slot"
 }
@@ -1110,9 +1111,9 @@ n1_transcript() {  # <root>
   touch "$w/r2"
   wait "$waiter" 2>/dev/null || true
   wait "$h" 2>/dev/null || true
-  norm < "$w/wait.err.snapshot" | sort -u
+  norm < "$w/wait.err.snapshot" | LC_ALL=C sort -u
   echo "-- after the release --"
-  norm < "$w/wait.err" | sort -u \
+  norm < "$w/wait.err" | LC_ALL=C sort -u \
     | grep -E 'acquired the machine-wide|this command has held' || true
   echo "-- status --"
   norm < "$w/wait.status"
@@ -1131,7 +1132,7 @@ n1_transcript() {  # <root>
   await_grep 'WAITING, not wedged' "$w/w3.err" || fail "the transcript waiter never got into line"
   wait "$h" 2>/dev/null || true
   wait "$waiter" 2>/dev/null || true
-  norm < "$w/hold.err" | sort -u
+  norm < "$w/hold.err" | LC_ALL=C sort -u
   echo "-- status --"
   norm < "$w/hold.status"
 
@@ -1147,12 +1148,12 @@ free
 == held ==
 held by pid PID for AGE running: sh -c touch\ \'WORK/h1\'\;\ while\ \[\ \!\ -e\ \'WORK/r1\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
 == waiter ==
-fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD])
 fm-build-lock: WARNING: still WAITING AGE for the machine-wide build lock, past the 1s ceiling - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
 fm-build-lock: WARNING: the holder has held the build lock AGE, past the 1s ceiling; it is not being killed
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD])
 -- after the release --
-fm-build-lock: acquired the machine-wide build lock after AGE
 fm-build-lock: WARNING: this command has held the machine-wide build lock for AGE and is blocking every other local build: sleep 2 [in CWD]
+fm-build-lock: acquired the machine-wide build lock after AGE
 -- status --
 paused: waiting AGE for the machine-wide build lock to run sleep 2 [in CWD] - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
 working: acquired the machine-wide build lock after AGE
