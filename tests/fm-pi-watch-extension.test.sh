@@ -3969,7 +3969,12 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  # The node probe above prints WHICH of its four checks failed, on stderr, into
+  # $out - and $out was only ever read on the success path, so a failure reported
+  # "expected exit 0, got 1" and discarded the one line naming the cause. Carry it
+  # into the failure instead: CI is where this fails, and a red there that names
+  # nothing cannot be acted on.
+  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm${out:+ - $out}"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
