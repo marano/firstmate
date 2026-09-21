@@ -1,0 +1,24 @@
+== no-mistakes
+scaffolded: /var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.5sCb3PGM6Z/data/t-no-mistakes/brief.md (ship, mode=no-mistakes; replace {TASK} and {FIRSTMATE_SPEC})
+42:   Append `paused: {why}` BEFORE you stop, then `working:` or `done:` once it reports; add
+51:   turn after it; continue the same stage until a defined `done:` gate under Definition of done.
+52:   Report in the past tense, about what has already happened. Never append a status line
+63:   A decision or blocker you opened stays open until a `resolved` line carrying its exact key lands; a later `done:` or `working:` line never closes it, even when the answer is what started that work.
+106:This task ships **no-mistakes**: it has exactly one `done:`, that line carries the PR URL, and you write it only after the pipeline reports CI green.
+109:When the implementation is committed on your branch, append `blocked: implementation committed <sha>, needs the instruction to run /no-mistakes` to the status file and stop.
+144:After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green run={run-id}` and stop. You are finished.
+145:`{run-id}` is the concrete no-mistakes run you drove to that green result, exactly as `axi run`/`axi respond` printed it - paste that id, never a description of the command you ran. "Applied via axi respond" is a report about a command, not evidence about the commit: a `done:` line with no run id is not a complete report, so do not send one.
+== direct-PR
+scaffolded: /var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.5sCb3PGM6Z/data/t-direct-PR/brief.md (ship, mode=direct-PR; replace {TASK} and {FIRSTMATE_SPEC})
+41:   Append `paused: {why}` BEFORE you stop, then `working:` or `done:` once it reports; add
+50:   turn after it; continue the same stage until a defined `done:` gate under Definition of done.
+51:   Report in the past tense, about what has already happened. Never append a status line
+60:   A decision or blocker you opened stays open until a `resolved` line carrying its exact key lands; a later `done:` or `working:` line never closes it, even when the answer is what started that work.
+105:When it is implemented and committed, push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.
+== local-only
+scaffolded: /var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.5sCb3PGM6Z/data/t-local-only/brief.md (ship, mode=local-only; replace {TASK} and {FIRSTMATE_SPEC})
+41:   Append `paused: {why}` BEFORE you stop, then `working:` or `done:` once it reports; add
+50:   turn after it; continue the same stage until a defined `done:` gate under Definition of done.
+51:   Report in the past tense, about what has already happened. Never append a status line
+60:   A decision or blocker you opened stays open until a `resolved` line carrying its exact key lands; a later `done:` or `working:` line never closes it, even when the answer is what started that work.
+106:When it is implemented and committed, append `done: ready in branch fm/t-local-only` to the status file and stop.

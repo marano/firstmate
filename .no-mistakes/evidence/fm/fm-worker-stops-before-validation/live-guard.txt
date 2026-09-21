@@ -1,0 +1,9 @@
+error: lbl: mode=no-mistakes must never authorize a done line with no PR URL, but does: done: {summary}
+bare done mode=no-mistakes rc=1
+error: lbl: mode=direct-PR must never authorize a done line with no PR URL, but does: done: {summary}
+bare done mode=direct-PR rc=1
+bare done mode=local-only rc=0
+good rc=0
+1
+error: fm_dod_block: mode=no-mistakes must never authorize a done line with no PR URL, but does: done: {summary}
+mutant brief rc=1
