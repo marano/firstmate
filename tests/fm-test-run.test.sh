@@ -1290,7 +1290,7 @@ test_portable_serial_hints_refresh_in_place() {
   printf '{"selection":"lane=portable-serial-1of5","scripts":[{"path":"tests/zz-refresh.test.sh","duration_ms":77777,"exit":0}]}' >"$tmp/t.json"
   cp "$RUNNER" "$tmp/fm-test-run.sh"
   "$tmp/fm-test-run.sh" --refresh-serial-hints "$tmp/t.json" >/dev/null || fail "refresh must succeed"
-  assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE= "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
+  assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE="" "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
   grep -qx 'tests/zz-refresh.test.sh 77777' "$tmp/fm-test-run.sh" || fail "refresh must write the measured hint into the table"
   ! grep -q '^tests/fm-watch-triage.test.sh [0-9]*$' "$tmp/fm-test-run.sh" || fail "refresh must replace the whole table"
   rm -rf "$tmp"
