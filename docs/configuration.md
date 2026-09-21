@@ -237,6 +237,36 @@ The value is a property of the home doing the dispatching, so it is not inherite
 `FM_IDLE_FLEET_SCAN_SECS` (default `300`) bounds how often the condition is evaluated at all, `FM_IDLE_FLEET_SECS` (default `900`) is how long it must hold continuously before the first alarm, and `FM_IDLE_FLEET_RESURFACE_SECS` (default `3600`) is how often a condition that keeps holding re-surfaces; each falls back to its default when set to a non-positive or non-numeric value.
 [`architecture.md`](architecture.md) owns why the detector lives in the watcher rather than the away-mode daemon, and `bin/fm-idle-fleet-lib.sh`'s header owns the condition itself and how each of its three numbers is read.
 
+## Machine-wide build slots (build-lock-slots, build-lock-exclusive)
+
+These two files configure [`../bin/fm-build-lock.sh`](../bin/fm-build-lock.sh), the machine-wide build/test semaphore behind the `mutex` entry point.
+They are the only firstmate settings that are not per home: the slots deliberately live outside every home so secondmate homes share them, most callers have no home to read, and two callers acting on two values against one set of slots would stop excluding each other.
+So they are neither listed in the operational home layout nor inherited by a secondmate home; the script's own `--help` owns its flags and mechanics.
+
+They live in `<account home>/.config/firstmate/`, or, when `FM_BUILD_LOCK_DIR` names a lock root, in that root, so a chosen root always carries exactly one count of its own.
+They are deliberately not in the default lock root, which is a per-user temporary directory the operating system purges: a setting that silently reverts is not a deliberate switch.
+The account home comes from the account database rather than `$XDG_CONFIG_HOME` or `$HOME` alone, because a harness can hand a worker either; a caller that resolves the wrong file reads "absent" and runs at one slot, which can only ever under-admit.
+
+`build-lock-slots` holds how many local builds or tests may run at once.
+Write it with `mutex --set-slots <n>` and print its resolved path with `mutex --slots-path`.
+It must hold one positive base-10 integer on a single line in a plain regular file, with surrounding whitespace ignored - `fleet-capacity`'s grammar exactly, and the same one-integer discipline for the same reason.
+What must not be borrowed from that file is its refuse-and-disable reaction: disabling an alarm is safe, while refusing to run every build on the machine is not.
+So an absent file, a zero, a negative, a non-number, internal whitespace, a second line, an empty file, or a symlink each fall back to one slot, and every case but an absent file also warns once on stderr naming the file and is reported on `mutex --status`.
+A value above the online core count is clamped to that count and says so; the clamp is a guard against "no lock by another name" rather than tuning, and standing down already has its own switch in `FM_BUILD_LOCK_CI`.
+There is deliberately no environment variable for the count, because an environment value is per process and so multi-valued by construction, which is the one property this number must not have.
+A raised count reaches a waiting build within one poll; a lowered one never touches a running holder and admits nothing new until the holders above it have finished.
+
+`build-lock-exclusive` names the runs that need the whole machine, one shell glob per line, with `#` comments and blank lines ignored.
+A slot is not a share of the machine - build tools size their worker pools from the whole machine and memory is not divisible by a lock at all - so a count bounds how many heavy commands run and never how much they use.
+A run this file names, or one invoked as `mutex --exclusive <command>`, therefore holds every slot and never runs beside anything.
+Each glob is matched against exactly the text `mutex --status` prints after `running:`, which carries the working directory, so a pattern can name a repository's worktrees as easily as a command.
+At one slot neither the flag nor the file has any effect and the file is never opened.
+A file that exists but cannot be read makes every run whole-machine and warns once, which is one-slot behaviour; treating it as empty would silently drop the protection it exists to give.
+
+Raising the count above 1 has one hard precondition, because several copies of the script share these slots - `mutex` on PATH is the primary checkout's, and every firstmate worktree's test runner calls its own.
+A copy that predates slots knows only slot 1, which is safe for exclusion at any count, but nested inside a newer copy's second-slot hold it does not recognise the hold and queues, and with a whole-machine run ahead of it in line that is a deadlock.
+So do not raise the count above 1 while any live worktree predates the change.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -1010,6 +1040,15 @@ FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context pr
 FM_GROUPING=            # optional grouping posture override; see "Grouping posture"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 FM_TASK_STATUS=         # internal: the task's absolute status file, exported by fm-spawn.sh beside FM_TASK_ID, never set by hand; bin/fm-build-lock.sh appends its hold and wait ceiling lines there
+FM_BUILD_LOCK_DIR=      # directory holding the build slots and their two settings files; see "Machine-wide build slots"
+FM_BUILD_LOCK_CI=       # 1/true force build-lock stand-down, 0/false force local locking
+FM_BUILD_LOCK_NOTICE_INTERVAL=60   # seconds between a waiting build's notices
+FM_BUILD_LOCK_WAIT_WARN=600        # waiter ceiling in seconds, 0 off
+FM_BUILD_LOCK_HOLD_WARN=1200       # holder ceiling in seconds, 0 off
+FM_BUILD_LOCK_POLL=0.5             # build-slot acquire poll interval in seconds
+FM_BUILD_LOCK_TICKET_STALE=30      # seconds an unrenewed waiting-line ticket survives, 0 off
+FM_BUILD_LOCK_HELD_BY=  # internal: a build-slot holder's pid, exported to its wrapped command so a nested invocation runs through
+FM_BUILD_LOCK_HELD_LOCK= # internal: the path of the slot that holder owns, exported beside FM_BUILD_LOCK_HELD_BY
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
