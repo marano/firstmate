@@ -1,0 +1,2 @@
+ok - the repository-scoped route patches a pull request body on marano/firstmate and round-trips it exactly
+ok - --template '{{.body}}' reads the exact body and --jq .body appends one newline
