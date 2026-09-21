@@ -120,6 +120,11 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Install the Pi package for the Pi extension tests
+        run: |
+          set -eu
+          npm install -g @earendil-works/pi-coding-agent
+          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -267,6 +272,14 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The Pi extension tests read the installed Pi package's own types and
+      # runtime, so without it they gate-skip and pass silently. It is a public
+      # npm package and needs no credential, so CI can hold the real thing.
+      - name: Install the Pi package for the Pi extension tests
+        run: |
+          set -eu
+          npm install -g @earendil-works/pi-coding-agent
+          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
@@ -277,7 +290,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # CI provides npm and tsc, so
+          # The Pi package is installed above and CI provides npm and tsc, so
           # any missing typecheck prerequisite is a broken lane, not a valid skip.
           # The job cap is this lane's hang tripwire, so it keeps the runner
           # unbounded per script; the runner's default bound is for local runs.
