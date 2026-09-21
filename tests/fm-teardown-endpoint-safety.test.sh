@@ -15,6 +15,15 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   git init -q "$TMP_ROOT/$dir/project"
+  # No automatic maintenance in the fixture repository. From Git 2.55 (CI's
+  # runner image) every commit starts a detached `git maintenance run --auto`
+  # whose worktree-prune task removes a worktree admin directory that has no
+  # gitdir file yet. mark_case_as_treehouse_pool commits and then immediately
+  # runs `git worktree add`, whose admin directory is exactly that until add
+  # writes its lock, so the detached prune could delete it mid-add:
+  # "fatal: could not open '.git/worktrees/project/locked' for writing".
+  git -C "$TMP_ROOT/$dir/project" config maintenance.auto false
+  git -C "$TMP_ROOT/$dir/project" config gc.auto 0
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -70,6 +79,23 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   assert_present "$dir/home/state/$id.meta" "$description: metadata changed before refusal"
   assert_present "$dir/worktree/sentinel" "$description: worktree changed before refusal"
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
+}
+
+# The pool fixture's own commit must not start background Git maintenance, or
+# its next `git worktree add` races a detached prune (see make_case). Git
+# reports the auto-maintenance child it launches on GIT_TRACE, so the fixture's
+# own commit is read for it directly rather than waiting on the rare race.
+test_pool_fixture_commit_starts_no_background_maintenance() {
+  local dir trace
+  dir=$(make_case maintenance-quiet)
+  trace="$dir/commit.trace"
+  GIT_TRACE="$trace" git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm pool-fixture
+  [ -s "$trace" ] || fail "git wrote no trace for the fixture commit, so the check would be vacuous"
+  if grep -q 'maintenance run\|gc --auto' "$trace"; then
+    fail "the pool fixture's commit started background maintenance that can prune its next worktree add: $(grep 'maintenance run\|gc --auto' "$trace")"
+  fi
+  pass "fm-teardown: the pool fixture's commits start no background maintenance to race its worktree add"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation() {
@@ -1338,6 +1364,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+test_pool_fixture_commit_starts_no_background_maintenance
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

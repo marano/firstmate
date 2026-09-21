@@ -16,6 +16,20 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Most setup commands below report on stdout, which the fixtures discard, so a
+# failure under errexit used to end this suite with no `not ok` line at all -
+# CI once lost the whole script that way (exit 1 after 105s, nothing printed).
+# Name the command that ended it. set -E carries the trap into the helper
+# functions the fixtures call; command substitutions clear errexit, so the
+# guard prints only where errexit is what ends the run.
+procevent_errexit_report() {  # <status> <line> <command>
+  case $- in
+    *e*) printf 'not ok - unexpected failure at %s line %s (exit %s): %s\n' "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}" "$2" "$1" "$3" >&2 ;;
+  esac
+}
+set -E
+trap 'procevent_errexit_report "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
