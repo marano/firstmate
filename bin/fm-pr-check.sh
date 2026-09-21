@@ -5,6 +5,11 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# Binding a PR also captures the pipeline's own proof that it validated this
+# head, as state/<task-id>.validation-receipt, so a head that WAS validated
+# stays provable for as long as its PR can still merge;
+# bin/fm-validation-receipt-lib.sh owns that record and its trust boundary, and
+# the capture is best-effort and never fails an armed watch.
 # A task record holds one PR and one merge poll, so recording a DIFFERENT PR is
 # refused while the recorded one's merge has not been reported: replacing it
 # would drop the only watch on a PR that can still merge. The recorded PR's merge
@@ -24,6 +29,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-validation-receipt-lib.sh
+. "$SCRIPT_DIR/fm-validation-receipt-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
@@ -165,6 +172,57 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# Binding the PR is the one moment the validating run is both known and newest,
+# so the pipeline's verdict for this head is persisted here rather than left to
+# be looked up again whenever the captain gets round to merging.
+# bin/fm-validation-receipt-lib.sh owns the candidate rule, the record's proof
+# rule, and the receipt format. This is best-effort by design: it never fails an
+# armed watch, and a head with no receipt still merges on the pipeline's own
+# record. Nothing is reported when no run proves this head, because
+# bin/fm-pr-merge.sh's own gate names the missing evidence per candidate at the
+# moment it decides, which is the moment that can act on it. A task that ships
+# direct-PR or local-only has no run behind it by definition and is skipped.
+capture_validation_receipt() {
+  local mode run timeout
+  mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$mode" in direct-PR|local-only) return 0 ;; esac
+  fm_validation_receipt_remove_other "$STATE" "$ID" \
+    "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" || true
+  # bin/fm-pr-merge.sh re-records the PR through this script before its own
+  # validation gate, so re-binding a head that already has its receipt must
+  # cost nothing rather than re-reading every candidate run record.
+  if [ -n "$PR_HEAD" ] \
+    && fm_validation_receipt_read "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" \
+    && [ "$FM_VALIDATION_RECEIPT_HEAD" = "$(printf '%s' "$PR_HEAD" | tr '[:upper:]' '[:lower:]')" ]; then
+    return 0
+  fi
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  timeout=$(fm_validation_nm_timeout)
+  while IFS= read -r run || [ -n "$run" ]; do
+    [ -n "$run" ] || continue
+    # The pull request's head branch is not read here; the receipt stores the
+    # run record's own branch and the merge gate checks it against the forge's
+    # head branch at merge time, live.
+    if fm_validation_run_record_proves "$STATE" "$timeout" "$run" "$URL" '' "$PR_HEAD"; then
+      if fm_validation_receipt_write "$STATE" "$ID" \
+        "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" \
+        "$FM_VALIDATION_PROOF_HEAD" "$FM_VALIDATION_PROOF_BRANCH" "$run"; then
+        printf 'recorded: no-mistakes run %s validated head %s of %s\n' \
+          "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
+      else
+        printf 'actionable: no-mistakes run %s validated head %s of %s, but its validation receipt could not be recorded\n' \
+          "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
+      fi
+      return 0
+    fi
+  done <<CANDIDATES
+$(fm_validation_run_candidates "$STATE" "$ID" "$META" "$URL" \
+  "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" || true)
+CANDIDATES
+}
+capture_validation_receipt || true
+
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

@@ -133,8 +133,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-meta-keys-lib.sh`    | Own the task record's key vocabulary and its order-free, no-repeat contract, shared by the record's producers and readers |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll; refuse to replace a recorded PR whose merge has not been reported unless `--replace` |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, capture the pipeline's validation receipt for the bound head, then atomically arm a static merge poll; refuse to replace a recorded PR whose merge has not been reported unless `--replace` |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub or GitLab URL, refuse an outcome it cannot prove landed or queued, then delete the merged pull request's own head branch when safe |
+| `fm-validation-receipt-lib.sh` | Resolve which no-mistakes runs are candidates for a pull request, judge whether a run record proves a head, and own the durable validation receipt |
 | `fm-pr-state.sh`         | Read-only: print one line per GitHub pull-request blocker it can see, reporting on checks that have reported rather than verdicting merge-readiness |
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
