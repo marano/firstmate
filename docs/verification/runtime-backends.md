@@ -658,6 +658,27 @@ Both signals rendered, the composer read `pending` while the doorbell waited beh
 The shape was first captured live on the same version while reproducing a queued doorbell by hand; that capture's escape sequences are the portable fixtures in `tests/fm-composer-lib.test.sh` and `tests/fm-task-inbox.test.sh`.
 The trigger that leaves such a queue stranded on an idle worker was not reproduced: a turn that ended normally and one interrupted with Escape both submitted the queued doorbell.
 
+### Watcher recovery, driven live
+
+Verified on 2026-09-21 with claude 2.1.278 (Claude Code), tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-watch.sh` against a real claude worker whose busy hooks are wired as `bin/fm-spawn.sh` wires them (a bare claude has no hooks, so its busy verdict reads `unknown` and the recovery correctly never fires on it).
+The worker was launched from `/Users/marano/Desktop` (`FM_SEND_INBOX_LIVE_CWD`) because the gate worktree is not a trusted folder.
+
+```sh
+FM_SEND_INBOX_LIVE_CWD=/Users/marano/Desktop FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=claude FM_SEND_INBOX_LIVE_CLAUDE_CHECKS='recover busy foreign' FM_SEND_INBOX_LIVE_TIMEOUT=150 tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.278 (Claude Code)): the watcher re-pressed Enter on its own unsent doorbell; delivered, acted on, acked, no wake
+ok - claude (2.1.278 (Claude Code)): a worker in a long foreground call was never rung into, interrupted, or alarmed on (25 busy polls), and collected its message at its own checkpoint
+ok - claude (2.1.278 (Claude Code)): foreign composer text was never submitted, typed over, or cleared, and was reported as text firstmate never typed
+ok - live steering-inbox doorbell guard: 3 harness(es) honored the doorbell contract
+```
+
+Not driven live, and untested rather than passed:
+
+- An idle worker with a stranded QUEUED doorbell that never clears, named as needing relaunch (`stuck-input`): that state has only been observed in the wild and was not produced on demand. No new attempt to produce it was made in this run; faking it by flipping the busy record while the worker was really mid-turn would test a false idle verdict, not the product. It stays covered only by the fake-pane cases in `tests/fm-task-inbox.test.sh`.
+- That an interrupt cannot clear a stuck queued composer: observational only (the two incidents above), not reproducible on demand.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
