@@ -637,6 +637,11 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 A doorbell rung while a claude worker is mid-turn does not submit: claude 2.1.278 moves it into a queue drawn above the composer, adds a `ctrl+x ctrl+s to send now` hint under the last queued message, and leaves the composer row showing only a dim `Press up to edit queued messages` placeholder.
 Ghost stripping removes that placeholder, so before the classifier learned the shape the pane read `empty` while the doorbell had not reached the model, and every re-ring queued another copy behind it.
 `bin/fm-composer-lib.sh` now reads either signal as `pending`, and the steering-inbox ladder names a worker whose composer stays that way through every attempt as unable to receive messages.
+
+That queue can outlive the turn that created it, and an IDLE worker still showing it is the state that costs real time.
+Observed on 2026-09-21 on task fm-worker-cannot-patch-pr-body, reproducing blu-3153-help-infra-h03 from 2026-09-19: the worker was idle at an empty prompt, a doorbell was refused, `bin/fm-control.sh interrupt` was delivered and verified agent-alive and did NOT clear the composer, a second doorbell after it was refused identically, and only `bin/fm-control.sh relaunch` recovered the worker, with the worktree and every commit intact.
+Three interrupt or keypress attempts across those two incidents cleared it zero times, which is why `bin/fm-task-inbox-lib.sh` escalates this state toward a relaunch rather than toward any clearing mechanism.
+The two rendered rows are not a usable detector on their own: they are byte-identical on the benign mid-turn screen and on this idle one, the only difference anywhere being the spinner row, so the ladder separates the two by the semantic busy verdict and by whether firstmate typed that doorbell into the pane itself.
 Verified on 2026-09-19 with claude 2.1.278 (Claude Code), tmux 3.6a, macOS arm64, on an isolated private socket:
 
 ```sh

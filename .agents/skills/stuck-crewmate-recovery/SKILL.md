@@ -64,8 +64,12 @@ Only positive socket refusal or absence is a daemon-down finding; escalate that 
 Escalate in order:
 
 1. Peek the pane, and check the task's steering inbox (`state/<id>.inbox/`) for unhandled `*.msg` records - a stale wake naming an unread firstmate instruction means the worker never acknowledged a durable steer, and the record itself shows exactly what was intended.
-   A stale wake saying the worker cannot receive messages means its agent is alive and idle but text sits unsent in its composer or queue, so no doorbell can submit; nothing clears it automatically.
-   Peek to confirm, clear it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt`, then re-send - the durable record is still waiting.
+   A stale wake saying the worker cannot receive messages means its agent is alive and idle but text sits unsent in its composer or queue, so no doorbell can submit.
+   A doorbell that is merely swallowed no longer reaches you: the watcher re-presses Enter on it by itself while it can prove the composer holds exactly that doorbell and nothing else, so this wake means that automatic recovery was refused or spent, and its own reason says which.
+   When the reason says the composer holds text firstmate never typed, that content belongs to someone else - the worker's half-written command, or the captain's - and nothing typed behind it, nothing cleared it, and neither may you: peek first, and only the person whose text it is decides what happens to it.
+   When the reason says firstmate's own doorbell went in and never cleared, relaunch (step 4) is the recovery and an interrupt is not: that was measured on two live workers, once with the interrupt delivered and verified agent-alive while the composer still held its text, and a further doorbell after it refused identically.
+   Relaunch is cheap here - the local copy, the commits, and the durable instruction all survive - so do not spend attempts trying to clear it first.
+   Peek either way to confirm, and re-send after any recovery - the durable record is still waiting.
    A stale wake saying the worker is unreachable means the opposite state: its agent never reached a turn boundary at all, so it read busy on every poll and no doorbell was ever typed.
    The usual cause is a blocking harness prompt - a permission or confirmation dialog - holding the turn open until a human answers it, which no timeout ends.
    Peek to see what is on the pane, then clear it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt` and re-send.

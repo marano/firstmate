@@ -71,6 +71,12 @@ inbox_lib() {  # <state> <function> [args...]
 # fm_backend_tmux_agent_state read the pane as a dead bare shell.
 # FM_FAKE_TMUX_CURSOR moves the cursor row off 1, and once any literal is typed
 # the pane shows FM_FAKE_TMUX_CAPTURE_TYPED instead, when that is set.
+# A bare Enter (no -l) is logged to FM_ENTER_LOG, which is what separates a
+# doorbell re-SUBMITTED from one re-TYPED; with FM_FAKE_TMUX_CAPTURE_ENTER set
+# that Enter also swaps the pane to a cleared screen and acknowledges
+# FM_ACK_RECORD, modelling the submit landing and the worker then reading its
+# inbox. Without it an Enter changes nothing, which is the pane that never
+# accepts input.
 make_watch_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -93,6 +99,14 @@ case "${1:-}" in
       [ -z "${FM_FAKE_TMUX_CAPTURE_TYPED:-}" ] || cp "$FM_FAKE_TMUX_CAPTURE_TYPED" "$FM_FAKE_TMUX_CAPTURE"
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
+      fi
+    elif [ "${1:-}" = Enter ]; then
+      printf 'Enter\n' >> "${FM_ENTER_LOG:-/dev/null}"
+      if [ -n "${FM_FAKE_TMUX_CAPTURE_ENTER:-}" ]; then
+        cp "$FM_FAKE_TMUX_CAPTURE_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+        if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
+          mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
+        fi
       fi
     fi
     exit 0 ;;
@@ -542,6 +556,68 @@ test_ladder_names_a_composer_stuck_through_the_budget() {
   pass "inbox: the ladder names a composer stuck through the whole budget, and only that"
 }
 
+# State D against state C at the ladder level. D is "firstmate's own doorbell
+# went into this pane and never came out", whose recovery is a relaunch; C is
+# "text firstmate never typed", which a human must look at instead. The
+# separator is the run's FIRST attempt, because only it knows whether the
+# stuck text is ours - which is why the kind is sticky.
+test_ladder_separates_our_own_stranded_doorbell_from_foreign_content() {
+  local state rec action
+  state="$TMP_ROOT/ladder-stuck-kind/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "do the thing")
+  age_path "$rec"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 own
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 own
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck-input $rec 2" ] \
+    || fail "a budget whose attempts found our own doorbell stranded should name it, got: $action"
+  # THE LIVE 2026-09-21 SEQUENCE: attempt 1 types the doorbell and it stays
+  # (ring 4 -> own); every later attempt can only see a composer it cannot
+  # prove (ring 1 -> other). The run must still name our own stranded
+  # doorbell, because forgetting by the third poll would send a relaunch case
+  # to a human as if the text belonged to someone else.
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 own
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck-input $rec 3" ] \
+    || fail "a run that began by stranding our own doorbell must keep naming it, got: $action"
+  # A run that NEVER put our doorbell in stays foreign, however long it runs.
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck $rec 2" ] \
+    || fail "a run that never stranded our own doorbell must stay foreign, got: $action"
+  # A NEW record starts a new ladder, so one message whose doorbell was
+  # stranded must not lend its relaunch answer to the next message, whose
+  # composer holds something else entirely.
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 own
+  mv "$rec" "$state/t1.inbox/handled/"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "the next thing")
+  age_path "$rec"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1 other
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck $rec 2" ] \
+    || fail "a new record must not inherit the previous record's ownership claim, got: $action"
+  # An unnamed stuck attempt is `other`, so no caller reaches the relaunch
+  # answer by omission, and neither does a ladder written before the field.
+  rm -f "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 1
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck $rec 2" ] \
+    || fail "an unnamed stuck attempt must not claim our own stranded doorbell, got: $action"
+  printf '%s\t2\t100\t2\t0\n' "${rec##*/}" > "$state/t1.inbox/.ring-state"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=2 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "stuck $rec 2" ] \
+    || fail "a ladder written before the stuck-kind field must not claim our own stranded doorbell, got: $action"
+  pass "inbox: only a run that stranded firstmate's own doorbell names the relaunch recovery"
+}
+
 # The ladder half of the busy-wedge contract, driven through the library's own
 # entry point so the accumulation, its reset conditions, and the bound are each
 # pinned separately from the watcher wiring above them.
@@ -630,6 +706,253 @@ claude_queued_capture() {  # <busy>
   printf '%s\n' "${esc}[38;5;246m❯ ${esc}[2m${esc}[39mPress up to edit queued messages${esc}[0m"
   printf '%s\n' "$rule"
   printf '%s\n' "  ${esc}[38;5;211m⏵⏵ bypass permissions on${esc}[39m"
+}
+
+# composer_capture <text> [trailing...]: a claude-shaped bare composer whose
+# rows hold exactly <text>, wrapped at 58 columns after the `❯ ` glyph, with
+# any <trailing> rows appended INSIDE the composer region. Prints the screen;
+# composer_cursor_row below gives the matching cursor row, which is where
+# typing that text leaves it. Built from the live doorbell rather than a
+# literal so the fixture always matches whatever path the case runs under.
+composer_capture() {  # <text> [extra-composer-row...]
+  local text=$1 rest chunk first=1 extra
+  shift
+  printf '%s\n' "⏺ Read(AGENTS.md)"
+  printf '%s\n' "  ⎿  Read 958 lines"
+  printf '\n'
+  rest=$text
+  while [ -n "$rest" ]; do
+    chunk=${rest:0:58}
+    rest=${rest:58}
+    if [ "$first" = 1 ]; then
+      printf '❯ %s\n' "$chunk"
+      first=0
+    else
+      printf '  %s\n' "$chunk"
+    fi
+  done
+  for extra in "$@"; do
+    printf '  %s\n' "$extra"
+  done
+  printf '\n'
+  printf '%s\n' "  ⏵⏵ bypass permissions on"
+}
+
+# The row composer_capture leaves the cursor on: the last row of the match,
+# or of the trailing rows when the fixture adds any.
+composer_cursor_row() {  # <text> [extra-composer-row...]
+  local text=$1 rows
+  shift
+  rows=$(( (${#text} + 57) / 58 ))
+  [ "$rows" -gt 0 ] || rows=1
+  printf '%s' "$((3 + rows - 1 + $#))"
+}
+
+# An idle claude whose composer is empty again, the screen a landed submit
+# leaves behind.
+cleared_capture() {
+  printf '%s\n' "⏺ Read(AGENTS.md)"
+  printf '%s\n' "  ⎿  Read 958 lines"
+  printf '\n'
+  printf '%s\n' "❯ "
+  printf '\n'
+  printf '%s\n' "  ⏵⏵ bypass permissions on"
+}
+
+# Arm the task's semantic busy record in <state>, since only a positive idle
+# verdict may unlock the own-doorbell recovery.
+arm_busy() {  # <state> <task> <busy|idle>
+  "$ROOT/bin/fm-busy-event.sh" arm "$1" "$2" --state "$3" >/dev/null \
+    || fail "could not arm the $3 busy record for the fixture"
+}
+
+# The semantic verdict the recovery gate actually reads, through the same
+# owner the watcher uses.
+busy_verdict() {  # <state> <task>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    fm_busy_classify_meta "$2/$3.meta" "$3" "$2" ""
+  ' _ "$ROOT" "$1" "$2" | cut -d" " -f1
+}
+
+# PROOF 1: a worker with an unsent doorbell in an otherwise idle composer is
+# recovered automatically, and the pending instruction is delivered. The
+# recovery is an Enter on text proven ours; nothing is retyped.
+test_watcher_resubmits_its_own_unsent_doorbell() {
+  local dir state out log enter pid rec doorbell i=0
+  dir=$(setup_watch_case resubmit-own-doorbell)
+  state="$dir/state"; out="$dir/watch.out"
+  log="$dir/send.log"; : > "$log"
+  enter="$dir/enter.log"; : > "$enter"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  arm_busy "$state" t1 idle
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  composer_capture "$doorbell" > "$dir/unsent.capture"
+  cleared_capture > "$dir/cleared.capture"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_ENTER_LOG="$enter" \
+    FM_FAKE_TMUX_CAPTURE="$dir/unsent.capture" \
+    FM_FAKE_TMUX_CAPTURE_ENTER="$dir/cleared.capture" \
+    FM_FAKE_TMUX_CURSOR="$(composer_cursor_row "$doorbell")" \
+    FM_ACK_RECORD="$rec" FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=2
+  pid=$!
+  while [ "$i" -lt 150 ]; do
+    [ -f "$state/t1.inbox/handled/001.msg" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || fail "an unsent doorbell in an idle composer was never recovered, so the instruction was never delivered:"$'\n'"$(cat "$out")"
+  [ -s "$enter" ] || fail "the recovery must submit the stranded doorbell with Enter"
+  [ ! -s "$log" ] \
+    || fail "the recovery must never retype the doorbell behind the text already in the composer:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a doorbell recovered automatically must not wake firstmate:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: an unsent doorbell in an idle composer is re-submitted automatically and delivered"
+}
+
+# PROOF 2: a worker that is BUSY with a durable instruction waiting is not
+# interrupted - no Enter, no typing, no alarm - and the instruction is still
+# delivered once the worker reaches its own checkpoint. The ring's own gate is
+# pinned directly too, because the watcher's busy branch is not the only thing
+# that must refuse.
+test_watcher_leaves_a_busy_worker_holding_its_own_doorbell_alone() {
+  local dir state out log enter pid rec doorbell rc i=0
+  dir=$(setup_watch_case busy-own-doorbell)
+  state="$dir/state"; out="$dir/watch.out"
+  log="$dir/send.log"; : > "$log"
+  enter="$dir/enter.log"; : > "$enter"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  arm_busy "$state" t1 busy
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  composer_capture "$doorbell" > "$dir/unsent.capture"
+  cleared_capture > "$dir/cleared.capture"
+  # THE LONG FOREGROUND CALL (observed 2026-09-21 on the receipt-retention
+  # lane, which wedge-escalated three times while demonstrably mid-turn). A
+  # worker blocked in one long foreground drive call touches its turn-end
+  # marker for many minutes at a stretch, so every staleness-shaped reader
+  # eventually calls it idle. The recovery must not consult those: it reads
+  # the semantic record, which stays busy for the whole turn because the
+  # harness opened it and has not closed it.
+  touch -t 202001010000 "$state/t1.turn-ended"
+  [ "$(busy_verdict "$state" t1)" = busy ] \
+    || fail "a worker mid-turn in a long foreground call must read busy however stale its turn-end marker is, got: $(busy_verdict "$state" t1)"
+  # The ring itself refuses without a positive idle, so a caller that cannot
+  # tell can never press Enter into a live turn.
+  for rc in busy unknown ''; do
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_ENTER_LOG="$enter" \
+      FM_FAKE_TMUX_CAPTURE="$dir/unsent.capture" \
+      FM_FAKE_TMUX_CURSOR="$(composer_cursor_row "$doorbell")" \
+      FM_FAKE_TMUX_AGENT=claude \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$rc" \
+      && fail "the ring should defer rather than report a delivery for pane state '${rc:-unasserted}'"
+    [ ! -s "$enter" ] \
+      || fail "the ring pressed Enter into a pane it was told was '${rc:-unasserted}':"$'\n'"$(cat "$enter")"
+    [ ! -s "$log" ] \
+      || fail "the ring typed into a pane it was told was '${rc:-unasserted}':"$'\n'"$(cat "$log")"
+  done
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_ENTER_LOG="$enter" \
+    FM_FAKE_TMUX_CAPTURE="$dir/unsent.capture" \
+    FM_FAKE_TMUX_CAPTURE_ENTER="$dir/cleared.capture" \
+    FM_FAKE_TMUX_CURSOR="$(composer_cursor_row "$doorbell")" \
+    FM_ACK_RECORD="$rec" FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=2 \
+    FM_TASK_INBOX_BUSY_MAX_SECS=3600
+  pid=$!
+  sleep 5
+  kill -0 "$pid" 2>/dev/null \
+    || fail "a busy worker with a waiting instruction woke firstmate:"$'\n'"$(cat "$out")"
+  [ ! -s "$enter" ] \
+    || fail "a busy worker's live turn was interrupted with an Enter:"$'\n'"$(cat "$enter")"
+  [ ! -s "$log" ] || fail "a busy worker was typed into:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "the instruction must still be waiting durably while the worker is busy"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a busy worker with a waiting instruction was alarmed on:"$'\n'"$(cat "$state/.wake-queue")"
+  # The worker reaches its own checkpoint: the same instruction is delivered
+  # without anything having interrupted it.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" t1 idle --current-gen \
+    --source claude-hook --event Stop >/dev/null \
+    || fail "could not close the fixture's turn"
+  while [ "$i" -lt 150 ]; do
+    [ -f "$state/t1.inbox/handled/001.msg" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || fail "the instruction that waited out a busy turn was never delivered afterwards:"$'\n'"$(cat "$out")"
+  pass "watcher: a busy worker - including one blocked in a long foreground call - is never interrupted, and its instruction still arrives at its own checkpoint"
+}
+
+# PROOF 3: composer content firstmate did not write is never discarded - and
+# never submitted either, which is the same boundary: pressing Enter on a
+# stranger'"'"'s half-typed command RUNS it. Nothing is typed, nothing is cleared,
+# and the escalation says so.
+test_watcher_never_submits_composer_content_it_did_not_write() {
+  local dir state out log enter pid rec doorbell before after
+  dir=$(setup_watch_case foreign-composer)
+  state="$dir/state"; out="$dir/watch.out"
+  log="$dir/send.log"; : > "$log"
+  enter="$dir/enter.log"; : > "$enter"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  arm_busy "$state" t1 idle
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  # Someone else'"'"'s half-written command, and our own doorbell with someone
+  # else'"'"'s bytes appended: neither is ours to submit or to clear.
+  composer_capture "git push --force origin mai" > "$dir/foreign.capture"
+  composer_capture "$doorbell" "and then rm -rf ./build" > "$dir/appended.capture"
+  cleared_capture > "$dir/cleared.capture"
+  for before in foreign appended; do
+    : > "$enter"; : > "$log"
+    cp "$dir/$before.capture" "$dir/live.capture"
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_ENTER_LOG="$enter" \
+      FM_FAKE_TMUX_CAPTURE="$dir/live.capture" \
+      FM_FAKE_TMUX_CAPTURE_ENTER="$dir/cleared.capture" \
+      FM_FAKE_TMUX_CURSOR="$(composer_cursor_row "git push --force origin mai")" \
+      FM_FAKE_TMUX_AGENT=claude \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 idle \
+      && fail "the ring reported a delivery for a composer holding $before content"
+    [ ! -s "$enter" ] \
+      || fail "Enter was pressed on $before composer content firstmate did not write:"$'\n'"$(cat "$enter")"
+    [ ! -s "$log" ] || fail "$before composer content was typed over:"$'\n'"$(cat "$log")"
+    cmp -s "$dir/$before.capture" "$dir/live.capture" \
+      || fail "$before composer content was changed by the ring"
+  done
+  # End to end: the same screen through the real watcher escalates for a human
+  # instead of clearing anything.
+  cp "$dir/foreign.capture" "$dir/live.capture"
+  : > "$enter"; : > "$log"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_ENTER_LOG="$enter" \
+    FM_FAKE_TMUX_CAPTURE="$dir/live.capture" \
+    FM_FAKE_TMUX_CAPTURE_ENTER="$dir/cleared.capture" \
+    FM_FAKE_TMUX_CURSOR="$(composer_cursor_row "git push --force origin mai")" \
+    FM_FAKE_TMUX_AGENT=claude FM_TASK_INBOX_RING_MAX=2
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced a composer holding content it could not prove was its own"; }
+  [ ! -s "$enter" ] \
+    || fail "the watcher pressed Enter on composer content it did not write:"$'\n'"$(cat "$enter")"
+  [ ! -s "$log" ] || fail "the watcher typed behind content it did not write:"$'\n'"$(cat "$log")"
+  after=$(cat "$dir/live.capture")
+  [ "$after" = "$(cat "$dir/foreign.capture")" ] \
+    || fail "the watcher altered composer content it did not write"
+  grep -qF "firstmate never typed" "$state/.wake-queue" \
+    || fail "the escalation should say the composer content is not ours:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  assert_no_grep "relaunch is the recovery" "$state/.wake-queue" \
+    "content firstmate never typed must not be reported as its own stranded doorbell"
+  [ -f "$rec" ] || fail "the durable record must survive for whoever owns that composer text"
+  pass "watcher: composer content firstmate did not write is never submitted, typed over, or cleared"
 }
 
 test_watcher_rerings_idle_pane_quietly() {
@@ -1023,6 +1346,7 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_ladder_names_a_composer_stuck_through_the_budget
+test_ladder_separates_our_own_stranded_doorbell_from_foreign_content
 test_ladder_counts_an_unbroken_busy_run
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
@@ -1033,6 +1357,9 @@ test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_names_a_worker_that_cannot_receive_messages
+test_watcher_resubmits_its_own_unsent_doorbell
+test_watcher_leaves_a_busy_worker_holding_its_own_doorbell_alone
+test_watcher_never_submits_composer_content_it_did_not_write
 test_watcher_names_claude_holding_a_stranded_queue
 test_watcher_never_alarms_on_a_busy_worker_with_queued_text
 test_watcher_dead_pane_escalates_once_without_ringing

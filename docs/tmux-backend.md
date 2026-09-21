@@ -101,7 +101,8 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 
 Typed content can impersonate structure, so a composer holding the caller's own unconfirmed text can read `unknown` indefinitely: a wrapped row ending in the away digest's ` | ` separator reads as a box edge.
 `fm_tmux_resubmit_own_text` therefore presses Enter again, never retyping or clearing, only while `fm_composer_holds_text` proves the composer holds exactly the text the caller typed, anchored on the agent prompt glyph and the cursor row; any other, extra, or moved text sends nothing.
-The away daemon is its only caller, for its own digest; `tests/fm-afk-inject-e2e.test.sh` (Scenario E) and `tests/fm-composer-lib.test.sh` cover it, and the live composer guard proves it on a real Claude composer.
+Its callers are the away daemon, for its own digest, and the steering-inbox re-ring ladder, for a doorbell an idle composer swallowed (`bin/fm-task-inbox-lib.sh`); both act only on that byte-identity proof, so neither can press Enter on content it did not type.
+`tests/fm-afk-inject-e2e.test.sh` (Scenario E), `tests/fm-composer-lib.test.sh`, and `tests/fm-task-inbox.test.sh` cover it, and the live composer guard proves it on a real Claude composer.
 
 ## Limits and regression entry points
 
