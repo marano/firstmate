@@ -453,14 +453,22 @@ jobs:
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
       # Serial shard balance rots as tests grow (docs/fm-test-portable-shards.md).
-      # On main only, so a single noisy PR run cannot red a branch; the artifact
-      # upload below still runs when this names a drifted script.
-      - name: Check serial shard hints against measured timings
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      # This runs on pull requests as well as main. The per-script comparison it
+      # replaced could not: a script's measured duration depends on which shard
+      # packs it, so a branch's numbers were never main's. What this checks -
+      # each shard's measured total against the job cap, and the lane's measured
+      # total against its packed weight - is the same quantity on either, which
+      # is what makes a pre-merge verdict worth having.
+      # The check refuses a run missing a shard rather than judging a partial
+      # lane, so this step is gated on the serial lane having succeeded: a
+      # broken lane already reds CI and should not also fail here for having
+      # left nothing complete to judge.
+      - name: Check serial shard timings against the job cap and the hint table
+        if: success() && needs.tests-portable-serial.result == 'success'
         run: |
           set -eu
           [ -f "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" ] || exit 0
-          bin/fm-test-run.sh --check-hint-drift "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json"
+          bin/fm-test-run.sh --check-lane-timing "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json"
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4

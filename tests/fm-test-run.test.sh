@@ -1259,27 +1259,134 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(out,
   fail "dominant script landed in no serial shard"
 }
 
-test_portable_serial_hint_drift_guard() {
-  local tmp out rc
-  # A one-time re-pack rots again unless something notices. The drift guard must
-  # name a script whose measured duration leaves its hint by more than the
-  # tolerance, and stay silent inside it and below the absolute floor.
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-drift.XXXXXX")
-  printf 'tests/a.test.sh 100000\ntests/b.test.sh 1000\n' >"$tmp/hints"
-  mk() {
-    printf '{"selection":"lane=portable-serial-1of5","scripts":[{"path":"tests/a.test.sh","duration_ms":%s,"exit":0},{"path":"tests/b.test.sh","duration_ms":%s,"exit":0}]}' "$1" "$2" >"$tmp/$3.json"
-  }
-  mk 140000 20000 inside
-  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-hint-drift "$tmp/inside.json" 2>&1) \
-    || fail "drift inside the tolerance (and small scripts under the floor) must not fire: $out"
-  mk 200000 1000 outside
+# One shard of <n>, holding one script of the named measured duration. Every
+# case below builds its lane out of these so a bound is driven by exactly the
+# number under test.
+lane_shard_json() {  # <out> <shard> <shards> <path> <ms>
+  printf '{"selection":"lane=portable-serial-%sof%s","scripts":[{"path":"%s","duration_ms":%s,"exit":0}]}' \
+    "$2" "$3" "$4" "$5" >"$1"
+}
+
+test_portable_serial_lane_timing_shard_bound() {
+  local tmp out rc k
+  # The bound the CI job cap actually owns: a shard's MEASURED total. The
+  # packed weight cannot stand in for it - it under-predicted the measured
+  # total by up to 24% on real runs - so this reads what happened.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-lane.XXXXXX")
+  printf 'tests/a.test.sh 1400000\n' >"$tmp/hints"
+  k=1
+  while [ "$k" -le 5 ]; do
+    lane_shard_json "$tmp/under.$k.json" "$k" 5 tests/a.test.sh 1400000
+    lane_shard_json "$tmp/over.$k.json" "$k" 5 tests/a.test.sh 1400000
+    k=$((k + 1))
+  done
+  # Exactly one shard is pushed past the bound while the lane total stays under
+  # five times it, so a check that summed the lane instead of reading each
+  # shard would return a pass here.
+  lane_shard_json "$tmp/over.3.json" 3 5 tests/a.test.sh 1650001
+
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/under.*.json 2>&1) \
+    || fail "a lane inside the measured-shard bound must pass: $out"
+  assert_contains "$out" "FM_LANE_SHARD shard=3 scripts=1 measured_ms=1400000" \
+    "every shard's measured total must be reported"
+
   rc=0
-  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-hint-drift "$tmp/outside.json" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "drift past the tolerance must exit non-zero: $out"
-  assert_contains "$out" "FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=200000" "drift must name the script"
-  assert_not_contains "$out" "FM_HINT_DRIFT tests/b.test.sh" "an unmoved script must not be named"
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/over.*.json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shard past the measured bound must exit non-zero: $out"
+  assert_contains "$out" "shard 3 measured 1650001ms" "the failure must name the shard and the number"
+  assert_contains "$out" "re-shard" "the failure must name re-sharding as the answer"
   rm -rf "$tmp"
-  pass "hint drift guard fires past the tolerance and not inside it"
+  pass "lane timing check bounds each shard's measured total"
+}
+
+test_portable_serial_lane_timing_underprediction_bound() {
+  local tmp out rc k
+  # The rot signal, and the one quantity a re-pack does not move: the lane's
+  # measured total against its packed weight. Both sides are recomputed from
+  # the scripts the run reported, so a changed script SET moves them together.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-under.XXXXXX")
+  printf 'tests/a.test.sh 100000\n' >"$tmp/hints"
+  k=1
+  while [ "$k" -le 5 ]; do
+    lane_shard_json "$tmp/ok.$k.json" "$k" 5 tests/a.test.sh 110000
+    lane_shard_json "$tmp/rot.$k.json" "$k" 5 tests/a.test.sh 110001
+    k=$((k + 1))
+  done
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/ok.*.json 2>&1) \
+    || fail "measuring exactly the allowed share over the packed weight must pass: $out"
+  assert_contains "$out" "FM_LANE_TIMING shards=5 measured_ms=550000 packed_ms=500000" \
+    "the lane totals must be reported"
+  rc=0
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/rot.*.json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "measuring past the allowed share must exit non-zero: $out"
+  assert_contains "$out" "under-predicts the lane" "the failure must say the table under-predicts"
+
+  # Removing scripts must not trip it: the packed side shrinks with the
+  # measured side, which is what makes the bound survive a set change.
+  k=1
+  while [ "$k" -le 5 ]; do
+    rm -f "$tmp/rot.$k.json"
+    lane_shard_json "$tmp/rot.$k.json" "$k" 5 tests/a.test.sh 110000
+    k=$((k + 1))
+  done
+  rm -f "$tmp/rot.5.json"
+  lane_shard_json "$tmp/rot.5.json" 5 5 tests/gone.test.sh 1
+  printf 'tests/a.test.sh 100000\ntests/gone.test.sh 1\n' >"$tmp/hints"
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/rot.*.json 2>&1) \
+    || fail "a smaller script set must not trip the under-prediction bound: $out"
+  rm -rf "$tmp"
+  pass "lane timing check bounds how far the hint table may under-predict the lane"
+}
+
+test_portable_serial_lane_timing_refuses_partial_input() {
+  local tmp out rc
+  # The aggregate job runs even when a shard produced no timing artifact.
+  # Summing four shards out of five makes both bounds silently lenient, so a
+  # partial input must refuse instead of returning a verdict.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-partial.XXXXXX")
+  printf 'tests/a.test.sh 100000\n' >"$tmp/hints"
+  lane_shard_json "$tmp/s1.json" 1 5 tests/a.test.sh 100000
+  lane_shard_json "$tmp/s3.json" 3 5 tests/a.test.sh 100000
+  rc=0
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp/s1.json" "$tmp/s3.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a lane missing shards must refuse: $out"
+  assert_contains "$out" "missing [2, 4, 5]" "the refusal must name the shards it did not see"
+  rm -rf "$tmp"
+  pass "lane timing check refuses an input missing a shard"
+}
+
+test_portable_serial_hint_gap_is_reported_not_gated() {
+  local tmp out k
+  # A per-script gap is named because it is worth a human's attention, and
+  # gates nothing: re-packing the shards moved real scripts by up to 3.7x with
+  # their content untouched, so after a re-pack the gap is attribution moving
+  # between scripts rather than cost changing.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-gap.XXXXXX")
+  printf 'tests/a.test.sh 100000\ntests/b.test.sh 400000\n' >"$tmp/hints"
+  k=2
+  # The other four shards carry enough packed weight that the gap on shard 1
+  # cannot reach either lane bound, so only the reporting path is under test.
+  while [ "$k" -le 5 ]; do
+    lane_shard_json "$tmp/s.$k.json" "$k" 5 tests/b.test.sh 300000
+    k=$((k + 1))
+  done
+  # 200000 against a 100000 hint clears both the share and the absolute floor.
+  lane_shard_json "$tmp/s.1.json" 1 5 tests/a.test.sh 200000
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
+    "$tmp"/s.*.json 2>&1) \
+    || fail "a per-script gap must not decide the verdict: $out"
+  assert_contains "$out" "FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=200000" \
+    "the gap must still name the script"
+  assert_not_contains "$out" "FM_HINT_DRIFT tests/b.test.sh" "an unmoved script must not be named"
+  assert_contains "$out" "gating=no" "the summary must say the gap gates nothing"
+  rm -rf "$tmp"
+  pass "per-script hint gaps are reported and gate nothing"
 }
 
 test_portable_serial_hints_refresh_in_place() {
@@ -2177,7 +2284,10 @@ test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_budget_is_reported_and_bounded
 test_portable_serial_packing_follows_measured_timings
-test_portable_serial_hint_drift_guard
+test_portable_serial_lane_timing_shard_bound
+test_portable_serial_lane_timing_underprediction_bound
+test_portable_serial_lane_timing_refuses_partial_input
+test_portable_serial_hint_gap_is_reported_not_gated
 test_portable_serial_hints_refresh_in_place
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
