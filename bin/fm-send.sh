@@ -57,11 +57,15 @@
 # available, escalates after the bounded ladder, and instead routes a positively
 # dead or missing endpoint directly to recovery without typing. An explicit
 # fire-and-forget record is excluded from that ladder.
-# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
-# the composer visibly holds pending text the ring is skipped with a notice and
-# the watcher re-rings an ordinary record later; no composer verdict is
-# delivery proof on this plane, and a failed ring never fails the send.
+# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, the
+# re-ring ladder, and the composer states that ladder recovers from. The
+# composer pre-check before the ring is ADVISORY only: when the composer
+# visibly holds pending text the ring is skipped with a notice and the watcher
+# re-rings an ordinary record later; no composer verdict is delivery proof on
+# this plane, and a failed ring never fails the send. fm-send deliberately
+# does NOT pass the ring its idle assertion, so its ring never attempts the
+# ladder's own-doorbell recovery: this is the FIRST typing of this doorbell,
+# so composer text found here predates it and can never be ours to re-submit.
 #
 # TYPED - the LOCAL text that must reach the terminal itself: a harness-native
 # invocation (a leading "/", or a leading "$" to a codex target) must reach
@@ -1066,7 +1070,7 @@ else
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
-    4) echo "fm-send: doorbell typed but still sits unsent in $T's composer; the steer is durably recorded at $INBOX_RECORD, and the watcher reports the worker as unable to receive messages if that composer never clears" >&2 ;;
+    4) echo "fm-send: doorbell typed but still sits unsent in $T's composer; the steer is durably recorded at $INBOX_RECORD, the watcher re-presses Enter on it while it can prove the composer still holds exactly that doorbell, and it reports the worker as unable to receive messages if that never submits" >&2 ;;
     esac
     exit 0
   fi

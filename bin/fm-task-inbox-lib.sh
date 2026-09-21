@@ -28,14 +28,19 @@
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder:
-#                              "<msg>\t<count>\t<epoch>\t<stuck>\t<busy-since>",
+#                              "<msg>\t<count>\t<epoch>\t<stuck>\t<busy-since>\t<stuck-kind>",
 #                              where <stuck> counts the latest consecutive
 #                              attempts that found the composer holding unsent
-#                              text, and <busy-since> is the epoch at which the
+#                              text, <busy-since> is the epoch at which the
 #                              current unbroken run of busy observations started
-#                              (0 when the pane is not in one). A record written
-#                              before this field existed reads it as absent and
-#                              starts its busy run at the next busy observation.
+#                              (0 when the pane is not in one), and <stuck-kind>
+#                              names which stuck state the LATEST attempt found:
+#                              `own`, `other`, or `none` (not stuck). A record
+#                              written before a field existed reads it as
+#                              absent: the busy run starts at the next busy
+#                              observation, and the kind reads `other`, so an
+#                              older ladder can never reach the input-dead
+#                              escalation without a fresh positive proof.
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -60,13 +65,88 @@
 # its doorbell through fm_task_inbox_busy_action below, while a positively dead
 # or missing endpoint skips delivery and the ladder and escalates directly.
 # This library owns only the schedule and escalation marker.
-# When EVERY attempt of a spent budget found the composer provably holding
-# unsent text - skipped for it, or left with it after the submit - the
-# escalation is `stuck` rather than `escalate`: the agent is alive and idle
-# (the caller's checks), text sits in its composer that never submits, and
-# another doorbell would only queue behind it, so the worker cannot receive
-# messages until someone clears that composer. The ladder only names that
-# condition; it never interrupts or clears anything itself.
+# THE FOUR COMPOSER-HOLDS-TEXT STATES (task fm-doorbell-stuck-auto-recovery).
+# "Text sits unsent in the composer" is not one condition, and the fleet has
+# seen it resolve four different ways. They are separated from the OUTSIDE by
+# two readers that already exist - the semantic busy verdict the caller
+# supplies (bin/fm-busy-lib.sh) and the composer owner's own shape and
+# byte-identity proofs (bin/fm-composer-lib.sh) - never by a third reader of
+# our own:
+#
+#   A QUEUED BEHIND A LIVE TURN. The caller classifies the pane busy. The
+#     record is durable and the worker collects it at its own checkpoint, so
+#     nothing is typed, nothing is pressed, and no alarm fires inside the busy
+#     bound (fm_task_inbox_busy_action). Measured 2026-09-21: two instructions
+#     to a worker mid-validation, both picked up by the worker itself at the
+#     end of its turn. Interrupting a live pipeline run to hand over a message
+#     that was going to arrive anyway is a worse outcome than the defect, which
+#     is why the recovery below never fires without a positive `idle`.
+#   B OUR OWN DOORBELL, UNSENT, IN AN IDLE COMPOSER. The pane is positively
+#     idle and fm_composer_holds_text proves the composer holds EXACTLY the
+#     doorbell line this library typed: the Enter was swallowed, and another
+#     Enter submits it. fm_task_inbox_ring re-presses Enter on it through
+#     fm_backend_resubmit_own_text, which never retypes and never clears.
+#     Measured 2026-09-19 on fm-main-ci-intermittent-reds, where one Enter
+#     driven by hand through tmux cleared it.
+#   C CONTENT FIRSTMATE NEVER TYPED. The pane is idle and the composer reads
+#     `pending`, but every attempt of the budget found text already sitting
+#     there - firstmate typed nothing into this run. It is a worker's
+#     half-written command, the captain's own typing, or a shape no reader can
+#     prove (a bordered or left-bar composer). Nothing is typed and nothing is
+#     cleared, because that content is not ours to submit OR to discard -
+#     pressing Enter on someone's half-written command RUNS it - and a spent
+#     budget escalates as `stuck` for a human to look at.
+#   D OUR OWN DOORBELL WENT IN AND NEVER CAME OUT. The pane is idle, firstmate
+#     typed the doorbell into it, and it has not cleared since: either proven
+#     in the composer with Enter re-pressed and refused (state B that did not
+#     recover), or typed and simply left there, which is how claude's stranded
+#     message queue presents - the text visible with `ctrl+x ctrl+s to send
+#     now` above a separate `Press up to edit queued messages` row, held
+#     OUTSIDE the composer where no Enter reaches it. A spent budget escalates
+#     as `stuck-input`, and the recovery is a relaunch.
+#
+# WHY D IS NOT CLEARED, ONLY RELAUNCHED (measured, not assumed). No mechanism
+# reachable through the control plane both clears this state and preserves
+# content firstmate did not write:
+#   - The interrupt key does not clear it. Measured on two live workers:
+#     blu-3153-help-infra-h03 (2026-09-19) and fm-worker-cannot-patch-pr-body
+#     (2026-09-21), where the interrupt was DELIVERED and verified agent-alive
+#     and the composer still held its text; a second doorbell after it was
+#     refused identically, and only a relaunch recovered the worker. Three
+#     attempts across two incidents, no clear.
+#   - The plane's only composer-clear key is `C-u`, and
+#     bin/fm-control-lib.sh's fm_control_interrupt_clear_key declares it for
+#     muse alone, for a reason that does not generalise: muse RESTORES its own
+#     cancelled prompt, so the bytes C-u removes are muse's, never a human's.
+#     Sending it here would discard content firstmate did not write, and it is
+#     a line kill, so it would not reach a queue held off the input line
+#     anyway.
+#   - claude's own `ctrl+x ctrl+s` sends the queue rather than discarding it,
+#     but it sends EVERYTHING queued, including anything firstmate did not
+#     write, which submits someone else's half-written command on their
+#     behalf. It is also outside the control plane's key vocabulary, so it is
+#     recorded here as an observed affordance and deliberately not built on.
+# Relaunch is cheap and lossless by comparison: the worktree and commits
+# persist and the brief carries over, which both incidents confirmed.
+#
+# WHY D IS NOT DETECTED FROM THOSE TWO ROWS, though they are right there on
+# the pane: measured against the recorded live capture of that screen
+# (tests/fm-task-inbox.test.sh's claude_queued_capture, cited to
+# docs/verification/runtime-backends.md "Queued claude input"), BOTH rows
+# appear identically in the benign busy variant and the hard idle one, the
+# classifier returns `pending` for both, and the only difference anywhere on
+# the screen is the spinner row - the one thing that scrolls away or is simply
+# absent at capture time. Detection built on those rows would relaunch healthy
+# workers mid-turn. What separates the two is not on the screen at all: the
+# semantic busy verdict, and whether firstmate typed that doorbell into this
+# pane and it never cleared. Both are what this ladder uses instead.
+#
+# An unreadable busy verdict is state A, not state B: the ring re-presses
+# Enter only on the caller's exact `idle`, so "cannot tell" always waits.
+# `escalate` remains the verb for a budget whose attempts were not all stuck -
+# an ordinary unacknowledged instruction, with no composer story at all.
+# The ladder only names these conditions; it never interrupts, never clears,
+# and never relaunches anything itself.
 #
 # Busy panes (fm_task_inbox_busy_action): a busy pane is a reason to defer a
 # doorbell, never a reason to stop counting. Busy means "do not type into it
@@ -347,20 +427,36 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record), 4 rang but the composer still provably holds unsent text after the
-# submit on a pane not busy with a turn. 1 and 4 are the ladder's stuck-attempt
-# evidence (fm_task_inbox_record_ring). No return value is delivery proof; the
+# that is not provably ours (state C; the watcher re-rings later), 2 the
+# backend send failed, 3 skipped because the endpoint is positively dead or
+# missing (nothing typed; recovery owns the record), 4 rang but the composer
+# still provably holds unsent text after the submit on a pane not busy with a
+# turn, 5 the composer provably held OUR OWN doorbell and re-pressing Enter
+# did not submit it (state D evidence). 1, 4, and 5 are the ladder's
+# stuck-attempt evidence, and only 5 names the `own` kind
+# (fm_task_inbox_record_ring). No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
+# <pane-state> is the caller's SEMANTIC busy verdict for this endpoint
+# (bin/fm-busy-lib.sh), and only its exact value `idle` unlocks the state-B
+# recovery below; an absent, busy, unknown, or dead verdict defers.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+# On an exact `pending` with an idle pane, the deferral is preceded by ONE
+# recovery attempt: fm_backend_resubmit_own_text presses Enter again while,
+# and only while, the composer provably holds exactly the doorbell line
+# computed above. That proof is byte-identity, not shape, so foreign or merely
+# unprovable content answers `not-own`, sends nothing, and defers exactly as
+# it always did. Nothing on this path ever retypes, clears, or interrupts:
+# the recovery for a composer we did not fill is a human looking at it.
+# Every backend but tmux answers `not-own` today (bin/fm-backend.sh), so they
+# keep the previous behaviour unchanged rather than acting on an unprovable
+# screen.
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pane-state]
+  local backend=$1 target=$2 rec=$3 label=${4:-} pane_state=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -369,7 +465,19 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      # Pending text is only ever RE-SUBMITTED, never retyped and never
+      # cleared, and only on the caller's positive idle assertion. Every other
+      # pane state - busy, unknown, unasserted - defers exactly as before.
+      [ "$pane_state" = idle ] || return 1
+      case "$(fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 2>/dev/null || printf 'not-own')" in
+        empty) return 0 ;;
+        not-own) return 1 ;;
+        pending) return 5 ;;
+        send-failed) return 2 ;;
+        *) return 0 ;;
+      esac
+      ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
@@ -423,14 +531,21 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
 #   stuck <record-path> <count>      attempt budget spent and every attempt
-#                             found the composer holding unsent text; surface
-#                             as a worker that cannot receive messages
+#                             found text firstmate never typed (state C);
+#                             surface as a worker that cannot receive
+#                             messages, for a human to inspect rather than for
+#                             anything to clear
+#   stuck-input <record-path> <count>  the same spent budget, but firstmate's
+#                             own doorbell went into this pane and never
+#                             cleared (state D); surface as a worker that
+#                             cannot receive messages whose recovery is a
+#                             relaunch
 # The caller reaches this only for a pane it has not classified busy; a busy
 # pane goes to fm_task_inbox_busy_action instead.
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last stuck busy_since
+  local dir oldest base now grace max ladder rec_base count last stuck busy_since stuck_kind
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -447,8 +562,9 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   last=0
   stuck=0
   busy_since=0
+  stuck_kind=other
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since stuck_kind <<EOF
 $ladder
 EOF
   if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
@@ -460,6 +576,7 @@ EOF
     last=0
     stuck=0
     busy_since=0
+    stuck_kind=other
     rm -f "$dir/.escalated" 2>/dev/null || true
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
@@ -471,6 +588,9 @@ EOF
   # field, so dropping it would hand the busy epoch to `stuck` and silently
   # zero the composer-stuck count.
   case "$busy_since" in ''|*[!0-9]*) busy_since=0 ;; esac
+  # Only a positively recorded `own` claims input-dead; a ladder written
+  # before this field existed, or any other value, reads as `other`.
+  [ "$stuck_kind" = own ] || stuck_kind=other
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
     printf 'quiet'
     return 0
@@ -478,7 +598,11 @@ EOF
   max=$(fm_task_inbox_ring_max)
   if [ "$count" -ge "$max" ]; then
     if [ "$count" -gt 0 ] && [ "$stuck" -ge "$count" ]; then
-      printf 'stuck %s %s' "$oldest" "$count"
+      if [ "$stuck_kind" = own ]; then
+        printf 'stuck-input %s %s' "$oldest" "$count"
+      else
+        printf 'stuck %s %s' "$oldest" "$count"
+      fi
     else
       printf 'escalate %s %s' "$oldest" "$count"
     fi
@@ -495,37 +619,57 @@ EOF
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither an unreadable pane nor a
 # permanently blocked composer can retry silently forever. <stuck> is 1 when
-# the attempt found the composer holding unsent text (fm_task_inbox_ring's 1
-# or 4); it extends the consecutive stuck count, and any other attempt resets
-# it. An attempt also ends any busy run: the caller only attempts delivery on
+# the attempt found the composer holding unsent text (fm_task_inbox_ring's 1,
+# 4, or 5); it extends the consecutive stuck count, and any other attempt
+# resets it. <stuck-kind> is `own` when THIS attempt put firstmate's own
+# doorbell into the pane and it did not clear - a return of 4 (typed, still
+# there) or 5 (proven in the composer, Enter refused) - and `other` for a
+# return of 1, where the text was already there before firstmate typed
+# anything. The kind is STICKY across one stuck run and never downgrades,
+# because the later attempts of a run see only a composer they cannot prove;
+# the run's FIRST attempt is what knows whether the stuck text is ours. An attempt also ends any busy run: the caller only attempts delivery on
 # a pane it did not classify busy, so the run was broken by definition. A
 # positively dead or missing endpoint never enters the ladder: the watcher
 # escalates it directly. A concurrently removed inbox is a successful
 # no-op; otherwise failure means the caller must surface the unwritable ladder
 # while the record remains unhandled.
-fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [stuck]
-  local dir base ladder rec_base count last stuck busy_since
+fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [stuck] [stuck-kind]
+  local dir base ladder rec_base count last stuck busy_since stuck_kind
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
   stuck=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since stuck_kind <<EOF
 $ladder
 EOF
   if [ "$rec_base" != "$base" ]; then
     count=0
     stuck=0
+    stuck_kind=none
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$stuck" in ''|*[!0-9]*) stuck=0 ;; esac
   if [ "${4:-0}" = 1 ]; then
+    # STICKY within one stuck run: once firstmate's own doorbell has gone into
+    # this pane and not come out, later attempts that can only see unprovable
+    # text do not un-learn that. Without this, the live 2026-09-21 sequence -
+    # attempt 1 types it and it stays, attempts 2 and 3 find text they cannot
+    # prove - would forget by the third poll that the stuck text is ours.
+    if [ "$stuck" -gt 0 ] && [ "$stuck_kind" = own ]; then
+      :
+    elif [ "${5:-}" = own ]; then
+      stuck_kind=own
+    else
+      stuck_kind=other
+    fi
     stuck=$((stuck + 1))
   else
     stuck=0
+    stuck_kind=none
   fi
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\t%s\t0\n' "$base" "$((count + 1))" "$(date +%s)" "$stuck" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\t0\t%s\n' "$base" "$((count + 1))" "$(date +%s)" "$stuck" "$stuck_kind" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi
@@ -549,15 +693,16 @@ EOF
 # attempt, so counting busy polls as rings would spend the budget a later idle
 # pane needs, and the two escalations answer different questions.
 fm_task_inbox_busy_action() {  # <state-dir> <task-id> <record-path>
-  local dir base ladder rec_base count last stuck busy_since now elapsed max
+  local dir base ladder rec_base count last stuck busy_since stuck_kind now elapsed max
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
   last=0
   stuck=0
   busy_since=0
+  stuck_kind=none
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base count last stuck busy_since <<EOF
+  IFS=$(printf '\t') read -r rec_base count last stuck busy_since stuck_kind <<EOF
 $ladder
 EOF
   if [ "$rec_base" != "$base" ]; then
@@ -565,6 +710,7 @@ EOF
     last=0
     stuck=0
     busy_since=0
+    stuck_kind=none
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -573,7 +719,7 @@ EOF
   now=$(date +%s)
   [ "$busy_since" -gt 0 ] && [ "$busy_since" -le "$now" ] || busy_since=$now
   [ -d "$dir" ] || { printf 'quiet'; return 0; }
-  if ! { printf '%s\t%s\t%s\t%s\t%s\n' "$base" "$count" "$last" "$stuck" "$busy_since" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$base" "$count" "$last" "$stuck" "$busy_since" "${stuck_kind:-none}" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || { printf 'quiet'; return 0; }
     return 1
   fi

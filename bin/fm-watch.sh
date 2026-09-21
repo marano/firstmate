@@ -72,8 +72,16 @@
 #                          budget on an idle pane without an acknowledgement
 #   stale: <window> (worker cannot receive messages: ...)
 #                          every attempt of that budget found the live, idle
-#                          worker's composer holding unsent text, so no
-#                          doorbell could submit; reported, never cleared
+#                          worker's composer holding unsent text. Two shapes
+#                          share this lead because both stop a worker being
+#                          reachable, and the reason names which: text
+#                          firstmate never typed, which is reported and never
+#                          typed behind or cleared because it is someone
+#                          else's, or firstmate's own doorbell that went in
+#                          and never came out, which no available mechanism
+#                          clears and whose recovery is a relaunch
+#                          (bin/fm-task-inbox-lib.sh owns the state model and
+#                          the evidence for that boundary)
 #   stale: <window> (worker unreachable: ...)
 #                          the pane has been continuously busy past the
 #                          steering-inbox busy bound while an instruction
@@ -404,14 +412,16 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
-# the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
-# verdict returns 0: idle, unknown, and dead all return 1, so a converted
-# adapter whose semantic state is missing, malformed, stale, or unverified is
-# treated as not-provably-working and surfaces rather than being absorbed.
-# <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
-window_is_busy() {  # <window> <tail40>
+# window_busy_state: the task's SEMANTIC busy verdict - busy, idle, unknown, or
+# dead - through the busy-state contract (bin/fm-busy-lib.sh), with the
+# producing source dropped. <tail40> is the same bounded capture already read
+# for hashing and is consumed only by the Grok-scoped fallback inside the
+# contract.
+# Most callers only ask "is it busy" and use window_is_busy below. A caller
+# that must tell `idle` apart from `unknown` reads this verdict instead: the
+# steering-inbox recovery may press Enter only on a positive idle, so
+# collapsing the two would let it type into a pane nothing can read.
+window_busy_state() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
@@ -421,7 +431,16 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  printf '%s' "${verdict%% *}"
+}
+
+# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working. Only an
+# exact busy verdict returns 0: idle, unknown, and dead all return 1, so a
+# converted adapter whose semantic state is missing, malformed, stale, or
+# unverified is treated as not-provably-working and surfaces rather than being
+# absorbed.
+window_is_busy() {  # <window> <tail40>
+  [ "$(window_busy_state "$1" "$2")" = busy ]
 }
 
 window_kind() {
@@ -539,14 +558,14 @@ inbox_steer_unwritable_ladder() {  # <window> <task> <record>
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 ring_rc backend agent_state stuck
-  local busy_action busy_secs
+  local busy_action busy_secs busy_state stuck_kind
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
   rec=${action#* }
   count=
   case "$verb" in
-    escalate|stuck)
+    escalate|stuck|stuck-input)
       count=${rec##* }
       rec=${rec% *}
       ;;
@@ -560,7 +579,8 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  busy_state=$(window_busy_state "$w" "$tail40")
+  if [ "$busy_state" = busy ]; then
     # A busy pane is a reason to DEFER the doorbell, never a reason to stop
     # counting. This branch used to return unconditionally, which is why the
     # 2026-09-20 wedge was invisible: a worker held on a blocking permission
@@ -584,14 +604,24 @@ inbox_steer_check() {  # <window> <task>
   case "$verb" in
     ring)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      # busy_state is the ring's authority to attempt the own-doorbell
+      # recovery, so it is passed exactly as classified: only `idle` acts,
+      # and an `unknown` pane keeps deferring.
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$busy_state" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
       stuck=0
-      case "$ring_rc" in 1|4) stuck=1 ;; esac
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$stuck"; then
+      stuck_kind=none
+      case "$ring_rc" in
+        # 4 and 5 both mean firstmate's own doorbell went into this pane and
+        # did not clear; 1 means text was already there and firstmate typed
+        # nothing. That is the whole separator between a relaunch and a human.
+        4|5) stuck=1; stuck_kind=own ;;
+        1) stuck=1; stuck_kind=other ;;
+      esac
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$stuck" "$stuck_kind"; then
         inbox_steer_unwritable_ladder "$w" "$task" "$rec"
       fi
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
@@ -602,7 +632,11 @@ inbox_steer_check() {  # <window> <task>
       ;;
     stuck)
       inbox_steer_escalate "$w" "$task" "$rec" \
-        "stale: $w (worker cannot receive messages: its agent is alive and idle, but every one of $count doorbell attempts found its composer holding unsent text that never submits, so $rec never reached it and further doorbells would only queue behind that text; clear the composer, then re-send)"
+        "stale: $w (worker cannot receive messages: its agent is alive and idle, but every one of $count doorbell attempts found text already sitting in its composer that firstmate never typed, so nothing was typed behind it and nothing was cleared and $rec never reached it; look at the pane before touching it - that text is someone else's half-written command, and Enter would RUN it)"
+      ;;
+    stuck-input)
+      inbox_steer_escalate "$w" "$task" "$rec" \
+        "stale: $w (worker cannot receive messages: firstmate's own doorbell went into this idle pane and never cleared across $count attempts, so nothing further typed will reach it; measured twice live, an interrupt does not clear this state either, and relaunch is the recovery - bin/fm-control.sh <task-id> relaunch keeps the local copy, the commits, and $rec, which is still waiting)"
       ;;
   esac
 }
