@@ -902,6 +902,13 @@ marks=$1/marks
 obs=$1/obs
 : > "$marks/$$"
 sleep 0.3
+# A loaded runner can start the holders further apart than any fixed sleep, so
+# when the caller names how many must be present, wait for them (bounded).
+tries=0
+while [ "$(ls "$marks" | wc -l | tr -d ' ')" -lt "${GAUGE_WANT:-0}" ] && [ "$tries" -lt 200 ]; do
+  sleep 0.05
+  tries=$((tries + 1))
+done
 ls "$marks" | wc -l | tr -d ' ' > "$obs/$$"
 sleep 0.5
 rm -f "$marks/$$"
@@ -939,7 +946,7 @@ gauge_run() {  # <root> <jobs> [extra-args-before-the-command...]
 
 for n in 2 3; do
   GAUGE_ROOT=$(slot_root "gauge$n" "$n")
-  gauge_run "$GAUGE_ROOT" $((3 * n))
+  GAUGE_WANT=$n gauge_run "$GAUGE_ROOT" $((3 * n))
   [ "$GAUGE_MAX" -le "$n" ] \
     || fail "$GAUGE_MAX invocations held a slot at once under a count of $n"
   assert_equals "$n" "$GAUGE_MAX" \
