@@ -13,6 +13,8 @@ The audience classes have one placement purpose each:
 - `maintainer-verification` records repeatable evidence for an active guarantee and may include dates, versions, exact commands, and exact output.
 - `agent-runtime` is loaded or rendered as an operating contract for Firstmate agents rather than read as product documentation.
 
+`requiredOwnerPointers[].contains` keeps a trimmed `AGENTS.md` from rotting once a contract moves to its owner: it names the phrases the target must still state, so delegating a boundary fails loudly when the owner stops holding it.
+
 The knowledge-placement policy is owned by [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md).
 Task-specific chronology, delivery transcripts, temporary paths, branches, failed hypotheses, and one-off process identifiers stay in private task reports or PR evidence by default.
 Before removing that evidence from a tracked page, distill every unique current fact into its classified owner and retain a focused regression pointer.

@@ -76,6 +76,7 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 ## Compatibility and enforcement
 
 Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
+That review is owed to this repo's own tests and verification evidence, not to an upstream this fork no longer feeds, and it is never a reason to keep a second copy of an owner's contract in `AGENTS.md` for a capability no home runs.
 Mark an axis not applicable only after inspecting its integration surface, and update the corresponding verification evidence when behavior changes.
 
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.

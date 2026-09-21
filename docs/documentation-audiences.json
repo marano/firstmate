@@ -105,6 +105,85 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "docs/configuration.md",
+      "contains": [
+        "verified for crewmate and scout launches ONLY",
+        "`config/crew-harness` is a local, gitignored file",
+        "never later-task precedent by analogy",
+        "owns probe mechanics, cadence, and the report record",
+        "state/when/",
+        "## Spoken interface and captain inbox",
+        "## Grouping posture",
+        "## Trace context propagation",
+        "## Claude permission mode",
+        "## Backlog backend",
+        "## Stow pass horizon",
+        "## Turn-end pane-churn absorb",
+        "## Pi Calm preference",
+        "## Pi supervision branch model and effort"
+      ]
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "docs/pi-supervision-branch.md",
+      "contains": [
+        "STATUS OUTCOME BACKSTOP",
+        "is a recovered wake and is handled like one"
+      ]
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "docs/turnend-guard.md",
+      "contains": [
+        ".cursor-park-owner"
+      ]
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "bin/fm-check-register.sh",
+      "contains": [
+        "do not hand-compose an rm"
+      ]
+    },
+    {
+      "source": "AGENTS.md",
+      "target": "bin/fm-brief.sh",
+      "contains": [
+        "HARD SAFETY GATE",
+        "herdr-lab"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "docs/herdr-backend.md",
+      "contains": [
+        "config/herdr-presentation-spaces",
+        "never task ownership or lifecycle authority"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "docs/cmux-backend.md",
+      "contains": [
+        "does not overwrite an ambient password when the file is absent"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "docs/codex-app-backend.md",
+      "contains": [
+        "firstmate-codexapp"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "docs/orca-backend.md",
+      "contains": [
+        "firstmate-orca"
+      ]
     }
   ],
   "surfaces": [

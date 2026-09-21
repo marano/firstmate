@@ -226,6 +226,22 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             }
         if target not in source_text and target not in linked_targets:
             fail(f"required owner pointer missing: {source} -> {target}")
+        required_phrases = pointer.get("contains")
+        if required_phrases is None:
+            continue
+        required_phrases = list_of_strings(
+            required_phrases, f"requiredOwnerPointers[{index}].contains"
+        )
+        try:
+            target_text = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"owner-pointer target is unreadable {target}: {exc}")
+        for phrase in required_phrases:
+            if phrase not in target_text:
+                fail(
+                    f"owner pointer target does not state the boundary: "
+                    f"{target} is missing {phrase!r} required by {source}"
+                )
 
     checked_links = 0
     anchor_cache: dict[Path, set[str]] = {}
