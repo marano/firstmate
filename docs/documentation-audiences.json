@@ -116,7 +116,6 @@
         "owns probe mechanics, cadence, and the report record",
         "state/when/",
         "## Spoken interface and captain inbox",
-        "## Mail plane",
         "## Grouping posture",
         "## Trace context propagation",
         "## Claude permission mode",
@@ -607,75 +606,6 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
-    }
-  ],
-  "agentSkillPointers": {
-    "source": "AGENTS.md",
-    "skillsRoot": ".agents/skills",
-    "referenced": [
-      "afk",
-      "ahoy",
-      "ask",
-      "ask-user-authority",
-      "bootstrap-diagnostics",
-      "captain-hold-lifecycle",
-      "diagnostic-reasoning",
-      "firstmate-coding-guidelines",
-      "fmx-respond",
-      {
-        "name": "harness-adapters",
-        "contains": [
-          "Never dispatch a crewmate or secondmate on an unverified adapter.",
-          "verified only for crewmate and scout work, never a secondmate or primary"
-        ]
-      },
-      {
-        "name": "process-event-sources",
-        "contains": [
-          "condition->action"
-        ]
-      },
-      "project-management",
-      "quiet",
-      "quota-array-dispatch",
-      "secondmate-provisioning",
-      "stow",
-      "stuck-crewmate-recovery",
-      "updatefirstmate",
-      {
-        "name": "work-grouping",
-        "contains": [
-          "refusal from bin/fm-spawn.sh or bin/fm-promote.sh",
-          "idle-fleet wake"
-        ]
-      }
-    ],
-    "unreferenced": [
-      {
-        "name": "bearings",
-        "reason": "captain-invocable /bearings, surfaced by its own skill description rather than a section 13 trigger"
-      },
-      {
-        "name": "decision-hold-lifecycle",
-        "reason": "deprecated redirect stub kept for in-flight briefs; captain-hold-lifecycle carries the trigger"
-      },
-      {
-        "name": "firstmate-codexapp",
-        "reason": "Codex App is not an accepted runtime backend; its load trigger moved to the backend doc",
-        "via": "docs/codex-app-backend.md"
-      },
-      {
-        "name": "firstmate-orca",
-        "reason": "Orca is not a backend this fleet selects; its load trigger moved to the backend doc",
-        "via": "docs/orca-backend.md"
-      }
-    ]
-  },
-  "sizeBudgets": [
-    {
-      "path": "AGENTS.md",
-      "maxBytes": 77330,
-      "note": "Ceiling measured after the tier-1 unused-capability trim; every session of every fleet member pays this surface, so re-inflation must be a deliberate raise rather than drift."
     }
   ]
 }

@@ -1,7 +1,7 @@
 # Documentation audiences
 
 [`documentation-audiences.json`](documentation-audiences.json) is the machine-consumed classification owner for every maintained prose surface.
-`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, agent skill pointers, size budgets, and local link targets.
+`bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
 Audience metadata is centralized there rather than copied into front matter on every page.
 
 The audience classes have one placement purpose each:
@@ -13,10 +13,7 @@ The audience classes have one placement purpose each:
 - `maintainer-verification` records repeatable evidence for an active guarantee and may include dates, versions, exact commands, and exact output.
 - `agent-runtime` is loaded or rendered as an operating contract for Firstmate agents rather than read as product documentation.
 
-Three inventory fields keep a trimmed `AGENTS.md` from rotting once a contract moves to its owner.
-`requiredOwnerPointers[].contains` names the phrases the target must still state, so delegating a boundary fails loudly when the owner stops holding it.
-`agentSkillPointers` accounts for every agent-only skill exactly once: a skill `AGENTS.md` names must exist, and a skill it deliberately stopped naming records why, plus the surface that triggers it instead.
-`sizeBudgets` is a measured ceiling on an instruction surface every session pays for, so further trimming passes and only re-inflation fails.
+`requiredOwnerPointers[].contains` keeps a trimmed `AGENTS.md` from rotting once a contract moves to its owner: it names the phrases the target must still state, so delegating a boundary fails loudly when the owner stops holding it.
 
 The knowledge-placement policy is owned by [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md).
 Task-specific chronology, delivery transcripts, temporary paths, branches, failed hypotheses, and one-off process identifiers stay in private task reports or PR evidence by default.

@@ -103,6 +103,7 @@ state/               runtime records and signals; gitignored
   <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
   branch-* .lease-<task>  Pi supervision-branch outcome store, session records, wake-row claims, and per-task supervision leases; inert in a home with no outcome store; docs/pi-supervision-branch.md owns them and the drain's STATUS OUTCOME BACKSTOP recovery
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
+  .mail-seen .mail-woken .mail-retry .mail-retry-pos .mail-turn .mail-seen.lock  mail-plane cursor, journal, retry, and lock state; written only by bin/fm-mail.sh
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
