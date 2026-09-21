@@ -1114,9 +1114,9 @@ test_ship_and_scout_teach_reading_stored_text_as_data() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
-    assert_grep "gh api repos/<owner>/<repo>/pulls/<n> --jq .body" "$brief" \
+    assert_grep "gh api repos/<owner>/<repo>/pulls/<n> --template '{{.body}}'" "$brief" \
       "$kind brief did not tell workers how to read a PR body back as data"
-    assert_grep "One exception: gh-axi has no data-mode body read" "$brief" \
+    assert_grep 'gh-axi has no data mode for a stored body' "$brief" \
       "$kind brief did not name the data read as the explicit exception to the gh-axi rule"
     assert_grep "pr view --full" "$brief" \
       "$kind brief did not name pr view --full as rendered text"
@@ -1126,6 +1126,44 @@ test_ship_and_scout_teach_reading_stored_text_as_data() {
       "$kind brief did not forbid recovering a body by unescaping rendered output"
   done
   pass "fm-brief.sh: ship and scout scaffolds teach reading stored text as data"
+}
+
+# A worker that tried to prepend its findings to its own pull request body was
+# refused with "lacks permission for UpdatePullRequest" and stopped, reading it
+# as an account limit; the findings reached a file nobody reads. The account
+# was never the problem - gh resolves an unnamed call from the checkout's git
+# remotes, and this fleet's own checkout also carries an `upstream`, so the
+# edit reached a repository the account cannot write. The scaffold is the only
+# firstmate instruction surface a project worker reads, so it has to carry both
+# the repository-naming rule and what that refusal actually means, or the next
+# worker draws the same reasonable conclusion.
+# tests/fm-pr-body-write-live-e2e.test.sh proves the route this rule names
+# still works against a real repository.
+test_ship_and_scout_name_the_repository_on_github_calls() {
+  local home kind id brief
+  home="$TMP_ROOT/github-repo-scope-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-github-repo-scope-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep 'Name the repository on EVERY GitHub call' "$brief" \
+      "$kind brief did not require naming the repository on GitHub calls"
+    assert_grep 'resolves the repository' "$brief" \
+      "$kind brief did not explain that an unnamed call resolves from the checkout's remotes"
+    assert_grep 'lacks permission for UpdatePullRequest' "$brief" \
+      "$kind brief did not name the refusal a worker will actually see"
+    assert_grep 'NOT that your account lacks the right' "$brief" \
+      "$kind brief did not correct the reading that stops a worker"
+    assert_grep 'gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@<file>' "$brief" \
+      "$kind brief did not give workers a route that writes a PR body"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds name the repository and the write route"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -1313,6 +1351,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_oblige_declaring_a_self_launched_wait
 test_ship_and_scout_teach_reading_stored_text_as_data
+test_ship_and_scout_name_the_repository_on_github_calls
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

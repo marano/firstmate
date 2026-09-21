@@ -469,6 +469,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/pr-body-write.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },

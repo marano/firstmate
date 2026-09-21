@@ -447,6 +447,37 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
 EOF
 MUTEX_RULE=${MUTEX_RULE%$'\n'}
 
+# The GitHub rule, rendered into rule 3 of every ship and scout scaffold and
+# stated here exactly once so the two scaffolds cannot drift apart.
+# The repository-naming clause is not style: gh resolves an unnamed call from
+# the checkout's git remotes, so in a clone that also carries an `upstream` (or
+# any second GitHub remote) it can reach a DIFFERENT repository - reads return
+# that repository's data and writes are refused as a permissions error. A
+# worker lost three findings to exactly that refusal, reading it as an account
+# limit and stopping, which is why the rule names the refusal and says what it
+# actually means. The read and write forms are spelled out because gh-axi has
+# no data mode for a stored body in either direction.
+# docs/verification/pr-body-write.md holds the measured evidence, and
+# tests/fm-pr-body-write-live-e2e.test.sh is the guard that refreshes it.
+IFS= read -r -d '' GITHUB_RULE <<EOF || true
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Name the repository on EVERY GitHub call: \`-R <owner>/<repo>\` for gh-axi and gh, or the
+   \`repos/<owner>/<repo>/...\` path for \`gh api\`. A call that does not name it resolves the repository
+   from this checkout's git remotes, and a checkout carrying a second GitHub remote (an \`upstream\`, a
+   fork) can resolve to that one instead. Reads then quietly return another repository's data, and a
+   write is refused as \`lacks permission for UpdatePullRequest\`. That refusal means the call reached a
+   repository you cannot write, NOT that your account lacks the right: name the repository and retry
+   before reporting it as a blocker.
+   gh-axi has no data mode for a stored body, so use \`gh api\` for both directions:
+   read with \`gh api repos/<owner>/<repo>/pulls/<n> --template '{{.body}}' > <file>\`, which gives the
+   exact bytes (\`--jq .body\` appends a newline the body does not have, so a read-edit-write round trip
+   grows it every time), and write with
+   \`gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@<file>\`.
+   \`pr view --full\` and \`pr list --fields body\` output is rendered text - escaped and reflowed for
+   reading - never a source to recover a body from by unescaping it.
+EOF
+GITHUB_RULE=${GITHUB_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -469,10 +500,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
-   straight to a file with \`gh api repos/<owner>/<repo>/pulls/<n> --jq .body\`. Its \`pr view --full\` and \`pr list --fields body\`
-   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+$GITHUB_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -555,10 +583,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
-   One exception: gh-axi has no data-mode body read, so to get a PR body (or any stored text) back as data, read it
-   straight to a file with \`gh api repos/<owner>/<repo>/pulls/<n> --jq .body\`. Its \`pr view --full\` and \`pr list --fields body\`
-   output is rendered text - escaped and reflowed for reading - never a source to recover a body from by unescaping it.
+$GITHUB_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
