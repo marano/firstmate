@@ -1,0 +1,11 @@
+all default=     163 include-excluded=     219
+13
+explicit:
+tests/fm-backend-orca.test.sh
+      22
+lane:
+0
+     219
+typo:
+fm-test-run: --exclude-script 'tests/nope.test.sh' is not an existing script
+rc=2

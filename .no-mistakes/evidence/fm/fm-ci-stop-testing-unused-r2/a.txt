@@ -1,0 +1,32 @@
+## list
+family:secondmate	this home has never registered a secondmate. NOT because they pass: test
+family:real-herdr-gated	this home runs tmux, not Herdr; CI's Herdr job is switched off unl
+tests/fm-pi-watch-extension.test.sh	Pi is not used here. KNOWN STANDING RED (card fm-pi-wa
+tests/fm-calm-pi-extension.test.sh	Pi is not used here. Reddened main at f902a5ff ("Pi did
+tests/fm-pi-branch-extension.test.sh	Pi is not used here
+tests/fm-pi-branch-responsiveness-live-e2e.test.sh	Pi is not used here
+tests/fm-pi-primary-types.test.sh	Pi is not used here
+tests/fm-agy-harness.test.sh	agy harness is not used here
+tests/fm-send-agy-confirm.test.sh	agy harness is not used here
+tests/fm-muse-harness.test.sh	muse harness is not used here
+tests/fm-kimi-harness.test.sh	kimi harness is not used here
+tests/fm-rovo-harness.test.sh	rovo harness is not used here
+tests/fm-grok-harness.test.sh	grok harness is not used here
+tests/fm-omp-harness.test.sh	omp harness is not used here
+tests/fm-cursor-harness.test.sh	cursor harness is not used here
+tests/fm-cursor-primary.test.sh	cursor harness is not used here
+tests/fm-gemini-harness.test.sh	gemini harness is not used here
+tests/fm-backend-orca.test.sh	orca backend is not used here
+tests/fm-backend-zellij.test.sh	zellij backend is not used here
+tests/fm-backend-cmux.test.sh	cmux backend is not used here
+## coverage guard
+fm-test-run: unknown option: --coverage-guard
+## dry list --all
+18:#   fm-test-run.sh --list --all
+19:#   fm-test-run.sh --list --family <name>
+20:#   fm-test-run.sh --list --lane portable-parallel-1
+21:#   fm-test-run.sh --list-scheduled --family <name>
+22:#   fm-test-run.sh --list-scheduled --lane portable-parallel-1
+23:#   fm-test-run.sh --list-families
+24:#   fm-test-run.sh --list-concurrent-safe-families
+26:#   fm-test-run.sh --list-lanes

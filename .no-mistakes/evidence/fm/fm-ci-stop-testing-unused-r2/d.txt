@@ -1,0 +1,15 @@
+ok - default exclusions govern the default selection, stay runnable on demand, and are proved from the recorded run
+ok - hint refresh rewrites the table from measured timings
+ok - portable serial shard lanes refuse mismatched, out-of-range, and countless names
+ok - --jobs refuses non-proven / stateful selections
+ok - --jobs admits and schedules a family with a recorded concurrent proof
+ok - an unclassified new test stays serial while the proven residual family runs concurrently
+ok - a changed shared test fixture selects its readers while an unread tests/ path still refuses
+ok - a concurrent run starts the longest-hint script first
+ok - --per-script-timeout-secs turns a hung script into a bounded failure
+ok - a run that names no bound ends a stalled script at the 1800s default, names it, and moves on
+ok - a bounded script killed by a signal is recorded as that signal, not as a pass
+ok - --max-wall-ms fails an over-budget run and refuses a malformed budget
+ok - jobs scheduler runs proven scripts; failure propagates; non-proven refused
+ok - Herdr CI family-run step times out at 20 min under a 75 min job backstop
+ok - aggregate-json merges lane timing artifacts
