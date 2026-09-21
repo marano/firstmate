@@ -452,6 +452,15 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      # Serial shard balance rots as tests grow (docs/fm-test-portable-shards.md).
+      # On main only, so a single noisy PR run cannot red a branch; the artifact
+      # upload below still runs when this names a drifted script.
+      - name: Check serial shard hints against measured timings
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -eu
+          [ -f "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" ] || exit 0
+          bin/fm-test-run.sh --check-hint-drift "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json"
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4

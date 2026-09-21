@@ -53,9 +53,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-portable-serial-*` artifacts of six green CI runs on 2026-09-17: [35194455365](https://github.com/kunchenguid/firstmate/actions/runs/35194455365), [35196521232](https://github.com/kunchenguid/firstmate/actions/runs/35196521232), [35204720947](https://github.com/kunchenguid/firstmate/actions/runs/35204720947), [35209235740](https://github.com/kunchenguid/firstmate/actions/runs/35209235740), [35210040786](https://github.com/kunchenguid/firstmate/actions/runs/35210040786), and [35215053588](https://github.com/kunchenguid/firstmate/actions/runs/35215053588).
-All five serial shards completed in all six runs, so every hint comes from a completed artifact measurement rather than from a cancelled job's partial log.
-That covers 169 of the 170 current serial members with six samples each; `tests/fm-build-lock.test.sh` postdates those runs and carries no hint yet.
+The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-aggregate` artifacts of three green `main` runs, refreshed on 2026-09-21 with `--refresh-serial-hints`; the refresh refuses unless the inputs cover every hinted script, so no serial member is left unmeasured.
 Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
@@ -70,24 +68,15 @@ A stale hint that pushes a shard toward its job cap now reds the seconds-long co
 Refresh the hints under "When hints are refreshed" below rather than waiting for either bound to trip.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size, shard composition, and balance rather than a copied table.
-The refreshed hints pack all five shards at 1256037 ms, about 20.9 minutes, against the 1440000 ms per-shard budget.
+The hints refreshed on 2026-09-21 from three green `main` runs pack all five shards within 40 ms of 1276450 ms, about 21.3 minutes, against the 1440000 ms per-shard budget.
 That budget is derived from the job cap rather than chosen: shard 1 was killed at 30m15s from a 25.2-minute packed baseline, so a slow runner costs about 20% over the packed weight, and 30 minutes divided by that factor less the measured job setup rounds down to 24 minutes.
 Job setup is small enough to ignore in that arithmetic but not to assume: on run 35215053588 the whole shard-1 job spanned 25.21 minutes around a 25.00-minute suite step, so every step before and after the suite cost about 0.21 minutes together.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 708653 ms, is the floor for any shard count.
 It bounds the useful shard count at eight before the split stops buying anything.
 
-Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
-
-```sh
-for run in <run-id> <run-id> <run-id>; do
-  gh run download "$run" -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D "/tmp/fm-serial/$run"
-done
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/*.json \
-  | awk -F'\t' '$2 > m[$1] { m[$1] = $2 } END { for (p in m) print p, m[p] }' \
-  | LC_ALL=C sort
-bin/fm-test-run.sh --check-coverage
-```
+Refresh with `bin/fm-test-run.sh --refresh-serial-hints <timing.json...>` over the `fm-test-timing-aggregate` artifacts of several green `main` runs (`gh run download <run-id> -R <owner>/<repo> --name fm-test-timing-aggregate`); it rewrites the table with the slowest completed duration per script.
+`--derive-serial-hints` prints the same table without writing it.
 
 A timed-out shard uploads no artifact, so pick runs where every serial shard is green or the lane's slowest scripts go unmeasured in exactly the shard that needs them most.
 Measure native-Windows-only scripts through the focused Git Bash runner and retain that `duration_ms` separately, because the portable CI shards skip them.
@@ -98,6 +87,14 @@ A hint can only come from green CI runs that include the script at its new size,
 A refresh is therefore its own follow-up change, made from the timing artifacts of several green runs on `main`, rather than an obligation on the change that caused the growth.
 File it when a change adds scripts to a lane or grows a member materially, and whenever `--check-coverage` reports `serial_unhinted=` or `serial_max_ms=` approaching its bound; the guard's refusals remain the enforced backstop.
 Lint shard weights need no refresh: [`bin/fm-lint.sh`](../bin/fm-lint.sh) derives them from the source graph at run time.
+
+## Hint drift guard
+
+Hints go stale silently, so the aggregate job's "Check serial shard hints" step runs `bin/fm-test-run.sh --check-hint-drift` on every `main` push.
+It names each script whose measured duration differs from its hint by more than `PORTABLE_SERIAL_HINT_DRIFT_PERCENT` (50) and `PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS` (30000), and exits non-zero.
+The share is wide because one script's duration varies by up to about 55% between runs of the same code; a hint set refreshed from three green runs stays quiet against each of them.
+A red step is the signal to run the refresh above as its own follow-up change.
+The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 19.7 minutes) bounds CI end to end, so more serial shards buy nothing.
 
 ## Coverage guard
 
