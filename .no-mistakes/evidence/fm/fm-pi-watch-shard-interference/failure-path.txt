@@ -1,0 +1,2 @@
+not ok - OpenCode watch plugin must not treat external healthy output as an owned arm - turn-end guard was suppressed by an external healthy watcher: expected exit 0, got 1
+rc=1
