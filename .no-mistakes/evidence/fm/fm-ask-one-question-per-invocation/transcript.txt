@@ -1,0 +1,48 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 55492 for 21s running: bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate])
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - position 3 of 4 in line - held by pid 55492 for 1m20s running: bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate]
+fm-build-lock: still waiting 2m00s for the machine-wide build lock - position 3 of 4 in line - held by pid 55492 for 2m20s running: bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate]
+fm-build-lock: acquired the machine-wide build lock after 2m21s
+=== S1 ===
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh round-start
+round started: one picker call this invocation
+[exit 0]
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-a id-b
+presented: id-a id-b
+[exit 0]
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-captain-hold.sh answer id-a --decision-file $HOME_FX/s1/a-id-a.txt
+answered: id-a
+[exit 0]
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-captain-hold.sh answer id-b --decision-file $HOME_FX/s1/a-id-b.txt
+answered: id-b
+[exit 0]
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh inventory
+CAPTAIN CALLS (live):
+  id-c [(main)]: t id-c: pending
+[exit 0]
+$ $HOME_FX/s1 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-c
+fm-ask: refused - this /ask invocation's one picker call is gone (id-a id-b); a second one wedges supervision. Give him the rest in plain text this turn and say he can type /ask again for another round.
+[exit 7]
+=== S2 ===
+$ $HOME_FX/s2 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh round-start
+round started: one picker call this invocation
+[exit 0]
+$ $HOME_FX/s2 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-a
+presented: id-a
+[exit 0]
+$ $HOME_FX/s2 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-b
+fm-ask: refused - this /ask invocation's one picker call is gone (id-a); a second one wedges supervision. Give him the rest in plain text this turn and say he can type /ask again for another round.
+[exit 7]
+=== S3 ===
+$ $HOME_FX/s3 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh round-start
+round started: one picker call this invocation
+[exit 0]
+$ $HOME_FX/s3 /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-1 id-2 id-3 id-4
+presented: id-1 id-2 id-3 id-4
+[exit 0]
+$ $HOME_FX/s3b /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh round-start
+round started: one picker call this invocation
+[exit 0]
+$ $HOME_FX/s3b /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30N57XCQPXV18N9415FV4SK/bin/fm-ask.sh present id-1 id-2 id-3 id-4 id-5
+fm-ask: refused - 5 calls named but one picker call holds at most 4; present the 4 most impactful and give him the rest in plain text this turn.
+[exit 8]
+       0
