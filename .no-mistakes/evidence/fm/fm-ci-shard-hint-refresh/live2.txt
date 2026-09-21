@@ -1,0 +1,26 @@
+big=tests/fm-afk-contract.test.sh
+tests/fm-afk-contract.test.sh 900000
+shard 1 (measured): 1
+shard 2 (measured): 45
+shard 3 (measured): 45
+shard 4 (measured): 44
+shard 5 (measured): 44
+== drift (hint a=100000, tol 50% & floor 30000ms)
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=0
+inside measured=140000 rc=0
+refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)
+FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=200000
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=1
+outside measured=200000 rc=1
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=0
+edge measured=150000 rc=0
+refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)
+FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=160000
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=1
+justpast measured=160000 rc=1
+refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)
+FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=40000
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=1
+under measured=40000 rc=1
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=0
+slowerthanhint_small measured=60000 rc=0

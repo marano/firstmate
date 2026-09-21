@@ -1,0 +1,98 @@
+== inside
+FM_HINT_DRIFT_SUMMARY checked=0 drifted=0
+rc=0
+== outside
+FM_HINT_DRIFT_SUMMARY checked=0 drifted=0
+rc=0
+== refresh with 1-script input (copy)
+refusing to refresh: the inputs hold no passing portable-serial records
+rc=1
+table-unchanged
+== shards
+      33
+      37
+      37
+      36
+      36
+== pack follows timings
+tests/fm-afk-contract.test.sh
+members: tests/fm-afk-contract.test.sh tests/fm-afk-inject-e2e.test.sh
+== in
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=0
+rc=0
+== out
+refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)
+FM_HINT_DRIFT tests/fm-afk-contract.test.sh hint_ms=100000 measured_ms=200000
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=1
+rc=1
+== edge
+FM_HINT_DRIFT_SUMMARY checked=2 drifted=0
+rc=0
+before: shard of first 3 scripts
+shard1: tests/fm-watch-triage.test.sh tests/fm-sessionstart-nudge.test.sh tests/fm-secondmate-safety.test.sh 
+shard2: tests/fm-backlog-atomicity.test.sh tests/fm-teardown.test.sh tests/fm-backlog-handoff.test.sh 
+shard3: tests/fm-remote-secondmate-lifecycle-e2e.test.sh tests/fm-public-followup.test.sh tests/fm-wake-queue.test.sh 
+shard4: tests/fm-pr-check-security.test.sh tests/fm-secondmate-harness.test.sh tests/fm-bearings-snapshot.test.sh 
+shard5: tests/fm-procevent.test.sh tests/fm-session-start.test.sh tests/fm-spawn-dispatch-profile.test.sh 
+refusing to refresh: the inputs hold no passing portable-serial records
+refresh rc=1
+after (heavy = first 3 scripts, 600s each)
+fm-test-run: lane 'portable-serial-1of5' selected no tests
+fm-test-run: lane 'portable-serial-1of5' selected no tests
+shard1:        0 0heavy
+fm-test-run: lane 'portable-serial-2of5' selected no tests
+fm-test-run: lane 'portable-serial-2of5' selected no tests
+shard2:        0 0heavy
+fm-test-run: lane 'portable-serial-3of5' selected no tests
+fm-test-run: lane 'portable-serial-3of5' selected no tests
+shard3:        0 0heavy
+fm-test-run: lane 'portable-serial-4of5' selected no tests
+fm-test-run: lane 'portable-serial-4of5' selected no tests
+shard4:        0 0heavy
+fm-test-run: lane 'portable-serial-5of5' selected no tests
+fm-test-run: lane 'portable-serial-5of5' selected no tests
+shard5:        0 0heavy
+drift on refreshed copy:
+FM_HINT_DRIFT_SUMMARY checked=0 drifted=0
+rc=0
+drift on original vs skewed:
+FM_HINT_DRIFT_SUMMARY checked=0 drifted=0
+rc=
+== pack from measured timings (refresh a copy; heavy = 3 scripts at 600s)
+refresh rc=0
+fm-test-run: lane 'portable-serial-1of5' selected no tests
+fm-test-run: lane 'portable-serial-1of5' selected no tests
+shard1 size=       0 heavy=0
+fm-test-run: lane 'portable-serial-2of5' selected no tests
+fm-test-run: lane 'portable-serial-2of5' selected no tests
+shard2 size=       0 heavy=0
+fm-test-run: lane 'portable-serial-3of5' selected no tests
+fm-test-run: lane 'portable-serial-3of5' selected no tests
+shard3 size=       0 heavy=0
+fm-test-run: lane 'portable-serial-4of5' selected no tests
+fm-test-run: lane 'portable-serial-4of5' selected no tests
+shard4 size=       0 heavy=0
+fm-test-run: lane 'portable-serial-5of5' selected no tests
+fm-test-run: lane 'portable-serial-5of5' selected no tests
+shard5 size=       0 heavy=0
+drift on refreshed copy:
+FM_HINT_DRIFT_SUMMARY checked=179 drifted=0
+rc=0
+drift on original hints vs same timings:
+FM_HINT_DRIFT tests/fm-watcher-lock.test.sh hint_ms=95935 measured_ms=2000
+FM_HINT_DRIFT_SUMMARY checked=179 drifted=61
+rc=
+== pack from measured timings
+BEFORE:
+shard1 size=      33 heavy=0
+shard2 size=      37 heavy=2
+shard3 size=      37 heavy=0
+shard4 size=      36 heavy=1
+shard5 size=      36 heavy=0
+refresh rc=0
+AFTER:
+shard1 size=       1 heavy=1
+shard2 size=       1 heavy=1
+shard3 size=       1 heavy=1
+shard4 size=      88 heavy=0
+shard5 size=      88 heavy=0
