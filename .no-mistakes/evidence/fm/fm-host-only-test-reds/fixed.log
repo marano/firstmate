@@ -1,0 +1,96 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 39430 for 4m28s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/6/firstmate])
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - position 4 of 4 in line - held by pid 7326 for 8s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30YFD6CC4MS69SQB5NXS206]
+fm-build-lock: still waiting 2m00s for the machine-wide build lock - position 4 of 5 in line - held by pid 7326 for 1m08s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30YFD6CC4MS69SQB5NXS206]
+fm-build-lock: still waiting 3m00s for the machine-wide build lock - position 4 of 5 in line - held by pid 7326 for 2m08s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M30YFD6CC4MS69SQB5NXS206]
+fm-build-lock: still waiting 4m00s for the machine-wide build lock - position 2 of 3 in line - held by pid 19058 for 23s running: env PATH=/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-1-firstmate/02223380-28f2-42e9-befb-ba6357777e6e/scratchpad/shim32:/Users/marano/.local/share/mise/installs/node/24.18.1/bin:/Users/marano/.local/share/mise/installs/pnpm/11.18.0:/Users/marano/.local/share/mise/installs/go/1.26.5/bin:/Users/marano/.local/share/mise/installs/python/3.14.6/bin:/Users/marano/.local/share/mise/installs/java/oracle-26.0.2/bin:/Users/marano/.local/share/mise/installs/maven/3.9.16/apache-maven-3.9.16/bin:/Users/marano/.local/share/mise/installs/firebase/15.25.1:/Users/marano/.local/share/mise/installs/shellcheck/0.11.0/shellcheck-v0.11.0:/Users/marano/.local/share/mise/installs/actionlint/1.7.12:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/Users/marano/Library/pnpm:/Applications/iTerm.app/Contents/Resources/utilities:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin /bin/bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate]
+fm-build-lock: still waiting 5m00s for the machine-wide build lock - position 2 of 3 in line - held by pid 19058 for 1m23s running: env PATH=/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-1-firstmate/02223380-28f2-42e9-befb-ba6357777e6e/scratchpad/shim32:/Users/marano/.local/share/mise/installs/node/24.18.1/bin:/Users/marano/.local/share/mise/installs/pnpm/11.18.0:/Users/marano/.local/share/mise/installs/go/1.26.5/bin:/Users/marano/.local/share/mise/installs/python/3.14.6/bin:/Users/marano/.local/share/mise/installs/java/oracle-26.0.2/bin:/Users/marano/.local/share/mise/installs/maven/3.9.16/apache-maven-3.9.16/bin:/Users/marano/.local/share/mise/installs/firebase/15.25.1:/Users/marano/.local/share/mise/installs/shellcheck/0.11.0/shellcheck-v0.11.0:/Users/marano/.local/share/mise/installs/actionlint/1.7.12:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/Users/marano/Library/pnpm:/Applications/iTerm.app/Contents/Resources/utilities:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin /bin/bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate]
+fm-build-lock: still waiting 6m00s for the machine-wide build lock - position 2 of 3 in line - held by pid 19058 for 2m23s running: env PATH=/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-1-firstmate/02223380-28f2-42e9-befb-ba6357777e6e/scratchpad/shim32:/Users/marano/.local/share/mise/installs/node/24.18.1/bin:/Users/marano/.local/share/mise/installs/pnpm/11.18.0:/Users/marano/.local/share/mise/installs/go/1.26.5/bin:/Users/marano/.local/share/mise/installs/python/3.14.6/bin:/Users/marano/.local/share/mise/installs/java/oracle-26.0.2/bin:/Users/marano/.local/share/mise/installs/maven/3.9.16/apache-maven-3.9.16/bin:/Users/marano/.local/share/mise/installs/firebase/15.25.1:/Users/marano/.local/share/mise/installs/shellcheck/0.11.0/shellcheck-v0.11.0:/Users/marano/.local/share/mise/installs/actionlint/1.7.12:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Users/marano/.local/bin:/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/opt/node@18/bin:/Users/marano/.local/share/mise/shims:/opt/homebrew/bin:/opt/homebrew/sbin:/Users/marano/Library/pnpm:/Applications/iTerm.app/Contents/Resources/utilities:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/go/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/022b3c274938/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/playwright/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/slack/1.3.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/linear/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/context7/c447c3207a42/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/sentry/1.4.0/bin:/Users/marano/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/bin:/Users/marano/.claude/plugins/cache/impeccable/impeccable/4.1.3/bin /bin/bash tests/fm-build-lock.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/1/firstmate]
+fm-build-lock: acquired the machine-wide build lock after 6m37s
+ok - local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed
+ok - teardown closes its own backlog item before reporting success
+ok - teardown honors config/backlog-backend=manual and still finishes cleanly
+ok - local-only worktree with truly unpushed work is refused (safety preserved)
+ok - local-only worktree with work merged into local main is torn down (no regression)
+ok - no-mistakes worktree with HEAD on origin is torn down (no regression)
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - local-only worktree with unpushed work is torn down under --force (escape hatch)
+ok - fm-pr-check publishes the PR-ready line on a secondmate's parent channel once
+ok - a secondmate home's teardown delivers the child's final line or refuses until it can
+ok - teardown completes when an exact busy-state sidecar is already absent
+ok - herdr teardown removes pane-owned escalation dedupe state
+ok - herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly
+ok - herdr flat teardown never erases records when pane presence is unparseable
+ok - herdr flat teardown preflight refuses before every destructive change
+ok - forced secondmate teardown preflights every Herdr child before cleanup mutation
+ok - forced secondmate teardown holds every descendant lifecycle and metadata lock
+ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
+ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
+ok - herdr projection teardown retires its journal only after confirming the exact recorded pane is gone
+ok - herdr projection teardown retains every record when post-close presence is unknown
+ok - herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure
+ok - squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)
+ok - squash-merged PR accepts a local HEAD that is an ancestor of the final PR head
+ok - teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded
+ok - squash-merged PR accepts replayed unpushed local patches contained in the PR head
+ok - merged PR does not allow teardown after a later local commit
+ok - squash-merged task whose local branch followed the pipeline rebase is torn down
+ok - squash-merged same-path different content still refuses
+ok - squash-merged rebased local still refuses a genuinely unlanded follow-up commit
+ok - squash-merged stale local still refuses when the forge is unreachable
+ok - fm-pr-check does not refresh PR head after HEAD moves
+ok - fm-pr-check records the remote PR head when the local worktree lags
+ok - worktree whose content already landed in the default branch is torn down (content fallback)
+ok - cleanup refuses unlanded work on any branch this task checked out, and only on those
+ok - content fallback refreshes origin default before comparing trees
+ok - dirty worktree is refused even when its committed work has landed (dirty always wins)
+ok - gh lookup error with content not in default refuses (fail-safe)
+ok - a record predating spawn_gen refuses teardown until --legacy-record is passed
+ok - a landed legacy record with a dead endpoint tears down and logs its accepted incarnation
+ok - --legacy-record never relaxes the unlanded-work refusal
+ok - an endpoint that cannot be confidently read as dead refuses --legacy-record teardown
+ok - --legacy-record teardown rolls its stamp back when the close marker write fails
+ok - a legacy stamp a failed rollback left behind still faces the endpoint gate
+ok - a corrupt spawn_gen is never accepted as a legacy record
+ok - provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds
+ok - live-held worktree index.lock is never removed and teardown refuses
+ok - lsof errors leave worktree index.lock in place and refuse teardown
+ok - stale lock cleanup rechecks and refuses dirty worktree before return
+ok - normal repo index.lock is resolved from the worktree and cleared when stale
+ok - index-lock mtime fault injection is PATH-based; skipped on Darwin where stat is /usr/bin/stat
+ok - transient index.lock cleared after first failed return is retried successfully without force-remove
+ok - persistent index.lock exhausts retries and refuses without force-removing the lock
+ok - empty retry wait overrides use the default without aborting teardown
+ok - fractional legacy retry wait remains supported without arithmetic
+ok - a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed
+ok - a parked run the pipeline advanced past the task copy is still concluded from the runs ledger, not orphaned
+ok - a ledger row for a different head never authorizes a parked-run abort
+ok - a malformed ledger row never authorizes a parked-run abort
+ok - an impossible ledger date never authorizes a parked-run abort
+ok - a terminal status with a stale gate never reaches ledger cleanup
+ok - an advanced head present locally aborts through the strict rule alone - the ledger fallback stays dormant
+ok - an unresolvable active row with no same-branch anchor is never concluded (conservative refusal)
+ok - an ancestor-only anchor never binds an advanced parked run to this task
+ok - a terminal unfetched-head row is stale history and never concludes a run
+ok - a terminal newest row anchored at this worktree's head never authorizes an abort
+ok - a resolvable diverged newer same-branch row makes every older row stale history; no run is concluded
+ok - consecutive unresolvable rows are ambiguous and never conclude a run
+ok - a ledger-proven continuation is still left alone while the run is autonomously active
+ok - teardown refuses before reap or removal when a task-owned run remains parked
+ok - a different run cannot confirm the targeted abort
+ok - empty post-abort status is not accepted as confirmation
+ok - the CLI's exact run-not-found signal confirms completion
+ok - a parked run on another branch is never aborted by this task's teardown (ownership is precise)
+ok - a task-owned autonomous running step is left alone rather than aborted
+ok - a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving
+ok - a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too
+ok - missing lsof falls back to reaping the tmux pane process group
+ok - an erroring lsof scan refuses teardown and preserves the task
+ok - a reused pid with a different start time is never force-killed
+ok - an exec change preserves birth identity and the process is reaped
+ok - a process spawned during grace is reaped on a later pass
+ok - persistent leaked processes refuse teardown after bounded retries
+ok - a process exiting during identity lookup does not block teardown
+ok - the run abort and the leaked-process reap both complete before the destructive worktree return
+ok - teardown requeues a task whose copy never left the default branch
+ok - teardown closes pushed work even when its worker left no status line
+exit=0

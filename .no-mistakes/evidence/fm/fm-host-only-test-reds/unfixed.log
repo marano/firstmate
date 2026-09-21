@@ -1,0 +1,27 @@
+fm-build-lock: waiting for the machine-wide build lock - this process is WAITING, not wedged (held by pid 4343 for 3s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate])
+fm-build-lock: still waiting 1m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 4343 for 1m03s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 2m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 4343 for 2m03s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 3m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 4343 for 3m03s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 4m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 4343 for 4m03s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: still waiting 5m00s for the machine-wide build lock - position 3 of 3 in line - held by pid 4343 for 5m03s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: WARNING: still WAITING 21m31s for the machine-wide build lock, past the 600s ceiling - held by pid 4343 for 21m34s running: bash tests/fm-pr-merge.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]
+fm-build-lock: WARNING: the holder has held the build lock 21m34s, past the 1200s ceiling; it is not being killed
+fm-build-lock: WARNING: still WAITING 38m19s for the machine-wide build lock, past the 600s ceiling - held by pid 31848 for 16m13s running: bash tests/fm-build-lock.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M310A3NTV035VSP0R1967MTV]
+fm-build-lock: WARNING: still WAITING 39m19s for the machine-wide build lock, past the 600s ceiling - position 1 of 2 in line - held by pid 73566 for 20s running: bin/fm-test-run.sh tests/fm-afk-contract.test.sh [in /Users/marano/.treehouse/firstmate-7077c2/6/firstmate]
+fm-build-lock: acquired the machine-wide build lock after 39m21s
+ok - local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed
+ok - teardown closes its own backlog item before reporting success
+ok - teardown honors config/backlog-backend=manual and still finishes cleanly
+ok - local-only worktree with truly unpushed work is refused (safety preserved)
+ok - local-only worktree with work merged into local main is torn down (no regression)
+ok - no-mistakes worktree with HEAD on origin is torn down (no regression)
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - local-only worktree with unpushed work is torn down under --force (escape hatch)
+ok - fm-pr-check publishes the PR-ready line on a secondmate's parent channel once
+ok - a secondmate home's teardown delivers the child's final line or refuses until it can
+ok - teardown completes when an exact busy-state sidecar is already absent
+ok - herdr teardown removes pane-owned escalation dedupe state
+ok - herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly
+ok - herdr flat teardown never erases records when pane presence is unparseable
+not ok - herdr-preflight-missing-adapter: teardown continued without its required preflight
+exit=1
