@@ -1287,7 +1287,14 @@ test_portable_serial_hints_refresh_in_place() {
   # The refresh owner rewrites the table in a copy of the runner and the copy's
   # own drift check then passes against the same timings.
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-refresh.XXXXXX")
-  printf '{"selection":"lane=portable-serial-1of5","scripts":[{"path":"tests/zz-refresh.test.sh","duration_ms":77777,"exit":0}]}' >"$tmp/t.json"
+  # Measurements must cover at least half the table or the refresh refuses, so
+  # feed every member except the triage script plus one new script.
+  "$RUNNER" --lane portable-serial --list | grep -vxF tests/fm-watch-triage.test.sh | python3 -c '
+import json, sys
+rows = [{"path": p, "duration_ms": 5000, "exit": 0} for p in sys.stdin.read().split()]
+rows.append({"path": "tests/zz-refresh.test.sh", "duration_ms": 77777, "exit": 0})
+json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(sys.argv[1], "w"))
+' "$tmp/t.json"
   cp "$RUNNER" "$tmp/fm-test-run.sh"
   "$tmp/fm-test-run.sh" --refresh-serial-hints "$tmp/t.json" >/dev/null || fail "refresh must succeed"
   assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE="" "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
