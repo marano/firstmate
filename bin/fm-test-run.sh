@@ -1484,7 +1484,8 @@ serial_hints_from_timing() {
   local cur
   cur=$(mktemp "${TMPDIR:-/tmp}/fm-test-hints.XXXXXX") || return 1
   portable_serial_weight_hints >"$cur"
-  python3 - "$mode" "$cur" "$0" "$PORTABLE_SERIAL_HINT_DRIFT_PERCENT" "$PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS" "$@" <<'PY'
+  local rc=0
+  python3 - "$mode" "$cur" "$0" "$PORTABLE_SERIAL_HINT_DRIFT_PERCENT" "$PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS" "$@" <<'PY' || rc=$?
 import json, re, sys
 from pathlib import Path
 
@@ -1503,6 +1504,11 @@ table = "".join(f"{p} {ms}\n" for p, ms in sorted(measured.items()))
 if mode == "derive":
     sys.stdout.write(table)
 elif mode == "refresh":
+    current = [l for l in Path(cur_path).read_text(encoding="utf-8").split("\n") if len(l.split()) == 2]
+    if not measured:
+        sys.exit("refusing to refresh: the inputs hold no passing portable-serial records")
+    if len(measured) * 2 < len(current):
+        sys.exit(f"refusing to refresh: inputs cover {len(measured)} scripts but the table has {len(current)}")
     src = Path(self_path)
     text = src.read_text(encoding="utf-8")
     pat = re.compile(r"(portable_serial_weight_hints\(\) \{\n(?:  if .*?\n  fi\n)?  cat <<'EOF'\n).*?(^EOF\n)", re.S | re.M)
@@ -1530,7 +1536,6 @@ else:
         print("refresh with: bin/fm-test-run.sh --refresh-serial-hints <timing.json...> (docs/fm-test-portable-shards.md)", file=sys.stderr)
         sys.exit(1)
 PY
-  local rc=$?
   rm -f "$cur"
   return "$rc"
 }
