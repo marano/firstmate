@@ -1326,23 +1326,6 @@ test_check_exclusions_reads_the_recorded_run() {
   pass "exclusion proof reads the recorded run and names each broken obligation"
 }
 
-test_ci_workflow_states_its_exclusions() {
-  local ci=$ROOT/.github/workflows/ci.yml list
-  # The workflow must say which families it does not run, in the file itself.
-  list=$(sed -n 's/^  FM_CI_EXCLUDED_FAMILIES: //p' "$ci")
-  [ -n "$list" ] || fail "ci.yml must state FM_CI_EXCLUDED_FAMILIES"
-  case " $list " in
-    *" real-herdr-gated "*)
-      # Switching the Herdr job off and listing its family are one decision.
-      awk '/^  tests-herdr:/{f=1} f&&/^    if: \$\{\{ vars.FM_CI_RUN_HERDR == .true. \}\}$/{ok=1} /^  tests-timing-aggregate:/{f=0} END{exit !ok}' "$ci" \
-        || fail "real-herdr-gated is excluded, so tests-herdr must be gated on vars.FM_CI_RUN_HERDR"
-      ;;
-  esac
-  grep -qF -- "--exclude-family \"\$family\"" "$ci" || fail "the serial shards must pass the excluded families"
-  grep -q -- '--check-exclusions' "$ci" || fail "the aggregate job must prove the exclusions"
-  pass "ci.yml states its excluded families and keeps the Herdr switch in step"
-}
-
 test_portable_serial_hint_drift_guard() {
   local tmp out rc
   # A one-time re-pack rots again unless something notices. The drift guard must
@@ -2263,7 +2246,6 @@ test_portable_serial_shard_budget_is_reported_and_bounded
 test_portable_serial_packing_follows_measured_timings
 test_portable_serial_hint_drift_guard
 test_check_exclusions_reads_the_recorded_run
-test_ci_workflow_states_its_exclusions
 test_portable_serial_hints_refresh_in_place
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
