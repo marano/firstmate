@@ -256,7 +256,9 @@ test_family_map_labels_this_contract() {
 
 test_parallel_shards_consume_the_proven_set() {
   local proven shards
-  proven=$("$PROOF" --list | LC_ALL=C sort -u)
+  # Scripts the runner excludes by default are proven isolated but no lane
+  # schedules them, so they are not part of what the shards must cover.
+  proven=$("$PROOF" --list | grep -vxFf <("$RUNNER" --list-default-exclusions | cut -f1) | LC_ALL=C sort -u)
   shards=$(
     {
       "$RUNNER" --list --lane portable-parallel-1
