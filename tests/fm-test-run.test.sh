@@ -1225,6 +1225,78 @@ test_portable_serial_shard_budget_is_reported_and_bounded() {
   pass "coverage guard reports and bounds the heaviest portable serial shard"
 }
 
+test_portable_serial_packing_follows_measured_timings() {
+  local tmp big k out members
+  # The shard packing must come from measured durations, not from whatever the
+  # committed table happened to say. Feed timings in which one member dwarfs the
+  # rest: the correct packing seats it alone in its own shard, which the committed
+  # hints do not do, so a packer that ignores its hints (or the measurement they
+  # are derived from) leaves the giant sharing a shard with other work.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pack.XXXXXX")
+  members=$("$RUNNER" --lane portable-serial --list)
+  big=$(printf '%s\n' "$members" | sed -n 1p)
+  printf '%s\n' "$members" | python3 -c '
+import json, sys
+out, big = sys.argv[1:3]
+rows = [{"path": p, "duration_ms": 900000 if p == big else 1000, "exit": 0} for p in sys.stdin.read().split()]
+json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(out, "w"))
+' "$tmp/t.json" "$big"
+  "$RUNNER" --derive-serial-hints "$tmp/t.json" >"$tmp/hints"
+  assert_contains "$(cat "$tmp/hints")" "$big 900000" "derived hints must carry the measured duration"
+  k=1
+  while [ "$k" -le 5 ]; do
+    out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --lane "portable-serial-${k}of5" --list)
+    if printf '%s\n' "$out" | grep -qxF "$big"; then
+      [ "$(printf '%s\n' "$out" | grep -c .)" -eq 1 ] \
+        || fail "measured packing must seat the dominant script alone; shard $k holds $(printf '%s\n' "$out" | grep -c .)"
+      rm -rf "$tmp"
+      pass "serial shard packing follows measured timings"
+      return
+    fi
+    k=$((k + 1))
+  done
+  rm -rf "$tmp"
+  fail "dominant script landed in no serial shard"
+}
+
+test_portable_serial_hint_drift_guard() {
+  local tmp out rc
+  # A one-time re-pack rots again unless something notices. The drift guard must
+  # name a script whose measured duration leaves its hint by more than the
+  # tolerance, and stay silent inside it and below the absolute floor.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-drift.XXXXXX")
+  printf 'tests/a.test.sh 100000\ntests/b.test.sh 1000\n' >"$tmp/hints"
+  mk() {
+    printf '{"selection":"lane=portable-serial-1of5","scripts":[{"path":"tests/a.test.sh","duration_ms":%s,"exit":0},{"path":"tests/b.test.sh","duration_ms":%s,"exit":0}]}' "$1" "$2" >"$tmp/$3.json"
+  }
+  mk 140000 20000 inside
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-hint-drift "$tmp/inside.json" 2>&1) \
+    || fail "drift inside the tolerance (and small scripts under the floor) must not fire: $out"
+  mk 200000 1000 outside
+  rc=0
+  out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-hint-drift "$tmp/outside.json" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "drift past the tolerance must exit non-zero: $out"
+  assert_contains "$out" "FM_HINT_DRIFT tests/a.test.sh hint_ms=100000 measured_ms=200000" "drift must name the script"
+  assert_not_contains "$out" "FM_HINT_DRIFT tests/b.test.sh" "an unmoved script must not be named"
+  rm -rf "$tmp"
+  pass "hint drift guard fires past the tolerance and not inside it"
+}
+
+test_portable_serial_hints_refresh_in_place() {
+  local tmp
+  # The refresh owner rewrites the table in a copy of the runner and the copy's
+  # own drift check then passes against the same timings.
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-refresh.XXXXXX")
+  printf '{"selection":"lane=portable-serial-1of5","scripts":[{"path":"tests/zz-refresh.test.sh","duration_ms":77777,"exit":0}]}' >"$tmp/t.json"
+  cp "$RUNNER" "$tmp/fm-test-run.sh"
+  "$tmp/fm-test-run.sh" --refresh-serial-hints "$tmp/t.json" >/dev/null || fail "refresh must succeed"
+  assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE= "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
+  grep -qx 'tests/zz-refresh.test.sh 77777' "$tmp/fm-test-run.sh" || fail "refresh must write the measured hint into the table"
+  ! grep -q '^tests/fm-watch-triage.test.sh [0-9]*$' "$tmp/fm-test-run.sh" || fail "refresh must replace the whole table"
+  rm -rf "$tmp"
+  pass "hint refresh rewrites the table from measured timings"
+}
+
 test_portable_serial_shard_lane_refusals() {
   local tmp count rc other
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-shard-lane.XXXXXX")
@@ -2097,6 +2169,9 @@ test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_budget_is_reported_and_bounded
+test_portable_serial_packing_follows_measured_timings
+test_portable_serial_hint_drift_guard
+test_portable_serial_hints_refresh_in_place
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
