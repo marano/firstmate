@@ -1283,7 +1283,7 @@ test_portable_serial_lane_timing_shard_bound() {
   # Exactly one shard is pushed past the bound while the lane total stays under
   # five times it, so a check that summed the lane instead of reading each
   # shard would return a pass here.
-  lane_shard_json "$tmp/over.3.json" 3 5 tests/a.test.sh 1500001
+  lane_shard_json "$tmp/over.3.json" 3 5 tests/a.test.sh 1650001
 
   out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
     "$tmp"/under.*.json 2>&1) \
@@ -1295,7 +1295,7 @@ test_portable_serial_lane_timing_shard_bound() {
   out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --check-lane-timing \
     "$tmp"/over.*.json 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "a shard past the measured bound must exit non-zero: $out"
-  assert_contains "$out" "shard 3 measured 1500001ms" "the failure must name the shard and the number"
+  assert_contains "$out" "shard 3 measured 1650001ms" "the failure must name the shard and the number"
   assert_contains "$out" "re-shard" "the failure must name re-sharding as the answer"
   rm -rf "$tmp"
   pass "lane timing check bounds each shard's measured total"

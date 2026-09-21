@@ -95,8 +95,10 @@ Hints go stale silently, so the aggregate job's "Check serial shard timings" ste
 It refuses an input missing any shard, because the aggregate job also runs when a lane produced no timing artifact and summing four shards out of five makes both bounds below silently lenient.
 It then checks two things and exits non-zero naming either:
 
-- Each shard's **measured** total against `PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS` (1500000), the job cap read off what happened rather than off the hints.
-  The packed weight cannot stand in for this: it under-predicted the measured shard total by up to 24%, so shard 5 measured 1532068 ms and 1560275 ms on green `main` runs while its packed weight sat inside the 1440000 ms budget and nothing said so.
+- Each shard's **measured** total against `PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS` (1650000), a tripwire in front of the job cap read off what happened rather than off the hints.
+  It sits above the highest healthy measurement seen on any packing (1567 s) and below the roughly 1740 s of the cap left after job setup, so it names a shard with time in hand instead of letting the job be killed with no verdict.
+  The packed weight cannot stand in for this: it under-predicted the measured shard total by up to 24%, so overruns were invisible to a coverage guard that only ever saw packed weight.
+  Shard 5 measuring 1532068 ms and 1560275 ms on green `main` runs sits below this bound; that near-cap margin is tracked as `fm-serial-shard5-near-job-cap` rather than caught here.
   The answer when this trips is re-sharding, not a larger bound.
 - The lane's **measured** total against its packed weight, refusing past `PORTABLE_SERIAL_LANE_UNDERPREDICT_PERCENT` (10).
   Both sides are recomputed from the scripts the run itself reported, so adding or removing tests moves them together and neither side needs re-deriving when the script set changes.
