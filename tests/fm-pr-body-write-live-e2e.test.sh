@@ -56,7 +56,8 @@ case "$NWO" in
   *) fail "could not read an <owner>/<repo> out of origin ($ORIGIN_URL)" ;;
 esac
 
-PR=$(gh pr list --repo "$NWO" --state merged --limit 1 --json number --jq '.[0].number' 2>&1) \
+PR=$(gh pr list --repo "$NWO" --state merged --limit 30 --json number,body \
+  --jq 'map(select((.body // "") != "")) | .[0].number' 2>&1) \
   || fail "could not list merged pull requests on $NWO: $PR"
 case "$PR" in
   '' | null) fail "no merged pull request on $NWO to exercise the PR-body write route against" ;;
