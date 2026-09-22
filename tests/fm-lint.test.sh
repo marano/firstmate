@@ -464,6 +464,8 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
+  assert_contains "$out" "NOT EVALUATED HERE: SC1091 SC2034 SC2153 SC2329" \
+    "zero-changed run did not name the rules it skipped"
   assert_contains "$out" "workflow files valid" \
     "zero-changed run skipped workflow YAML validation"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
@@ -669,7 +671,7 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
     pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
     return
   fi
-  local tmp fakebin diff_file fixture out rc
+  local tmp fakebin diff_file fixture out rc findings
   tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
   fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
   printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
@@ -699,8 +701,13 @@ SH
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] \
     || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
-  assert_not_contains "$out" "SC2034" "changed-mode local lint still reported SC2034"
-  assert_not_contains "$out" "SC2329" "changed-mode local lint still reported SC2329"
+  # The disclosure line names the excluded codes on purpose; only a finding
+  # (any other line) mentioning them would mean the exclusion leaked.
+  findings=$(printf '%s\n' "$out" | grep -v 'NOT EVALUATED HERE' || true)
+  assert_not_contains "$findings" "SC2034" "changed-mode local lint still reported SC2034"
+  assert_not_contains "$findings" "SC2329" "changed-mode local lint still reported SC2329"
+  assert_contains "$out" "NOT EVALUATED HERE: SC1091 SC2034 SC2153 SC2329" \
+    "changed-mode local lint did not name the rules it skipped, so its green hides the CI gap"
 
   rc=0
   out=$("$LINT" "$fixture" 2>&1) || rc=$?

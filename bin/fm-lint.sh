@@ -12,7 +12,11 @@
 # (changed-file mode, including the no-mistakes lint step) drops
 # --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
 # and SC2329, the codes that need library context. Those codes still run in
-# CI over the whole set. Explicit paths keep --external-sources with the
+# CI over the whole set, and every changed-file run prints a line naming them
+# as not evaluated. Running them locally was measured at 14m54s wall (two
+# workers, 419 roots, ShellCheck 0.11.0, Apple M-series 10 cores) against
+# seconds for the changed-file pass, so the gap is disclosed, not closed.
+# Explicit paths keep --external-sources with the
 # selected dataflow mode.
 # Tests stop source analysis at imported production modules because CI analyzes
 # every production shell separately as a canonical, source-aware root.
@@ -634,6 +638,8 @@ if [ "$FAST" -eq 1 ]; then
   printf 'fm-lint.sh: fast local mode; ShellCheck extended analysis disabled\n' >&2
 elif [ "$FOLLOW_SOURCES" -eq 0 ]; then
   printf 'fm-lint.sh: local changed-file mode; ShellCheck source following disabled\n' >&2
+  printf 'fm-lint.sh: NOT EVALUATED HERE: %s. CI evaluates them over the whole repository, so a green here does not cover them.\n' \
+    "${LOCAL_NOX_EXCLUDE//,/ }" >&2
 else
   printf 'fm-lint.sh: full ShellCheck extended analysis enabled\n' >&2
 fi
