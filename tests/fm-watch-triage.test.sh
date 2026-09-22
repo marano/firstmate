@@ -3404,27 +3404,28 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
 # the same task with an unvouched ahead head, or a behind head, STILL does - and the
 # alarm that fires leaves a triage-log line naming the landing class that decided it.
 landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind> -> key
-  local dir=$1 id=$2 num=$3 receipt=$4 shape=$5 base pr_head
-  local state="$dir/state" window="test:fm-$id"
-  fm_git_worktree "$dir/repo" "$dir/wt" "fm/$id" >/dev/null 2>&1 || fail "could not build $id's worktree"
-  base=$(git -C "$dir/wt" rev-parse HEAD)
-  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $id"
-  pr_head=$(git -C "$dir/wt" rev-parse HEAD)
+  local case_dir=$1 task_id=$2 num=$3 receipt=$4 shape=$5 base pr_head
+  local state_dir="$case_dir/state" win="test:fm-$task_id"
+  fm_git_worktree "$case_dir/repo" "$case_dir/wt" "fm/$task_id" >/dev/null 2>&1 \
+    || fail "could not build $task_id's worktree"
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   if [ "$shape" = ahead ]; then
-    git -C "$dir/wt" reset --hard -q "$base"
+    git -C "$case_dir/wt" reset --hard -q "$base"
   else
     pr_head=$base
   fi
   if [ "$receipt" = yes ]; then
     ( . "$ROOT/bin/fm-validation-receipt-lib.sh"
-      fm_validation_receipt_write "$state" "$id" github github.com o/r "$num" "$pr_head" "fm/$id" 01RUNRUNRUNRUNRUNRUNRUNRUN ) \
-      || fail "could not write $id's validation receipt"
+      fm_validation_receipt_write "$state_dir" "$task_id" github github.com o/r "$num" "$pr_head" "fm/$task_id" 01RUNRUNRUNRUNRUNRUNRUNRUN ) \
+      || fail "could not write $task_id's validation receipt"
   fi
-  landing_stale_task "$state" "$id" "$window" "$dir/pane.txt" "fm-$id \$" \
-    "done: PR https://github.com/o/r/pull/$num checks green run=r$num" "worktree=$dir/wt" \
+  landing_stale_task "$state_dir" "$task_id" "$win" "$case_dir/pane.txt" "fm-$task_id \$" \
+    "done: PR https://github.com/o/r/pull/$num checks green run=r$num" "worktree=$case_dir/wt" \
     "pr=https://github.com/o/r/pull/$num" "pr_head=$pr_head"
-  landing_stop_agent "$state" "$id"
+  landing_stop_agent "$state_dir" "$task_id"
 }
 
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
