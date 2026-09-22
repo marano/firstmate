@@ -133,6 +133,19 @@
 # same way. A merge that already landed is never turned into a failed run by a
 # branch cleanup step.
 #
+# A repository whose own auto-delete setting is on removes the head ref within
+# seconds of the merge, which is the window those guard reads occupy, so a
+# DELETE can reach a ref the forge already removed and fail. The branch is
+# therefore read once more after a failed deletion: gone means the step's own
+# outcome was reached by the forge instead, and is reported as such rather than
+# as a failure, because recording it would queue a branch that does not exist.
+# A branch still present after a failed deletion is a real leak and is written
+# to the durable record bin/fm-branch-orphan-lib.sh owns, because one stderr
+# line is merge output nobody re-reads. After its own cleanup, each run then
+# asks bin/fm-branch-orphans.sh to retry the branches recorded for the same
+# repository, which re-verifies every condition live before deleting anything;
+# that sweep is bounded to recorded branches and never enumerates the remote.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--unvalidated] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -162,6 +175,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-validation-receipt-lib.sh
 . "$SCRIPT_DIR/fm-validation-receipt-lib.sh"
+# shellcheck source=bin/fm-branch-orphan-lib.sh
+. "$SCRIPT_DIR/fm-branch-orphan-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -836,24 +851,6 @@ github_read_outcome() {
   return 1
 }
 
-url_encode_path_segment() {
-  local LC_ALL=C input=$1 encoded='' char octet hex
-  while [ -n "$input" ]; do
-    char=${input%"${input#?}"}
-    input=${input#?}
-    case "$char" in
-      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
-      *)
-        printf -v octet '%d' "'$char"
-        [ "$octet" -ge 0 ] || octet=$((octet + 256))
-        printf -v hex '%02X' "$octet"
-        encoded=$encoded%$hex
-        ;;
-    esac
-  done
-  printf '%s' "$encoded"
-}
-
 # Read the effective merge-queue method for the observed base branch. The four
 # situations the refusal has to keep apart - no queue rule, a rules response
 # that could not be read, several rules that disagree, and a rule whose method
@@ -1198,6 +1195,26 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# A branch that is still on the remote after its delete failed is a real leak.
+# One `actionable:` line on stderr is merge output nobody re-reads, which is
+# why leftover branches built up slowly even on repositories whose own
+# delete_branch_on_merge was already on, so the failure is also written to the
+# durable record bin/fm-branch-orphan-lib.sh owns and swept later by
+# bin/fm-branch-orphans.sh. Recording is best-effort by contract: a landed
+# merge is never turned into a failed run by a bookkeeping failure, so an
+# unwritable record is reported and nothing more.
+delete_merged_branch_orphaned() {  # <provider> <path> <branch>
+  local provider=$1 path=$2 branch=$3
+  if fm_branch_orphan_record "$STATE" "$provider" "$PR_HOST" "$path" "$branch" "$URL"; then
+    printf 'actionable: could not delete branch %s after merging %s; branch left in place and recorded for a later sweep\n' \
+      "$branch" "$URL" >&2
+  else
+    printf 'actionable: could not delete branch %s after merging %s; branch left in place and the sweep record could not be written\n' \
+      "$branch" "$URL" >&2
+  fi
+  return 0
+}
+
 # Delete the pull request's own head branch, but only from the call site that
 # is reached exclusively after the forge has confirmed the merge landed: never
 # call this speculatively, and never move it ahead of that proof. A deletion
@@ -1250,10 +1267,19 @@ github_delete_merged_branch() {
   fi
   if gh api -X DELETE "repos/$PR_OWNER/$PR_REPO/git/refs/heads/$branch" >/dev/null 2>&1; then
     printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
-  else
-    printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
-      "$branch" "$URL" >&2
+    return 0
   fi
+  # A repository whose own delete_branch_on_merge is on removes the head ref
+  # within a few seconds of the merge, which is the same window the guard reads
+  # above sit in. So this DELETE can arrive at a ref the forge has already
+  # removed and fail with 422 "Reference does not exist". Re-read the branch
+  # before calling that a failure: the branch is gone, which is the outcome
+  # this step wanted, and there is nothing left to record or retry.
+  if ! gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" >/dev/null 2>&1; then
+    printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
+    return 0
+  fi
+  delete_merged_branch_orphaned github "$PR_OWNER/$PR_REPO" "$branch"
   return 0
 }
 
@@ -1307,10 +1333,17 @@ gitlab_delete_merged_branch() {
   if GITLAB_HOST="$FM_PR_HOST" glab api -X DELETE \
     "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
     printf 'branch deleted: %s (%s)\n' "$branch" "$URL"
-  else
-    printf 'actionable: could not delete branch %s after merging %s; branch left in place\n' \
-      "$branch" "$URL" >&2
+    return 0
   fi
+  # Same race as the GitHub path: a project that removes the source branch on
+  # merge can win it, and a delete that failed because the branch is already
+  # gone reached the outcome this step wanted.
+  if ! GITLAB_HOST="$FM_PR_HOST" glab api \
+    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
+    printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
+    return 0
+  fi
+  delete_merged_branch_orphaned gitlab "$PR_PATH" "$branch"
   return 0
 }
 
@@ -1550,3 +1583,19 @@ case "$PROVIDER" in
   github) github_delete_merged_branch ;;
   gitlab) gitlab_delete_merged_branch ;;
 esac
+
+# Sweep any branch an earlier merge on this same repository left behind. The
+# cause is transient by nature - a race with the forge's own branch cleanup, or
+# a forge error on the one DELETE - so the next merge here is both the earliest
+# and the cheapest moment to retry, with the credentials and the repository
+# already in hand. This is bounded to the branches actually recorded for this
+# one repository and reads nothing else, so it stays a retry of known work
+# rather than a recurring sweep of the remote. Its failures never reach this
+# script's exit status, for the same reason the deletion above does not: the
+# merge has already landed.
+case "$PROVIDER" in
+  github) ORPHAN_SWEEP_PATH="$PR_OWNER/$PR_REPO" ;;
+  *) ORPHAN_SWEEP_PATH="$PR_PATH" ;;
+esac
+"$SCRIPT_DIR/fm-branch-orphans.sh" retry \
+  --provider "$PROVIDER" --host "$PR_HOST" --path "$ORPHAN_SWEEP_PATH" || true

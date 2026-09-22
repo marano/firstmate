@@ -1035,3 +1035,26 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# Percent-encode one path segment for a forge REST path, so a branch name
+# carrying a slash or any other reserved character addresses the branch it
+# names rather than a deeper path. Lives here rather than in a single caller
+# because the merge path and the orphaned-branch sweep must encode a branch
+# identically; bin/fm-pr-merge.sh and bin/fm-branch-orphans.sh both use it.
+url_encode_path_segment() {  # <segment>
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
