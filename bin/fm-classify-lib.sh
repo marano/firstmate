@@ -135,6 +135,47 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# The task's CURRENT OUTCOME line, and the ONE place that question is answered.
+#
+# `last_status_line` answers "what was appended last", which is not the same
+# question: a finished task routinely collects a `resolved` line AFTER its
+# outcome, because bin/fm-send.sh --resolve-key writes one at answer time and
+# bin/fm-afk-return.sh's catch-up gate instructs firstmate to close every call
+# still open at return with one. A resolution closes a decision RECORD; it can
+# never mean a worker picked the work back up, so folding past it is what keeps
+# the outcome legible. 2026-09-22: reading the last line instead silently
+# dropped a stopped, landed-and-waiting task's exemption the moment that
+# instruction was followed, re-arming the false wedge alarms it had just been
+# given (bin/fm-awaiting-landing-lib.sh leg 1).
+#
+# Only `resolved` is folded. The durable-transfer verb is deliberately NOT: it
+# declares a wait on the captain, which the supervisors already give its own
+# bounded re-surface cadence, and folding past it would replace that cadence
+# with silence. Every other verb - including `working` - is an outcome this
+# reports as-is, because a worker that resumes after reporting done really has
+# reopened the work.
+#
+# Prints the last non-blank line whose verb is not a resolution, or the empty
+# string when the log holds none. Callers asking "is this task finished" ask
+# THIS, so a second reader never re-derives the fold and rots the same way.
+status_outcome_line() {  # <status-file>
+  local f=$1 line
+  [ -e "$f" ] || return 0
+  # Fed in reverse, so the common case (no resolution, or one) parses a single
+  # verb rather than every line in the log, and read from a process
+  # substitution rather than a here-document so a status line carrying `$`, a
+  # backtick, or a backslash reaches the verb parse as the worker wrote it.
+  # `NF` drops whitespace-only lines, matching last_status_line's blank rule.
+  while IFS= read -r line; do
+    case "$(status_line_verb "$line")" in
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") continue ;;
+    esac
+    printf '%s' "$line"
+    return 0
+  done < <(awk 'NF { a[++n] = $0 } END { for (i = n; i >= 1; i--) print a[i] }' "$f" 2>/dev/null)
+  return 0
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.

@@ -250,8 +250,9 @@ test_an_unacknowledged_done_claim_is_not_yet_awaiting_landing() {
   pass "an unacknowledged done claim is reported as done but not yet held"
 }
 
-# The status log is an append-only EVENT log: only its last event is current.
-test_the_last_status_event_decides() {
+# The status log is an append-only EVENT log: the latest OUTCOME event is
+# current, and a worker that reopens the work posts one.
+test_a_worker_that_resumes_after_done_is_watched_again() {
   local dir head
   dir=$(make_git_task resumed)
   head=$(wt_commit "$dir/wt" "the work")
@@ -264,6 +265,50 @@ test_the_last_status_event_decides() {
   assert_watched "after the worker resumed" "$dir" resumed
 
   pass "a worker that resumes after reporting done is watched again"
+}
+
+# 2026-09-22, and the reason leg 1 reads the OUTCOME line rather than the last
+# one. Closing a decision record is not a work event: bin/fm-send.sh
+# --resolve-key writes a `resolved` line at answer time, and
+# bin/fm-afk-return.sh's catch-up gate instructs firstmate to close every call
+# still open at return with one carrying a durable reason. Following that
+# instruction on a lane that had already reported done, been stopped, and whose
+# recorded PR head still equalled its branch head silently dropped this
+# exemption and put the lane straight back on the stale alarm. Two correct
+# mechanisms, one record: the resolution must leave the outcome where it stood.
+test_a_resolution_recorded_after_done_keeps_the_exemption() {
+  local dir head
+  dir=$(make_git_task resolved-after-done)
+  head=$(wt_commit "$dir/wt" "the work")
+  status_line "$dir" resolved-after-done 'done: PR https://github.com/o/r/pull/67 checks green run=r-67'
+  task_meta "$dir" resolved-after-done "pr=https://github.com/o/r/pull/67" "pr_head=$head"
+  stop_agent "$dir" resolved-after-done
+  assert_class "before the resolution was recorded" awaiting-landing "$dir" resolved-after-done
+
+  status_line "$dir" resolved-after-done \
+    'resolved [key=default]: superseded, verified not dismissed; reason recorded for the return brief'
+  assert_class "after the resolution was recorded" awaiting-landing "$dir" resolved-after-done
+  assert_quiet "after the resolution was recorded" "$dir" resolved-after-done
+  assert_target "after the resolution was recorded" verified "$dir" resolved-after-done
+  fm_awaiting_landing_read resolved-after-done "$dir/state"
+  [ "$FM_AWAITING_LANDING_ACK" = "pr+agent-stopped" ] \
+    || fail "the acknowledgement was lost with the outcome (ack=$FM_AWAITING_LANDING_ACK)"
+
+  # A return that closes several calls at once appends several of them, and a
+  # correlated resolution is the same event carrying a token.
+  status_line "$dir" resolved-after-done 'resolved corr=c44897ee2db4326b [key=nm-9-review]: answered by the captain'
+  status_line "$dir" resolved-after-done 'resolved [key=merge]: the captain gave the word'
+  assert_class "after a run of resolutions" awaiting-landing "$dir" resolved-after-done
+
+  # And the fold reaches only record-keeping: a worker that really did reopen
+  # the work is still watched, from underneath its own resolutions.
+  status_line "$dir" resolved-after-done 'working: reopened to answer a review finding'
+  assert_class "after the worker resumed" none "$dir" resolved-after-done
+  status_line "$dir" resolved-after-done 'resolved [key=review]: the finding was answered'
+  assert_class "after a resolution on top of the resumed work" none "$dir" resolved-after-done
+  assert_watched "after a resolution on top of the resumed work" "$dir" resolved-after-done
+
+  pass "a resolution recorded after done keeps the exemption, and never hides a worker that resumed"
 }
 
 # The verb grammar has one owner (bin/fm-classify-lib.sh) and this library reads
@@ -668,13 +713,42 @@ test_mutant_receipt_ignores_shape_is_red() {
   pass "MUTANT receipt-ignores-shape is red: a validated but rewritten head would read as ready to land"
 }
 
+# MUTANT: leg 1 reads the LAST status line instead of the outcome line - the
+# shape shipped until 2026-09-22. The stopped, landed-and-waiting lane whose
+# only later event is the resolution firstmate is instructed to record falls
+# straight out of the exemption and back onto the stale alarm.
+test_mutant_last_status_line_decides_is_red() {
+  local dir head got
+  dir=$(make_git_task mutant-resolved)
+  head=$(wt_commit "$dir/wt" "the work")
+  status_line "$dir" mutant-resolved 'done: PR https://github.com/o/r/pull/36 checks green run=r-36'
+  task_meta "$dir" mutant-resolved "pr=https://github.com/o/r/pull/36" "pr_head=$head"
+  stop_agent "$dir" mutant-resolved
+  status_line "$dir" mutant-resolved 'resolved [key=default]: superseded, verified not dismissed'
+
+  assert_class "the real library" awaiting-landing "$dir" mutant-resolved
+  # The operands below are literal library source, not expressions: expanding
+  # them would rewrite the operator and the mutation would match nothing, which
+  # mutant_answer then refuses as a vacuous proof.
+  # shellcheck disable=SC2016
+  got=$(mutant_answer last-status-line-decides \
+    'line=$(status_outcome_line "$state/$id.status")' \
+    'line=$(last_status_line "$state/$id.status")' \
+    "$dir" mutant-resolved class)
+  [ "$got" = none ] \
+    || fail "mutant last-status-line-decides was not red: it answered '$got' for a resolution recorded after done"
+
+  pass "MUTANT last-status-line-decides is red: recording a resolution would re-arm the alarm on landed work"
+}
+
 test_finished_work_whose_agent_is_still_alive_is_awaiting_landing
 test_a_deliberately_stopped_agent_on_finished_work_is_awaiting_landing
 test_a_stopped_agent_with_a_recorded_pr_is_awaiting_landing
 test_a_dead_agent_with_no_terminal_outcome_is_never_quiet
 test_work_still_open_is_never_awaiting_landing
 test_an_unacknowledged_done_claim_is_not_yet_awaiting_landing
-test_the_last_status_event_decides
+test_a_worker_that_resumes_after_done_is_watched_again
+test_a_resolution_recorded_after_done_keeps_the_exemption
 test_a_correlated_done_line_is_read_through
 test_a_pr_head_rewritten_out_of_history_is_landing_blocked
 test_a_pr_head_left_behind_by_the_branch_is_landing_blocked
@@ -690,3 +764,4 @@ test_mutant_unconditional_suppression_is_red
 test_mutant_recorded_pr_is_sufficient_is_red
 test_mutant_ahead_without_receipt_is_red
 test_mutant_receipt_ignores_shape_is_red
+test_mutant_last_status_line_decides_is_red
