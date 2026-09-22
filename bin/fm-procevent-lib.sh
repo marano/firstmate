@@ -262,38 +262,62 @@ fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registra
   done
 }
 
+# Returns 0 holding the source lock with the stamp advanced, 2 with the lock
+# released when the claimed registration was replaced or removed, 1 otherwise.
+# The wait re-reads the registration's identity every quarter second and ends
+# early once it is no longer the claimed one, so a superseded runner lets go of
+# the source then, rather than refusing the replacement's first launch for the
+# rest of an old floor of up to an hour. That early end is only a hint: the
+# locked check decides, and a hint it does not confirm stops the watching and
+# waits the floor out, so a current registration's floor is never shortened.
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local state=$1 id=$2 expected=$3 floor=$4 reg stamp registration current_identity status=0
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp registration current_identity status=0 watch=1 waited
   stamp=$(fm_procevent_launch_floor_stamp_path "$state" "$id" "$expected") || return 1
   reg=$(fm_procevent_registry_dir "$state") || return 1
+  registration="$reg/$id.source"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
-  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
-    use strict;
-    use warnings;
-    my ($path, $floor) = @ARGV;
-    my $previous;
-    if (-e $path) {
-      open my $in, "<", $path or exit 1;
-      my $value = <$in>;
-      close $in or exit 1;
-      defined($value) && $value =~ /\A([0-9]+(?:\.[0-9]+)?)\n?\z/ or exit 1;
-      $previous = 0 + $1;
-    }
-    my $now = clock_gettime(CLOCK_MONOTONIC);
-    my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : undef;
-    sleep($floor - $elapsed) if defined($elapsed) && $elapsed < $floor;
-  ' "$stamp" "$floor" || return 1
+  while :; do
+    perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
+      use strict;
+      use warnings;
+      my ($path, $floor, $registration, $expected, $watch) = @ARGV;
+      my $previous;
+      if (-e $path) {
+        open my $in, "<", $path or exit 1;
+        my $value = <$in>;
+        close $in or exit 1;
+        defined($value) && $value =~ /\A([0-9]+(?:\.[0-9]+)?)\n?\z/ or exit 1;
+        $previous = 0 + $1;
+      }
+      while (1) {
+        my $now = clock_gettime(CLOCK_MONOTONIC);
+        my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : undef;
+        exit 0 unless defined($elapsed) && $elapsed < $floor;
+        my $left = $floor - $elapsed;
+        if ($watch) {
+          my @registration = stat $registration;
+          exit 3 unless @registration && "$registration[0]:$registration[1]" eq $expected;
+          $left = 0.25 if $left > 0.25;
+        }
+        sleep($left);
+      }
+    ' "$stamp" "$floor" "$registration" "$expected" "$watch"
+    waited=$?
+    case "$waited" in 0|3) ;; *) return 1 ;; esac
 
-  # Registration publication holds this same source lock while replacing and
-  # pruning pacing state, so a superseded sleeper cannot recreate its stamp.
-  fm_procevent_source_lock_acquire "$id" || return 1
-  registration="$reg/$id.source"
-  current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
-  if [ "$current_identity" != "$expected" ]; then
+    # Registration publication holds this same source lock while replacing and
+    # pruning pacing state, so a superseded sleeper cannot recreate its stamp.
+    fm_procevent_source_lock_acquire "$id" || return 1
+    current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
+    if [ "$current_identity" != "$expected" ]; then
+      fm_procevent_source_lock_release "$id" || return 1
+      return 2
+    fi
+    [ "$waited" -eq 0 ] && break
     fm_procevent_source_lock_release "$id" || return 1
-    return 2
-  fi
+    watch=0
+  done
   [ ! -L "$stamp" ] && { [ ! -e "$stamp" ] || [ -f "$stamp" ]; } || status=1
   if [ "$status" -eq 0 ]; then
     perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '

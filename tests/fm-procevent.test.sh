@@ -2600,19 +2600,40 @@ PACE_STAMPS=$(find "$HPACE/state/procevent" -maxdepth 1 -type f \
 [ "$PACE_STAMPS" = 1 ] || fail "replacement registrations accumulated stale pacing state"
 pass "a replacement registration starts with one fresh launch floor"
 
+# A runner waiting on its launch floor when its registration is replaced must
+# neither run the command it claimed nor recreate that generation's pacing state.
+# The hour-long floor is what makes the replacement land while the runner is
+# still waiting, however slowly this machine gets there: under a floor short
+# enough to sit out, a slow publication could arrive after the floor lapsed, when
+# running the command was correct, and this check then reported a defect that was
+# not there. The runner must notice the replacement to exit before the deadline,
+# which is a liveness bound far below that hour rather than a race.
 HPACE_RACE="$TMP_ROOT/registration-pacing-race"; new_home "$HPACE_RACE"
 fm_test_track_procevent_home "$HPACE_RACE"
 PACE_RACE_LOG="$TMP_ROOT/registration-pacing-race.log"
 pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
-FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
-FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 \
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3600 pe "$HPACE_RACE" start pace-race-src >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3600 \
   pe "$HPACE_RACE" start pace-race-src > "$TMP_ROOT/registration-pacing-race.out" 2>&1 &
 PACE_RACE_PID=$!
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/pace-race-src.claim" \
   || fail "the superseded pacing fixture did not claim its registration"
+# The runner marker is written just before the floor wait begins, so the
+# replacement below reaches a runner already asleep rather than one it pre-empts.
+wait_for "$HPACE_RACE/state/procevent/pace-race-src.runner" \
+  || fail "the superseded pacing fixture did not reach its launch floor"
 [ "$(wc -l < "$PACE_RACE_LOG" | tr -d ' ')" = 1 ] \
   || fail "the superseded pacing fixture was not waiting on its launch floor"
 pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
+pace_race_deadline=$((SECONDS + 30))
+while kill -0 "$PACE_RACE_PID" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$pace_race_deadline" ]; then
+    pe "$HPACE_RACE" retire pace-race-src >/dev/null 2>&1 || true
+    wait "$PACE_RACE_PID" 2>/dev/null || true
+    fail "a superseded runner kept waiting out its replaced registration's launch floor"
+  fi
+  sleep 0.1
+done
 wait "$PACE_RACE_PID" || fail "the superseded paced runner failed"
 [ "$(wc -l < "$PACE_RACE_LOG" | tr -d ' ')" = 1 ] \
   || fail "the superseded paced runner invoked its stale command"
