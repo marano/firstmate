@@ -182,6 +182,52 @@ status_outcome_line() {  # <status-file>
   return 0
 }
 
+# The worker's CURRENT DECLARATION: the last line the worker wrote about its own
+# state once the decision bookkeeping appended after it is set aside. That is
+# the question a stale supervisor asks - has this worker declared a wait - and
+# it differs from both readers above. A `resolved [key=k]` line closes a
+# decision; it is never the worker saying something new, and the decision it
+# closed has been answered, so neither is the worker's current word. Both are
+# folded away, and a `paused:` wait that a resolution arrived after is still the
+# wait. 2026-09-22: a worker firstmate had stopped, whose log ended
+# `paused:` -> `needs-decision [key=k]` -> `resolved [key=k]`, was stale-alarmed
+# and wedge-escalated five times in a row, while the same stop behind a log
+# ending in `paused:` stayed quiet. Folding the resolution alone, as
+# status_outcome_line does, lands on the answered needs-decision, not the wait.
+#
+# Only what a LATER resolution closed is folded. An open needs-decision or
+# blocked is the worker's current word and is printed as-is, and a resolution
+# closes only the key it names, under the key grammar and transition guard
+# status_open_decisions uses. The durable-transfer verb is not folded, for the
+# reason status_outcome_line gives.
+#
+# Prints that line, or the empty string when the log holds none.
+status_declared_line() {  # <status-file>
+  local f=$1 line key resolve closed=$'\n'
+  [ -e "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line; do
+    case "$(status_line_verb "$line")" in
+      "$resolve")
+        if key=$(_fm_decision_key "$line") \
+          && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+          closed="$closed$key"$'\n'
+        fi
+        continue
+        ;;
+      needs-decision|blocked)
+        if key=$(_fm_decision_key "$line") \
+          && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+          case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
+        fi
+        ;;
+    esac
+    printf '%s' "$line"
+    return 0
+  done < <(awk 'NF { a[++n] = $0 } END { for (i = n; i >= 1; i--) print a[i] }' "$f" 2>/dev/null)
+  return 0
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.

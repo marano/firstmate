@@ -4287,6 +4287,130 @@ test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
   pass "a validated ahead head on a stopped worker raises no stale wake; an unvouched or behind head still does, with a log line"
 }
 
+# --- a declared wait survives the resolutions logged after it ----------------
+# The stale path asks whether a quiet worker declared a wait, and it read the
+# LAST status line to answer. A `resolved [key=k]` line firstmate appends when it
+# answers a call is never the worker's word: on 2026-09-22 a worker firstmate
+# had stopped, whose log ended `paused:` -> `needs-decision [key=k]` ->
+# `resolved [key=k]`, was stale-alarmed and wedge-escalated five times in a row,
+# while the same stop behind a log ending in `paused:` stayed quiet. The stop
+# record licenses nothing on its own here (bin/fm-awaiting-landing-lib.sh owns
+# why a stopped worker with open work stays watched); the stale path reads the
+# worker's declaration through status_declared_line instead.
+
+# status_declared_line, as a pure function over a status log.
+#
+# Mutants that must turn this red:
+#   - print the last line: every case that ends in a resolution.
+#   - fold resolutions alone (status_outcome_line): the answered decision.
+#   - fold a decision whatever key the resolution names: the other-key case.
+#   - fold back to the last paused line: the other-key and superseded cases.
+test_status_declared_line_classifier() {
+  local dir f got
+  dir="$TMP_ROOT/status-declared-line"; mkdir -p "$dir"; f="$dir/task.status"
+  declared_is() {  # <expected> <label> <status-line>...
+    local want=$1 label=$2
+    shift 2
+    printf '%s\n' "$@" > "$f"
+    got=$(status_declared_line "$f")
+    [ "$got" = "$want" ] || fail "status_declared_line, $label: got '$got', want '$want'"
+  }
+  [ -z "$(status_declared_line "$dir/missing.status")" ] || fail "a missing log declared something"
+  declared_is '' 'blank log' '' '   '
+  declared_is '' 'resolutions only' 'resolved: answered'
+  declared_is 'paused: waiting on CI' 'a plain wait' 'paused: waiting on CI'
+  declared_is 'paused: waiting on CI' 'an answered decision after the wait' \
+    'paused: waiting on CI' 'needs-decision [key=nm-r1-ci]: findings=ci-1' \
+    'resolved [key=nm-r1-ci]: answered: stay parked'
+  declared_is 'paused: waiting on CI' 'an answered decision keyed at the head of its note' \
+    'paused: waiting on CI' 'needs-decision: [key=shape] which way' 'resolved [key=shape]: this way'
+  declared_is 'paused: waiting on CI' 'an answered unkeyed blocker' \
+    'paused: waiting on CI' 'blocked: implementation committed abc123' 'resolved: answered: run it'
+  declared_is 'paused: waiting on a release' 'a resolution that closed nothing' \
+    'paused: waiting on a release' 'resolved [key=relay]: answered: noted'
+  declared_is 'needs-decision [key=review-shape]: which way' 'a resolution naming another key' \
+    'paused: waiting on CI' 'needs-decision [key=review-shape]: which way' 'resolved [key=other-call]: done'
+  declared_is 'working: CI came back, fixing it' 'a later word superseding the wait' \
+    'paused: waiting on CI' 'working: CI came back, fixing it' 'resolved [key=relay]: noted'
+  declared_is 'needs-decision [key=shape]: asked again' 'a decision reopened after its answer' \
+    'needs-decision [key=shape]: which way' 'resolved [key=shape]: this way' \
+    'needs-decision [key=shape]: asked again'
+  declared_is 'captain-held [key=shape]: held for the captain' 'a captain-held transfer' \
+    'needs-decision [key=shape]: which way' 'captain-held [key=shape]: held for the captain'
+  unset -f declared_is
+  pass "status_declared_line folds resolutions and the decisions they closed, and nothing else"
+}
+
+# A stopped worker whose status log is <status-line>..., stale-ready as
+# landing_stale_task leaves it. Prints the window's marker key.
+stopped_declared_task() {  # <dir> <id> <window> <capture-file> <status-line>...
+  local dir=$1 id=$2 window=$3 capture=$4 state key
+  shift 4
+  state="$dir/state"
+  key=$(landing_stale_task "$state" "$id" "$window" "$capture" "fm-$id \$" "$1" "worktree=$dir/wt")
+  shift
+  [ "$#" -eq 0 ] || printf '%s\n' "$@" >> "$state/$id.status"
+  printf '%s' "$(seen_sig "$state/$id.status")" > "$state/.seen-${id}_status"
+  landing_stop_agent "$state" "$id"
+  printf '%s' "$key"
+}
+
+# The watcher over the live shape and its controls. Every worker is stopped and
+# its pane is a bare shell, so the stop record is constant across the legs and
+# only the status log decides.
+#
+# Mutants that must turn this red:
+#   - read the last line on the stale path (current main): both quiet legs alarm.
+#   - fold resolutions alone (status_outcome_line): the answered leg alarms.
+#   - fold a decision whatever key the resolution names: the other-key leg goes
+#     quiet.
+#   - fold back to the last paused line: the other-key and superseded legs go
+#     quiet.
+test_a_declared_wait_survives_the_resolutions_logged_after_it() {
+  local dir state fakebin out capture window key pid leg
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  for leg in answered orphan; do
+    dir=$(make_case "declared-wait-quiet-$leg"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-wait-$leg"
+    case "$leg" in
+      answered)
+        key=$(stopped_declared_task "$dir" "wait-$leg" "$window" "$capture" \
+          'paused: validation run r1 waiting on CI checks for PR https://example.test/pr/74' \
+          'needs-decision [key=nm-r1-ci]: ask-user findings=ci-1,ci-2 file=/tmp/findings.txt' \
+          'resolved [key=nm-r1-ci]: answered: do not approve, fix or skip; stay parked at the ci gate') ;;
+      orphan)
+        key=$(stopped_declared_task "$dir" "wait-$leg" "$window" "$capture" \
+          'paused: waiting on an upstream release' 'resolved [key=relay]: answered: noted') ;;
+    esac
+    landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+    pid=$!
+    landing_assert_quiet "$state" "$pid" "$out" "$key" 2 \
+      "a stopped worker whose declared wait was followed by a resolution ($leg)"
+  done
+  for leg in other-key superseded open-work; do
+    dir=$(make_case "declared-wait-alarm-$leg"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-wait-$leg"
+    case "$leg" in
+      other-key)
+        stopped_declared_task "$dir" "wait-$leg" "$window" "$capture" 'paused: waiting on CI' \
+          'needs-decision [key=review-shape]: which way' 'resolved [key=other-call]: answered: done' >/dev/null ;;
+      superseded)
+        stopped_declared_task "$dir" "wait-$leg" "$window" "$capture" 'paused: waiting on CI' \
+          'working: CI came back, fixing the failure' 'resolved [key=relay]: answered: noted' >/dev/null ;;
+      open-work)
+        stopped_declared_task "$dir" "wait-$leg" "$window" "$capture" 'working: implementing the fix' >/dev/null ;;
+    esac
+    landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+    pid=$!
+    wait_for_exit "$pid" 100 \
+      || { reap "$pid"; fail "a stopped worker with open work and no standing declared wait did not alarm ($leg): $(cat "$out")"; }
+    grep -Fx "stale: $window" "$out" >/dev/null \
+      || fail "a stopped worker with open work printed the wrong wake ($leg): $(cat "$out")"
+  done
+  unset FM_FAKE_CREW_STATE
+  pass "a stopped worker's declared wait survives a later resolution, while open work with no standing wait still alarms"
+}
+
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
 # 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
 # and/or the harness's rendered busy footer) is unconditional, unbounded proof
@@ -6132,6 +6256,8 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
 test_awaiting_landing_never_enters_the_wedge_ladder
+test_status_declared_line_classifier
+test_a_declared_wait_survives_the_resolutions_logged_after_it
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_busy_pane_below_turn_age_bound_is_absorbed
