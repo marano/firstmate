@@ -25,6 +25,34 @@ export FM_BUILD_LOCK_CI=0
 export FM_BUILD_LOCK_POLL=0.1
 unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
 
+# Fail a case whose evidence lives under a temp directory the case must still
+# remove, reading that evidence BEFORE the removal.
+#
+# Writing it inline as `{ rm -rf "$tmp"; fail "... $(cat "$tmp/err")"; }` looks
+# equivalent and is not: the removal runs first, so the command substitution
+# that builds the message reads a file that is already gone and the case reports
+# an empty reason. That is the exact "failed while telling nobody why" shape
+# these cases exist to catch, and it cost a real debugging round here.
+#
+# An absent file and a present-but-empty one are reported differently, because
+# which of the two it is says whether the command under test never ran or ran
+# and said nothing.
+fail_with_evidence() {  # <tmp-dir> <message> [<evidence-file>...]
+  local dir=$1 message=$2 f evidence=''
+  shift 2
+  for f in "$@"; do
+    if [ ! -e "$f" ]; then
+      evidence="$evidence"$'\n'"--- $f does not exist ---"
+    elif [ -s "$f" ]; then
+      evidence="$evidence"$'\n'"--- $f ---"$'\n'"$(cat "$f")"
+    else
+      evidence="$evidence"$'\n'"--- $f is empty ---"
+    fi
+  done
+  rm -rf "$dir"
+  fail "$message$evidence"
+}
+
 # Copy the runner into a fixture tree together with the build lock it runs
 # every script under.
 install_runner() {  # <destination-bin-dir-or-path>
@@ -2298,11 +2326,11 @@ SH
   [ "$rc" -ne 0 ] \
     || { rm -rf "$tmp"; fail "a test needing a tool no lane installs must red the run"; }
   grep -q 'script_required_tools does not list it' "$tmp/err.txt" \
-    || { rm -rf "$tmp"; fail "the runner must say the table does not name the tool: $(cat "$tmp/err.txt")"; }
+    || fail_with_evidence "$tmp" "the runner must say the table does not name the tool" "$tmp/err.txt"
   grep -q 'fmnosuchtool' "$tmp/err.txt" \
-    || { rm -rf "$tmp"; fail "the runner must name the missing tool: $(cat "$tmp/err.txt")"; }
+    || fail_with_evidence "$tmp" "the runner must name the missing tool" "$tmp/err.txt"
   grep -q '^ok - SKIP (fmnosuchtool not resolved)' "$out" \
-    || { rm -rf "$tmp"; fail "the case must still read as the skip it is: $(cat "$out")"; }
+    || fail_with_evidence "$tmp" "the case must still read as the skip it is" "$out"
   set +e
   FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=0 \
     "$RUNNER" "$f" >"$tmp/out2.txt" 2>&1
@@ -2334,7 +2362,7 @@ SH
   [ "$rc" -ne 0 ] \
     || { rm -rf "$tmp"; fail "a declared tool that never arrived must red the run"; }
   grep -q 'required by script_required_tools but was not on PATH' "$tmp/err.txt" \
-    || { rm -rf "$tmp"; fail "the runner must say the promised tool did not arrive: $(cat "$tmp/err.txt")"; }
+    || fail_with_evidence "$tmp" "the runner must say the promised tool did not arrive" "$tmp/err.txt"
   rm -rf "$tmp"
   pass "a lane whose promised pinned tool never arrived reds rather than skipping quietly"
 }
@@ -2344,6 +2372,19 @@ test_coverage_guard_refuses_an_unusable_tool_table() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tooltable.XXXXXX")
   printf 'tests/fm-no-such-test.test.sh\tshellcheck\n' >"$tmp/missing"
   printf 'tests/fm-lint.test.sh\tfmnosuchtool\n' >"$tmp/unknown"
+  # Control first. The tool checks are the LAST thing run_coverage_guard does,
+  # so any one of its earlier checks failing also exits non-zero, and the two
+  # assertions below would then blame the tool table for something that has
+  # nothing to do with it. Proving the guard passes on the real table separates
+  # "this table is refused" from "the guard is unhappy about something else",
+  # which is the difference between a red that names its cause and one that
+  # sends the reader to the wrong file.
+  set +e
+  "$RUNNER" --check-coverage >/dev/null 2>"$tmp/baseline.txt"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail_with_evidence "$tmp" "the coverage guard must pass on the real table before this case can attribute a refusal to the table under test" "$tmp/baseline.txt"
   set +e
   FM_TEST_REQUIRED_TOOLS_FILE="$tmp/missing" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err1.txt"
   rc=$?
@@ -2351,7 +2392,7 @@ test_coverage_guard_refuses_an_unusable_tool_table() {
   [ "$rc" -ne 0 ] \
     || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool entry naming a test that does not exist"; }
   grep -q 'names a test that does not exist' "$tmp/err1.txt" \
-    || { rm -rf "$tmp"; fail "the refusal must name the problem: $(cat "$tmp/err1.txt")"; }
+    || fail_with_evidence "$tmp" "the refusal must name the problem" "$tmp/err1.txt"
   set +e
   FM_TEST_REQUIRED_TOOLS_FILE="$tmp/unknown" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err2.txt"
   rc=$?
@@ -2359,7 +2400,7 @@ test_coverage_guard_refuses_an_unusable_tool_table() {
   [ "$rc" -ne 0 ] \
     || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool with no installer"; }
   grep -q 'cannot install' "$tmp/err2.txt" \
-    || { rm -rf "$tmp"; fail "the refusal must name the uninstallable tool: $(cat "$tmp/err2.txt")"; }
+    || fail_with_evidence "$tmp" "the refusal must name the uninstallable tool" "$tmp/err2.txt"
   rm -rf "$tmp"
   pass "the coverage guard refuses a tool table that would install for nobody"
 }
@@ -2422,7 +2463,7 @@ SH
     fail "a short ok-count must fail the run even though the script exited 0"
   fi
   grep -q 'required ok-count mismatch' "$out" \
-    || { rm -rf "$tmp"; fail "the mismatch must name itself: $(cat "$out")"; }
+    || fail_with_evidence "$tmp" "the mismatch must name itself" "$out"
   cat >"$f" <<'SH'
 #!/usr/bin/env bash
 echo "skip: herdr not found"
