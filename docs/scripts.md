@@ -134,7 +134,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, capture the pipeline's validation receipt for the bound head, then atomically arm a static merge poll; refuse to replace a recorded PR whose merge has not been reported unless `--replace` |
-| `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub or GitLab URL, refuse an outcome it cannot prove landed or queued, then delete the merged pull request's own head branch when safe |
+| `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub or GitLab URL, refuse an outcome it cannot prove landed or queued, delete the merged pull request's own head branch when safe, recording a failed deletion for later sweep, then retry any branches already recorded for that repository |
+| `fm-branch-orphan-lib.sh` | Own the durable fleet-wide record of a merged head branch `fm-pr-merge.sh` could not delete |
+| `fm-branch-orphans.sh`   | List or, re-verifying every condition live against the forge, retry the merged head branches recorded in `fm-branch-orphan-lib.sh`'s record |
 | `fm-validation-receipt-lib.sh` | Resolve which no-mistakes runs are candidates for a pull request, judge whether a run record proves a head, and own the durable validation receipt |
 | `fm-pr-state.sh`         | Read-only: print one line per GitHub pull-request blocker it can see, reporting on checks that have reported rather than verdicting merge-readiness |
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
