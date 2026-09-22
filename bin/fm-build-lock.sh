@@ -155,6 +155,25 @@
 # it. A long wait is still a wait: running the command outside this lock to
 # leave the line silently breaks exclusion for every build on the machine.
 #
+# A COMMAND THAT TAKES THE LOCK ITSELF IS NOT WRAPPED, AND THE RUNTIME DECIDES
+# THAT. bin/fm-test-run.sh and bin/fm-stock-bash-lane.sh take a hold per unit
+# themselves, so wrapping either one is the loop-inside-one-hold shape above:
+# the outer hold spans the whole lane and every inner acquire passes straight
+# through as a nested hold. An invocation asked to wrap one of them therefore
+# takes NO hold and runs it straight through, saying so on stderr, which leaves
+# those per-unit holds to keep the machine protected. It stands down rather than
+# refusing, because refusing would break a caller's validation run over a
+# mistake this script can simply get right, and `--exclusive` cannot widen a
+# hold that is never taken, so it is ignored and named. Recognition is by
+# program name, stepping over an interpreter or `env` prefix; a `bash -c`
+# argument that merely mentions one is a script rather than a program name and
+# is deliberately not inspected. This is enforced here because prose did not
+# hold: both runners' headers, CONTRIBUTING.md and the
+# firstmate-coding-guidelines skill all forbade the wrap already, while the
+# generated ship brief's own rule 8 told workers to wrap "a full CI script",
+# which both of these are. docs/verification/build-lock-contention.md measures
+# what that cost.
+#
 # A NESTED INVOCATION INSIDE A HOLD RUNS STRAIGHT THROUGH. A slot is not
 # reentrant, so a wrapped command that itself calls this script - `mutex` around
 # bin/fm-test-run.sh, which takes a slot per script - would wait on its own
@@ -1402,6 +1421,68 @@ esac
 # --- CI stand-down, before the lock root is even resolved -------------------
 
 if [ "$MODE" = run ] && fm_build_lock_is_ci; then
+  exec "$@"
+fi
+
+# --- a command that takes the lock itself -----------------------------------
+#
+# firstmate ships runners that take a hold PER UNIT themselves - one per test
+# script, one per concurrent phase - precisely so another worker's build goes
+# between two units instead of waiting out the whole lane. Wrapping one of them
+# here defeats exactly that: the outer hold spans the whole lane while every
+# inner acquire passes straight through as a nested hold, which is the
+# whole-lane hold measured in docs/verification/build-lock-contention.md.
+#
+# Prose forbade that wrap in four places - both runners' headers,
+# CONTRIBUTING.md and the firstmate-coding-guidelines skill - and it still
+# happened, because the ship
+# brief's rule 8 tells a worker to wrap "a full CI script" and these are full
+# CI scripts by any reading. The instruction was the defect, so the runtime
+# decides it here rather than the caller: an invocation asked to wrap one of
+# them takes no hold and runs it straight through, leaving the runner's own
+# per-unit holds to keep the machine protected. Standing down is deliberately
+# not a refusal; refusing would break a worker's validation run over a mistake
+# the runtime can simply get right.
+
+FM_BUILD_LOCK_SELF_LOCKING='fm-test-run.sh fm-stock-bash-lane.sh'
+
+# Prints the recognised program's name, or fails. Wrappers whose next argument
+# is the program itself are stepped over, so `bash bin/fm-test-run.sh` and
+# `env FOO=1 ./bin/fm-test-run.sh` are recognised too. A `bash -c '<text>'`
+# whose text merely mentions one is deliberately not recognised: that argument
+# is a script, not a program name, and guessing inside it would be a parser.
+fm_build_lock_self_locking_command() {
+  local arg base name
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    base=${arg##*/}
+    case "$base" in
+      env|time|nice|nohup|stdbuf|bash|sh|zsh|dash|ksh)
+        shift
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -*|*=*) shift ;;
+            *) break ;;
+          esac
+        done
+        continue
+        ;;
+    esac
+    for name in $FM_BUILD_LOCK_SELF_LOCKING; do
+      if [ "$base" = "$name" ]; then
+        printf '%s\n' "$base"
+        return 0
+      fi
+    done
+    return 1
+  done
+  return 1
+}
+
+if [ "$MODE" = run ] && FM_BUILD_LOCK_SELF_NAME=$(fm_build_lock_self_locking_command "$@"); then
+  note "$FM_BUILD_LOCK_SELF_NAME takes a build hold per unit itself, so this invocation takes none and runs it straight through; wrapping it would hold one slot for its whole run"
+  [ "$FM_BUILD_LOCK_EXCLUSIVE_FLAG" = 0 ] \
+    || note "--exclusive is ignored for a command that takes the lock itself"
   exec "$@"
 fi
 

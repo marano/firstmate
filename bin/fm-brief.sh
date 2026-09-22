@@ -439,6 +439,10 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    Never put one \`mutex\` around a loop, script or \`&&\` chain of several runs, such as a
    baseline plus mutants; wrap each run in the loop instead, so a queued worker's run can go
    between two of yours rather than wait out the whole loop.
+   A script that takes the lock per unit itself is the one thing never to wrap, however much
+   it looks like a full CI script: wrapping it holds one slot for its whole run instead of one
+   per unit. \`mutex\` recognises the runners firstmate ships and runs them straight through,
+   and \`$FM_ROOT/bin/fm-build-lock.sh\`'s header owns which those are and why.
    A queued \`mutex\` hold is a wait like any other: declare it under rule 4 before you block on it.
    However long it lasts, never run the command without \`mutex\` to get out of the line.
    \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
