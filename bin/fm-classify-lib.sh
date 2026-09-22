@@ -271,6 +271,73 @@ status_paused_until() {  # <status-line> -> epoch on stdout
   fm_utc_iso_to_epoch "$token"
 }
 
+# --- can a supervisor CHECK the wait a worker declared? ---------------------
+#
+# A declared wait is the supervisor's licence to leave a quiet worker alone, so
+# what the wait NAMES decides whether that licence is worth anything. Firstmate
+# dismissed six stale alarms correctly on 2026-09-21 by reading a build-lock
+# holder's pid, command and elapsed time; the next day it read
+# `paused: waiting on background test run bhymd1si9`, took it at face value, and
+# instructed the worker to let a job finish that had already died with the turn.
+# The difference is not the worker's honesty - both lines were written in good
+# faith - it is that one subject is checkable from outside the worker and the
+# other is structurally unfalsifiable: nothing firstmate can run answers whether
+# a harness-internal job id still exists.
+#
+# So a wait is `verifiable` only when its text names a handle a supervisor can
+# actually resolve, and `unverifiable` otherwise. The default is deliberately
+# unverifiable rather than verifiable: an unverifiable wait must never be the
+# basis of an instruction to keep waiting, and a worker that wants the long
+# quiet cadence can earn it in one token by naming a pid, a run id, a URL, or
+# the time it clears. bin/fm-brief.sh's PAUSE_RULE owns telling workers that.
+#
+# Prints the class; returns 1 (and prints nothing) for a line that declares no
+# wait at all, so a caller never has to pre-test the verb.
+status_wait_subject_class() {  # <status-line> -> verifiable|unverifiable
+  local line=$1
+  status_is_paused "$line" || return 1
+  # An explicit self-declaration wins outright. A worker whose only handle IS a
+  # harness-internal job id is required to say so, and saying so must not be
+  # undone by some incidental path or number elsewhere in the same sentence.
+  if printf '%s' "$line" | grep -qiE '(^|[^[:alnum:]])unverifiable([^[:alnum:]]|$)'; then
+    printf 'unverifiable'
+    return 0
+  fi
+  # Handles a supervisor can actually resolve:
+  #   pid 45757 / pid=45757                 a process to test for liveness
+  #   the build slot / build lock / mutex   a holder `mutex --holders` resolves
+  #   run=<id>                              a run `no-mistakes axi status` resolves
+  #   https://...                           a PR, CI run, or release page to fetch
+  #   /an/absolute/path                     a file or directory that will appear
+  # `run=<id>` deliberately requires the `=`: a bare `run <token>` matches
+  # `background test run bhymd1si9`, the opaque subject this whole classification
+  # exists to catch, and the status protocol writes the pipeline's own id as
+  # `run=<id>` anyway (bin/fm-brief.sh's definition of done).
+  if printf '%s' "$line" | grep -qiE \
+    '(^|[^[:alnum:]])(pid[[:space:]=]*[0-9]+|build[[:space:]-]?(slot|lock)|mutex|run[[:space:]]*=[[:space:]]*[A-Za-z0-9._-]+|https?://[^[:space:]]+|/[A-Za-z0-9._-]+/[^[:space:]]*)'; then
+    printf 'verifiable'
+    return 0
+  fi
+  # A declared clearing time is checkable against the clock - but it answers WHEN,
+  # not WHAT, so it cannot certify a subject that is itself a bare background job.
+  # `background test run bhymd1si9, until <time>` is the 2026-09-22 line with a
+  # clock attached: waiting the time out on a job that died with the turn is
+  # exactly the failure, so the word `background` with no resolvable handle above
+  # withholds the verdict a lone `until` would otherwise earn. The check sits here
+  # rather than ahead of the handles, so a worker who names a pid, a build-lock
+  # hold, a run id, a URL or a path still gets a verifiable verdict however its
+  # prose happens to mention a background job.
+  if printf '%s' "$line" | grep -qiE '(^|[^[:alnum:]])background([^[:alnum:]]|$)'; then
+    printf 'unverifiable'
+    return 0
+  fi
+  if status_paused_until "$line" >/dev/null 2>&1; then
+    printf 'verifiable'
+    return 0
+  fi
+  printf 'unverifiable'
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
@@ -1974,6 +2041,92 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# --- a task-owned run still in flight after its worker's turn ended ----------
+#
+# THE PAIRING THIS EXISTS FOR. A held build slot proves WORK is progressing. It
+# does NOT prove an AGENT is attached to that work, and the two were conflated
+# twice in two days: a worker launched a test run, declared the wait, ended its
+# turn, and nothing was left to observe the result. On 2026-09-21 the run
+# finished and its result sat uncollected while six stale alarms were dismissed
+# on the strength of the lock alone - the detector was right every time. So the
+# probe below answers ONLY the work half; its callers must establish the agent
+# half independently (bin/fm-watch.sh reads the semantic busy verdict for a
+# positive `idle`, which is the turn-ended truth - state/<id>.turn-ended is a
+# wake NOTIFICATION, not current state, and bin/fm-busy-lib.sh owns that
+# boundary). Neither half alone may hold or fire an escalation.
+#
+# Reading the build lock is what makes this cheap and harness-independent: every
+# command that meaningfully loads the machine goes through `mutex` by contract
+# (bin/fm-build-lock.sh's header owns it, and bin/fm-brief.sh rule 8 puts every
+# worker under it), so a worker's own build or test run IS a build-slot holder,
+# and the holder record carries the pid, elapsed time and the cwd it was taken
+# in. Nothing here re-derives that record's format; `--holders` is its one
+# parseable view.
+FM_TASK_SHELL_LOCK_BIN="${FM_TASK_SHELL_LOCK_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-build-lock.sh}"
+
+# Wall-clock bound on the one `--holders` read, for the same reason the worktree
+# write probe has one: this runs synchronously inside a supervisor poll, and the
+# build slots live outside every home, so a hung mount under the lock root must
+# cost the escalation the bound rather than wedge the supervisor that exists to
+# notice a wedge. Hitting it reads as no evidence, like every other negative.
+FM_TASK_SHELL_TIMEOUT=${FM_TASK_SHELL_TIMEOUT:-10}
+
+# 0 when a LIVE build-slot holder was taken inside <id>'s recorded worktree, and
+# prints that holder as `pid <pid>, held <secs>s, running: <command>` - the
+# checkable detail a supervisor needs to describe the hold without asking the
+# worker. 1 for every other outcome, including an id with no recorded worktree,
+# a worktree that is gone, a free machine, an unreadable or timed-out lock read,
+# and a kind=secondmate task (which records a provisioned home, not a code tree,
+# and whose own workers take their own holds). Absence of evidence therefore
+# always leaves a caller's existing schedule untouched.
+#
+# Attribution is by cwd: the holder's `pwd -P` at acquisition equal to the
+# An optional third argument supplies an already-read `--holders` snapshot so a
+# supervisor polling several tasks reads the machine's slots once per cycle.
+#
+# worktree or anchored under it with a `/` boundary, so a sibling worktree whose
+# path merely shares a prefix (`.../2/firstmate` against `.../2/firstmate-old`)
+# is never claimed. A holder with no recorded cwd is unattributable and is
+# skipped rather than credited to whichever task asked first.
+crew_task_shell_running() {  # <id> <state> [holders-snapshot] -> holder detail
+  local id=$1 state=$2 snapshot=${3-} wt kind bound out pid secs cwd cmd
+  [ -n "$id" ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  if [ "$#" -ge 3 ]; then
+    # The caller already read the slots this cycle. One supervisor poll asks about
+    # every quiet task against ONE machine-wide set of slots, so re-reading them
+    # per task would multiply the cost by the fleet for an answer that cannot
+    # differ within a cycle - and a snapshot also keeps the answer consistent
+    # across the windows of a single poll. An explicitly empty snapshot means the
+    # caller saw a free machine, which is a real negative, not a missing read.
+    out=$snapshot
+  else
+    bound=$FM_TASK_SHELL_TIMEOUT
+    case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+    out=$(fm_run_timed "$bound" "$FM_TASK_SHELL_LOCK_BIN" --holders 2>/dev/null || true)
+  fi
+  [ -n "$out" ] || return 1
+  while IFS=$'\t' read -r pid secs cwd cmd; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$cwd" ] || continue
+    case "$cwd" in
+      "$wt"|"$wt"/*) : ;;
+      *) continue ;;
+    esac
+    case "$secs" in
+      ''|*[!0-9]*) printf 'pid %s, running: %s' "$pid" "$cmd" ;;
+      *) printf 'pid %s, held %ss, running: %s' "$pid" "$secs" "$cmd" ;;
+    esac
+    return 0
+  done <<EOF
+$out
+EOF
+  return 1
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

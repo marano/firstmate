@@ -67,6 +67,36 @@
 #                          landing never reaches any of this triage, in either
 #                          posture: no stale wake, no wedge timer, and no
 #                          escalation count.
+#   stale: <window> (the worker's turn ended ...s ago while a run of its own is
+#                    still going - pid N, held Ns, running: ...)
+#                          the pairing a held build slot alone cannot show: the
+#                          work IS progressing and no agent is attached to it.
+#                          The wedge ladder is HELD for as long as that run is
+#                          live - never escalated toward a relaunch that would
+#                          kill it, never suppressed either - and this reason
+#                          re-surfaces only on the long pause cadence, naming the
+#                          holder's pid, command and elapsed time so a long run
+#                          can be told from a stuck one
+#   stale: <window> (the worker's own run has finished and its turn was already
+#                    over, so nothing collected the result - was ...)
+#                          the held run above is gone while the turn is still
+#                          over, so a finished result is sitting there
+#                          unobserved. Surfaced AT ONCE rather than on any
+#                          cadence, because the whole cost of this condition is
+#                          the time that result spends uncollected; the fix is to
+#                          steer the worker to read it, never to relaunch
+#   stale: <window> (paused ...s, awaiting external - ... . This wait names
+#                    nothing this supervisor can check, ...)
+#                          an ANNOTATION on the declared-wait recheck, not a wake
+#                          of its own: the wait named no pid, build-slot holder,
+#                          run id, URL, path or clearing time, so nothing
+#                          firstmate can run confirms the work still exists. The
+#                          bounded cadence is deliberately unchanged - only the
+#                          reason says so. A captain-held transfer is never
+#                          annotated, its subject being the captain rather than a
+#                          job (status_wait_subject_class in
+#                          bin/fm-classify-lib.sh owns the classification, and
+#                          bin/fm-brief.sh's PAUSE_RULE owns the worker's side)
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -1227,6 +1257,160 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# --- a worker whose turn ended while its own run is still in flight ---------
+#
+# THE PAIRING. A held build slot proves WORK is progressing; it does NOT prove
+# an AGENT is attached to that work, and every part of this section exists
+# because those two were read as one. On 2026-09-21 a worker launched a test
+# run, declared the wait and ended its turn: the run finished, its result sat
+# uncollected, and six stale escalations against that lane were dismissed on the
+# strength of the lock alone. The detector was right every time. On 2026-09-22
+# the same shape cost more - the worker's bare background job DIED with the turn
+# that launched it, so there was no result to collect at all, and firstmate,
+# reading a declared wait that named only a harness-internal job id, instructed
+# the worker to let that dead job finish.
+#
+# So the work half and the agent half are established SEPARATELY here:
+#   work  - crew_task_shell_running, a live build-slot holder taken inside this
+#           task's own worktree (bin/fm-classify-lib.sh owns the probe).
+#   agent - a POSITIVE `idle` semantic busy verdict, which is the turn-ended
+#           truth. Deliberately not `not busy`: `unknown` is not evidence of
+#           anything, and treating it as a finished turn is how a lane that is
+#           merely waiting with its agent present would be alarmed on. It is
+#           also deliberately not state/<id>.turn-ended, a wake NOTIFICATION
+#           the watcher owns rather than current state (bin/fm-busy-lib.sh).
+#
+# Neither answer alone holds or fires anything, and the outcome is never to
+# suppress the alarm (which would have silenced a true one here) and never to
+# relaunch (which kills a lane that is mid-test). It is one of two:
+#   a run still in flight        -> HOLD the ladder, long cadence, naming the
+#                                   holder's pid, command and elapsed time.
+#   that held run now gone       -> surface AT ONCE: the result is sitting there
+#                                   with nobody attached to collect it.
+# Anything else falls through untouched, so a quiet worker with no run of its own
+# still reaches the ordinary ladder it always did.
+# A declared wait whose subject cannot be CHECKED is handled outside this triage,
+# as an annotation on the recheck reason a declared wait already gets: that
+# cadence has its own owner (handle_paused_stale), and an unnamed subject is not
+# grounds to take it away - surfacing from here instead replaced the established
+# contract for every ordinary pause, a dead-agent declared hold included.
+# A verifiable declared wait with no run of its own is unchanged - it keeps the
+# ordinary long pause cadence, which is what a healthy declared wait has always
+# had.
+
+# WHAT HOLDING THE LADDER COSTS, considered and accepted. While the hold stands,
+# a run that has FROZEN while still owning its slot no longer wedge-escalates on
+# FM_STALE_ESCALATE_SECS; it waits for the FM_PAUSE_RESURFACE_SECS recheck, whose
+# reason carries the holder's elapsed time precisely so a long run can be told
+# from a stuck one. Nothing here can separate the two from the lock alone - a
+# frozen process holds its slot exactly as a working one does - and both
+# alternatives are worse in the direction that already cost real work: capping
+# the hold on elapsed time escalates legitimate long suites, and not holding at
+# all is the six false escalations this exists to remove. A frozen run is still
+# caught the moment it dies, because losing the slot surfaces the uncollected
+# result at once, and the declared-wait path has always given a held-up lane this
+# same cadence.
+#
+# WHICH HARNESSES THIS REACHES, and why that is the right way round. The agent
+# half needs a POSITIVE idle, so this triage is live exactly where the busy
+# contract can produce one: any adapter with a trusted semantic record (claude,
+# gemini, pi/pi-signed, omp, opencode), plus the cursor transcript, the muse
+# session log, and the Grok rendered fallback. Codex, standalone Kimi, Rovo and
+# AGY classify `unknown` rather than idle (bin/fm-busy-lib.sh owns why for each),
+# so a lane on one of those falls through here untouched and keeps the ordinary
+# ladder. That is the deliberate direction: declining to claim a finished turn
+# costs a late notice, while guessing one would hold a real wedge off the ladder
+# indefinitely. An adapter earns this detector by earning an idle verdict, not by
+# adding a special case here.
+
+# The machine's build slots, read ONCE per poll and shared by every window of
+# that poll (crew_task_shell_running's snapshot argument owns why). Empty means
+# a free machine, which is a real negative; unset means this poll has not read
+# them yet.
+TASK_SHELL_HOLDERS=
+TASK_SHELL_HOLDERS_READ=1
+
+# Populates TASK_SHELL_HOLDERS in place. Deliberately NOT a function that prints
+# its answer: every caller would then have to run it in a command substitution,
+# whose assignments are discarded with the subshell, so the cache would never
+# survive its first use and the slots would be re-read once per window per poll.
+task_shell_holders_read() {
+  local bound
+  [ "$TASK_SHELL_HOLDERS_READ" -ne 0 ] || return 0
+  bound=$FM_TASK_SHELL_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  TASK_SHELL_HOLDERS=$(fm_run_timed "$bound" \
+    "$FM_TASK_SHELL_LOCK_BIN" --holders 2>/dev/null || true)
+  TASK_SHELL_HOLDERS_READ=0
+}
+
+# Drop a window's turn-ended-with-a-run-in-flight chain. Called wherever the
+# stale bookkeeping resets, so a new quiet stretch never inherits a finished
+# chain's cadence - and, critically, so a worker that came back and collected
+# its own result leaves nothing behind that would later read as uncollected.
+clear_task_shell_tracking() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.taskshell-since-$key" "$STATE/.taskshell-resurfaced-$key" \
+    "$STATE/.taskshell-holder-$key"
+}
+
+# The three-way decision above. 0 when this window was fully handled and the
+# caller must not run its ordinary triage; 1 to fall through unchanged.
+# <busy-state> is the verdict the poll already read, so nothing here re-reads it.
+task_shell_triage() {  # <window> <task> <busy-state> -> 0 if handled
+  local win=$1 task=$2 busy_state=$3 key holder prev last class since age detail
+  key=$(window_key "$win")
+  [ -n "$task" ] || return 1
+  # Not a positively finished turn: no claim to make in either direction. An
+  # `unknown` verdict especially must not be read as a finished turn, or a lane
+  # merely waiting with its agent present is exactly what gets alarmed on.
+  if [ "$busy_state" != idle ]; then
+    clear_task_shell_tracking "$key"
+    return 1
+  fi
+  task_shell_holders_read
+  if holder=$(crew_task_shell_running "$task" "$STATE" "$TASK_SHELL_HOLDERS"); then
+    # Work in flight with nobody attached. HOLD the ladder rather than escalate
+    # it: escalating ends in a relaunch that would kill a real run mid-test. The
+    # escalation counter is deliberately left alone - this is not an escalation,
+    # and a later genuine one must keep the history it had already earned.
+    # The idle timer is deliberately left aging, unlike the write deferral's: this
+    # branch preempts the ladder on every poll for as long as the run is live, and
+    # keeping the timer is what lets the ladder RESUME the moment that run is gone
+    # instead of granting the lane another full threshold of quiet first.
+    [ -e "$STATE/.taskshell-since-$key" ] || date +%s > "$STATE/.taskshell-since-$key"
+    printf '%s' "$holder" > "$STATE/.taskshell-holder-$key"
+    age=$(age_of "$STATE/.taskshell-since-$key")
+    resurface_absorbed "$win" "$STATE/.taskshell-resurfaced-$key" "$age" \
+      "stale: $win (the worker's turn ended ${age}s ago while a run of its own is still going - $holder; held off the wedge ladder, not wedged, and not to be relaunched while that run is live; confirm the run is real progress)"
+    triage_log "absorbed stale (turn ended with a task-owned run in flight, ${age}s): $win"
+    return 0
+  fi
+  prev=$(cat "$STATE/.taskshell-holder-$key" 2>/dev/null || true)
+  if [ -n "$prev" ]; then
+    # It was running while the turn was over, and now it is not. This is the
+    # defect itself, caught at the only moment it can be acted on cheaply: the
+    # result exists and nothing is attached to collect it. Surfaced AT ONCE,
+    # never on the long cadence - the whole cost of this bug is the time that
+    # result spends sitting there.
+    detail="stale: $win (the worker's own run has finished and its turn was already over, so nothing collected the result - was $prev; steer the worker to read its result, do not relaunch it)"
+    fm_wake_append stale "$win" "$detail" || exit 1
+    clear_task_shell_tracking "$key"
+    wake "$detail"
+    return 0
+  fi
+  # No run of its own, turn over. Whether the wait it declared names anything
+  # checkable still matters, but that verdict does NOT belong to this function:
+  # a declared wait already has an owner with an established contract
+  # (handle_paused_stale's bounded cadence), and surfacing from here instead
+  # replaced that contract for every ordinary pause whose subject happens to be
+  # unnamed - including a dead-agent declared hold, which has its own bounded
+  # recheck and must keep it. The class is annotated onto that recheck's reason
+  # instead, which is where a supervisor reads a quiet declared wait anyway.
+  clear_task_shell_tracking "$key"
+  return 1
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1342,6 +1526,20 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
+  # Whether this wait names something a supervisor can resolve is the difference
+  # between a recheck worth trusting and one that reads a dead job as a fact:
+  # firstmate took `paused: waiting on background test run bhymd1si9` at face
+  # value on 2026-09-22 and instructed the worker to let that job finish, when
+  # nothing it could run answered whether the job still existed. Only the
+  # unverifiable case is annotated, so a wait naming a pid, a build-slot holder,
+  # a run id, a URL, a path or a clearing time reads exactly as it always has,
+  # and a captain-held transfer is never annotated because the subject of that
+  # wait is the captain rather than a job (status_wait_subject_class in
+  # bin/fm-classify-lib.sh owns the classification).
+  if ! status_is_captain_held "$last" \
+    && [ "$(status_wait_subject_class "$last" 2>/dev/null || true)" = unverifiable ]; then
+    reason="$reason. This wait names nothing this supervisor can check, so it is not evidence the work still exists: ask what it is on rather than instructing it to keep waiting"
+  fi
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
@@ -1388,6 +1586,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
+      clear_task_shell_tracking "$key"
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if captain_held_silenced "$(last_status_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
@@ -1420,6 +1619,7 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
+  clear_task_shell_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
@@ -2309,6 +2509,10 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Invalidate this poll's build-slot snapshot: one read serves every window of
+  # a cycle, and the next cycle must see the machine as it is by then.
+  TASK_SHELL_HOLDERS_READ=1
+
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi
@@ -2663,7 +2867,8 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    busy_state=$(window_busy_state "$w" "$tail40")
+    if [ "$busy_state" = busy ]; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2761,8 +2966,17 @@ EOF
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            task=$(window_to_task "$w" "$STATE")
+          # Before any of that: the worker may have ENDED ITS TURN while a run
+          # of its own is still in flight, or just after one finished with
+          # nobody left to collect the result. That pairing is neither a healthy
+          # declared wait nor a wedge, and answering it as either is what cost
+          # two lane runs in two days, so it is decided first and on its own
+          # terms (task_shell_triage's header owns the three outcomes). It falls
+          # through untouched whenever the turn is not positively over.
+          task=$(window_to_task "$w" "$STATE")
+          if task_shell_triage "$w" "$task" "$busy_state"; then
+            :
+          elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$key"
@@ -2778,7 +2992,6 @@ EOF
                 ;;
             esac
           else
-            task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
@@ -2804,6 +3017,7 @@ EOF
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
+          clear_task_shell_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -2822,6 +3036,7 @@ EOF
       else
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
+        clear_task_shell_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

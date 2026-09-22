@@ -1831,5 +1831,59 @@ interrupted_reservation_case term TERM
 interrupted_reservation_case kill 9
 pass "a whole-machine run interrupted while draining gives its reserved slots straight back"
 
+# --- --holders: the one parseable view of the holder records -----------------
+#
+# firstmate's supervision side has to decide whether a quiet worker still has a
+# build or test run of ITS OWN in flight, and the prose --status lines are
+# written for people rather than parsers. --holders answers that question, and
+# what makes the answer usable is the cwd field: without it a live hold cannot
+# be attributed to the worktree that took it, and a supervisor is back to
+# reasoning about "some build is running somewhere on this machine".
+#
+# Mutants that must turn this red, each applied and confirmed:
+#   - drop the cwd field, or leave it empty for a display that does carry an
+#     `[in <path>]` suffix: attribution is gone.
+#   - drop the fm_pid_alive filter: a record a SIGKILLed holder left behind is
+#     reported as running work, which is the exact false positive that would
+#     make a supervisor hold its ladder for a run that no longer exists.
+holders_wt="$TMP_ROOT/holders-worktree"
+mkdir -p "$holders_wt"
+holders_wt=$(cd "$holders_wt" && pwd -P)
+
+assert_equals '' "$(FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --holders)" \
+  "--holders printed a holder for a free machine"
+
+# `exec` so the recorded holder pid IS this pid: the script replaces the
+# subshell, takes the slot itself, and forks only the wrapped sleep.
+( cd "$holders_wt" \
+  && exec env FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --label 'pinned test lane' sleep 60 ) &
+holders_pid=$!
+await_path "$LOCK_ROOT/fm-build-lock.info" 300 \
+  || { kill -9 "$holders_pid" 2>/dev/null || true; fail "the --holders fixture never took a slot"; }
+
+holders_line=$(FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --holders)
+assert_equals 1 "$(printf '%s\n' "$holders_line" | grep -c .)" \
+  "--holders did not report exactly one live holder: $holders_line"
+IFS=$(printf '\t') read -r h_pid h_secs h_cwd h_cmd <<EOF
+$holders_line
+EOF
+assert_equals "$holders_pid" "$h_pid" "--holders reported the wrong holder pid"
+case "$h_secs" in
+  ''|*[!0-9]*) fail "--holders did not report the hold's elapsed seconds: '$h_secs'" ;;
+esac
+assert_equals "$holders_wt" "$h_cwd" \
+  "--holders did not report the cwd the hold was taken in, so no caller can attribute it"
+assert_equals 'pinned test lane' "$h_cmd" "--holders did not report the hold's label"
+
+# SIGKILL leaves the holder record behind with no process to match it. A reader
+# that trusts the record would now report running work that cannot exist.
+kill -9 "$holders_pid" 2>/dev/null || true
+await_pid_exit "$holders_pid" 300 || fail "the --holders fixture outlived SIGKILL"
+wait "$holders_pid" 2>/dev/null || true
+assert_equals '' "$(FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --holders)" \
+  "--holders reported a dead holder's leftover record as running work"
+settle_root "$LOCK_ROOT"
+pass "--holders reports live holders as parseable pid/elapsed/cwd/command lines and never a dead one"
+
 assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "the suite must leave no lock behind"
 pass "fm-build-lock behaves"

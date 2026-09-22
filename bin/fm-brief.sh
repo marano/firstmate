@@ -413,15 +413,38 @@ fi
 # "external" is gone from the worker-facing trigger. The supervisor-side
 # mechanism prose (bin/fm-watch.sh, docs/architecture.md) keeps that word,
 # because there the wait is external to firstmate rather than to the worker.
+#
+# "a background command" USED to head that example list as a legitimate thing to
+# wait on, and that was false twice over. A bare background job dies with the
+# turn that launched it (2026-09-22: a validation lane's test run was destroyed,
+# not merely unobserved), and even one that survives reports to nobody, because
+# the rule's own "then `working:` or `done:` once it reports" is unreachable
+# after the turn ends (2026-09-21: the run finished and its result sat
+# uncollected). Declaring the wait was never the missing piece - being present
+# for its end is - so the prescription replaced the example.
+#
+# The verifiability sentence is the other half of the same pair: firstmate can
+# resolve a pid, a build-slot holder, a run id, a URL, a path or a clock time
+# from outside the worker, and cannot resolve a harness-internal job id at all.
+# It read one such id as fact and instructed a worker to keep waiting on a job
+# that had already died. status_wait_subject_class in bin/fm-classify-lib.sh is
+# the supervisor-side reader of exactly this wording.
 IFS= read -r -d '' PAUSE_RULE <<EOF || true
    **Before you go quiet to wait, say so.** A job you launched yourself counts exactly as much as
-   something outside the task: a test or build run, a queued \`mutex\` hold, a background command,
+   something outside the task: a test or build run, a queued \`mutex\` hold,
    your own validation round, an upstream release, a rate-limit reset, a scheduled window.
    Append \`$PAUSED_VERB: {why}\` BEFORE you stop, then \`working:\` or \`done:\` once it reports; add
    \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know when it clears. Firstmate leaves a declared wait
    alone and rechecks it on a long cadence, but cannot tell an undeclared quiet pane from a wedged
    worker, so it interrupts you to ask. \`$PAUSED_VERB:\` is a wait you expect to clear on its own;
    use \`blocked:\` when you are stuck and need help, and never downgrade a real blocker to stay quiet.
+   **Run the job in the FOREGROUND, or under a monitor that survives your turn - never a bare
+   background job whose result you need.** It dies with the turn that launched it, so its result is
+   destroyed rather than merely unobserved, and declaring the wait does not save it: you have to
+   still be there when it reports. **Name something firstmate can check** - a pid, the build slot,
+   \`run=<id>\`, a URL, a path, or \`until\` - because it cannot resolve a harness-internal job id from
+   outside your session. When such an id is all you have, put the word \`unverifiable\` in the line,
+   so the wait is treated as unchecked instead of as fact.
 EOF
 PAUSE_RULE=${PAUSE_RULE%$'\n'}
 
