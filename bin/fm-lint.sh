@@ -4,40 +4,49 @@
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. CI and
 # no-mistakes both invoke this script with no arguments, so this owner selects
-# the context-appropriate rule set without duplicating lint configuration.
+# the context-appropriate file set without duplicating lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
-# following. CI, main, and merge-base-less runs keep --norc --external-sources
-# with full dataflow over the whole canonical set. An ordinary local branch
-# (changed-file mode, including the no-mistakes lint step) drops
-# --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
-# and SC2329, the codes that need library context. Those codes still run in
-# CI over the whole set, and every changed-file run prints a line naming them
-# as not evaluated. Running them locally was measured at 14m54s wall (two
-# workers, 419 roots, ShellCheck 0.11.0, Apple M-series 10 cores) against
-# seconds for the changed-file pass, so the gap is disclosed, not closed.
-# Explicit paths keep --external-sources with the
-# selected dataflow mode.
+# following.
+#
+# FORWARD CLOSURE. Every mode analyses with --norc --external-sources, and every
+# mode but --fast keeps full dataflow, so the only thing a local branch changes
+# is WHICH roots run. A code CI enforces can therefore never go unraised locally
+# on a file the branch changed. The local pass used to drop --external-sources
+# and exclude SC1091, SC2034, SC2153, and SC2329 as "the cross-file codes", but
+# that list was incomplete and could not be completed: which codes need library
+# context is ShellCheck's property, not this script's. PR 65 passed that local
+# gate clean and CI then failed it entirely on SC2031, which was not on the
+# list, because the test sources a library inside a subshell and only a
+# source-following pass can see the assignments that make the subshell
+# modification visible. Configuration parity is the only closure that holds
+# against a code nobody has enumerated yet.
+#
+# ONE INVOCATION PER ROOT is what bounds what that costs locally, and
+# changed-file mode also runs its two shards one at a time, so a local lint
+# peaks at its single heaviest CHANGED root instead of at a shard sum.
+# --jobs and FM_LINT_JOBS still override the shard concurrency.
+# docs/verification/lint-option-a.md owns the measurements, including the
+# correction that per-root running does bound peak RSS on expensive roots.
 # Tests stop source analysis at imported production modules because CI analyzes
 # every production shell separately as a canonical, source-aware root.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
 #
-# With no explicit paths, the file set and source-following posture depend
-# on context:
+# With no explicit paths, the file set depends on context:
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
-#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
-#     --external-sources and full dataflow. This is what CI always runs, so
-#     CI coverage never depends on a local diff.
+#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, passing a
+#     whole shard to one invocation. This is what CI always runs, so CI
+#     coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
-#     `gh`). That local pass drops --external-sources and excludes SC1091,
-#     SC2034, SC2153, and SC2329. A branch with zero matching changed files
-#     skips ShellCheck and prints a "no changed lint targets" note, then
-#     still runs the backend-purity check and validates workflows.
+#     `gh`), with CI's ShellCheck configuration and the bounded running above.
+#     A branch with zero matching changed files skips ShellCheck and prints a
+#     "no changed lint targets" note, then still runs the backend-purity check
+#     and validates workflows.
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 # Explicit core bin/ and bin/backends/ scripts still receive the
@@ -65,9 +74,6 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
-# Cross-file codes that need --external-sources. Local changed-file mode
-# cannot judge them, so they stay CI-only.
-LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
@@ -82,6 +88,9 @@ fm_lint_worker_stop() {
   FM_LINT_WORKER_SHELLCHECK_PID=
 }
 
+# fm_lint_worker analyses one shard. FM_LINT_INTERNAL_PER_ROOT=1 gives each root
+# its own ShellCheck process, which is what keeps the shard's peak RSS at its
+# heaviest single root; the default hands the whole shard to one invocation.
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
   local manifest=$1 output_dir=$2 shard_index=$3 tab index path output invocation_rc rc=0
   local -a roots shellcheck_args
@@ -107,7 +116,7 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
       shellcheck_args+=(--extended-analysis=false)
     fi
     : > "$output.out"
-    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
+    if [ "${FM_LINT_INTERNAL_PER_ROOT:-0}" -eq 0 ]; then
       "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" >> "$output.out" 2>&1 &
       FM_LINT_WORKER_SHELLCHECK_PID=$!
       wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
@@ -479,6 +488,8 @@ fm_lint_run_backend_purity() {
 }
 
 JOBS=${FM_LINT_JOBS:-2}
+JOBS_EXPLICIT=0
+[ -z "${FM_LINT_JOBS:-}" ] || JOBS_EXPLICIT=1
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
@@ -488,10 +499,12 @@ while [ "$#" -gt 0 ]; do
     --jobs)
       [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --jobs requires 1 or 2.\n' >&2; exit 2; }
       JOBS=$2
+      JOBS_EXPLICIT=1
       shift 2
       ;;
     --jobs=*)
       JOBS=${1#*=}
+      JOBS_EXPLICIT=1
       shift
       ;;
     --telemetry)
@@ -573,6 +586,7 @@ CHANGED_MODE=0
 EXPLICIT_PATHS=0
 FOLLOW_SOURCES=1
 EXCLUDE_CODES=
+PER_ROOT=0
 if [ "$#" -gt 0 ]; then
   EXPLICIT_PATHS=1
   ROOTS=("$@")
@@ -600,10 +614,13 @@ else
     done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
   fi
 fi
-if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ]; then
-  FOLLOW_SOURCES=0
-  EXCLUDE_CODES=$LOCAL_NOX_EXCLUDE
-  ANALYSIS_MODE=local
+if [ "$CHANGED_MODE" -eq 1 ]; then
+  # The changed set is small, so the bound is worth more than the concurrency:
+  # one root per process and one shard at a time keeps the peak at the heaviest
+  # changed root. An explicit --jobs or FM_LINT_JOBS still wins.
+  PER_ROOT=1
+  [ "$JOBS_EXPLICIT" -eq 1 ] || JOBS=1
+  [ "$FAST" -eq 1 ] || ANALYSIS_MODE=local
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
@@ -636,10 +653,8 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 if [ "$FAST" -eq 1 ]; then
   printf 'fm-lint.sh: fast local mode; ShellCheck extended analysis disabled\n' >&2
-elif [ "$FOLLOW_SOURCES" -eq 0 ]; then
-  printf 'fm-lint.sh: local changed-file mode; ShellCheck source following disabled\n' >&2
-  printf 'fm-lint.sh: NOT EVALUATED HERE: %s. CI evaluates them over the whole repository, so a green here does not cover them.\n' \
-    "${LOCAL_NOX_EXCLUDE//,/ }" >&2
+elif [ "$CHANGED_MODE" -eq 1 ]; then
+  printf 'fm-lint.sh: local changed-file mode; CI rule set on the %s changed root(s)\n' "$ROOT_COUNT" >&2
 else
   printf 'fm-lint.sh: full ShellCheck extended analysis enabled\n' >&2
 fi
@@ -773,6 +788,7 @@ fm_lint_run_worker() {  # <worker-index>
         /usr/bin/time -lp -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+        FM_LINT_INTERNAL_PER_ROOT="$PER_ROOT" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
@@ -780,6 +796,7 @@ fm_lint_run_worker() {  # <worker-index>
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+        FM_LINT_INTERNAL_PER_ROOT="$PER_ROOT" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
@@ -788,6 +805,7 @@ fm_lint_run_worker() {  # <worker-index>
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
       env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
       FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
+      FM_LINT_INTERNAL_PER_ROOT="$PER_ROOT" \
       FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi

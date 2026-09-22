@@ -119,10 +119,49 @@ with_blind_ancestry() {  # <fakebin> [VAR=VAL ...]
     PATH="$fakebin:$BASE_PATH" "$HARNESS"
 }
 
+# reported_comm <executable>: the process name `ps` reports for a process this
+# executable starts, with any leading path stripped, because macOS `ps -o comm=`
+# answers with the full executable path and Linux with the bare name. Empty when
+# the executable cannot run at all.
+# The command substitution is load-bearing for the same reason it is in
+# under_process: a bare `-c ps ...` lets the shell exec ps in place, replacing
+# the very process being named, and the probe then answers 'ps'.
+reported_comm() {  # <executable>
+  local out
+  # shellcheck disable=SC2016 # $$ and $r must expand in the named process, not here.
+  out=$("$1" -c 'r=$(ps -o comm= -p $$); printf "%s" "$r"' 2>/dev/null) || return 0
+  printf '%s\n' "${out##*/}"
+}
+
+# named_bin <dir> <name>: a runnable executable at <dir>/<name> whose process the
+# ancestry walk sees as <name>, which is the whole evidence layer these cases
+# drive.
+#
+# A symlink is tried first because it names the process after the link while the
+# program executed stays the system bash at its own path. Copying that binary
+# instead - what this used to do unconditionally - made every ancestry case
+# resolve '' on macOS, which binds a platform binary's code signature to its
+# system path and SIGKILLs the copy the instant it execs; the Linux runner
+# passed the same commit. The copy remains the fallback for a platform that
+# reports a symlinked process under the target's name instead of the link's.
+# Whichever mechanism is used is PROVEN here against ps, the source
+# fm-harness.sh itself reads, because a fixture that cannot name a process would
+# make every ancestry case below vacuous rather than red.
 named_bin() {  # <dir> <name>
-  mkdir -p "$1"
-  cp "$(command -v bash)" "$1/$2"
-  printf '%s\n' "$1/$2"
+  local dir=$1 name=$2 real candidate
+  real=$(command -v bash) || fail "these cases need bash to stand in for a harness process"
+  mkdir -p "$dir"
+  candidate="$dir/$name"
+  rm -f "$candidate"
+  ln -s "$real" "$candidate" 2>/dev/null || :
+  if [ "$(reported_comm "$candidate")" != "$name" ]; then
+    rm -f "$candidate"
+    cp "$real" "$candidate" \
+      || fail "could not build a process named $name: neither a symlink nor a copy of $real"
+    [ "$(reported_comm "$candidate")" = "$name" ] \
+      || fail "this platform reports neither a symlink nor a copy of $real as '$name', so no ancestry case here can prove anything"
+  fi
+  printf '%s\n' "$candidate"
 }
 
 # --- 1. A foreign marker never renames a markerless harness -----------------

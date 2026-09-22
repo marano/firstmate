@@ -159,10 +159,8 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
-  assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
-  assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
-  assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
-  assert_contains "$help" "SC2329" "fm-lint.sh --help omitted the local SC2329 exclusion"
+  assert_contains "$help" "FORWARD CLOSURE" \
+    "fm-lint.sh --help omitted the local/CI rule-set parity contract"
   pass "fm-lint.sh --help reports the complete executable interface"
 }
 
@@ -245,7 +243,10 @@ fm_lint_write_diff_file() {
 # selected without depending on real ShellCheck findings. When
 # FM_TEST_MODE_LOG is set, it records the effective analysis mode, treating
 # ShellCheck's default as full analysis. When FM_TEST_FLAG_LOG is set, it
-# records whether --external-sources was passed and the --exclude value.
+# records whether --external-sources was passed and the --exclude value. When
+# FM_TEST_OPTION_LOG is set, it records the complete option list ahead of the
+# roots, one invocation per line, which is what the local/CI rule-set parity
+# check compares.
 fm_lint_stub_shellcheck() {
   local fakebin=$1 log=$2
   : > "$log"
@@ -258,13 +259,16 @@ fi
 mode=on
 follow=no
 exclude=none
+options=
 while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
+  options="\${options}\${options:+ }\$1"
   case "\$1" in
     --extended-analysis=false) mode=off ;;
     --external-sources) follow=yes ;;
     --exclude=*) exclude=\${1#--exclude=} ;;
     --exclude)
       shift
+      options="\$options \${1:-}"
       exclude=\${1:-none}
       ;;
   esac
@@ -275,6 +279,9 @@ if [ -n "\${FM_TEST_MODE_LOG:-}" ]; then
 fi
 if [ -n "\${FM_TEST_FLAG_LOG:-}" ]; then
   printf 'external-sources=%s\nexclude=%s\n' "\$follow" "\$exclude" >> "\$FM_TEST_FLAG_LOG"
+fi
+if [ -n "\${FM_TEST_OPTION_LOG:-}" ]; then
+  printf '%s\n' "\$options" >> "\$FM_TEST_OPTION_LOG"
 fi
 [ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
@@ -464,8 +471,6 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
-  assert_contains "$out" "NOT EVALUATED HERE: SC1091 SC2034 SC2153 SC2329" \
-    "zero-changed run did not name the rules it skipped"
   assert_contains "$out" "workflow files valid" \
     "zero-changed run skipped workflow YAML validation"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
@@ -503,9 +508,9 @@ fm_lint_assert_flag_log() {
     || fail "ShellCheck flags were not external-sources=$expected_follow exclude=$expected_exclude"$'\n'"$(cat "$flag_log")"
 }
 
-test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
+test_changed_mode_keeps_the_ci_rule_set() {
   local tmp fakebin log flag_log mode_log diff_file telemetry out target
-  tmp=$(fm_test_tmproot fm-lint-local-nox)
+  tmp=$(fm_test_tmproot fm-lint-local-parity)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
   log="$tmp/shellcheck.log"
@@ -527,16 +532,48 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
     || fail "changed-mode lint did not run ShellCheck on exactly the changed file"$'\n'"logged: $(cat "$log")"
   [ "$(cat "$mode_log")" = on ] \
     || fail "changed-mode local lint disabled dataflow analysis"
-  fm_lint_assert_flag_log "$flag_log" no "SC1091,SC2034,SC2153,SC2329"
-  assert_contains "$out" "source following disabled" \
-    "changed-mode local lint did not disclose dropped source following"
+  fm_lint_assert_flag_log "$flag_log" yes none
   assert_grep $'analysis_mode\tlocal' "$telemetry" \
     "telemetry did not record local analysis mode"
   assert_grep $'source_directives\t4' "$telemetry" \
     "telemetry did not count the changed root's source directives"
-  assert_grep $'source_followed_directives\t0' "$telemetry" \
-    "telemetry reported followed sources in no-external-sources mode"
-  pass "fm-lint.sh changed mode drops source following and excludes cross-file codes"
+  assert_grep $'source_followed_directives\t4' "$telemetry" \
+    "telemetry did not report the changed root's sources as followed"
+  pass "fm-lint.sh changed mode analyses with CI's source following and no exclusions"
+}
+
+# The closure this file exists to hold: whatever the local branch changes about
+# WHICH roots run, it must change nothing about HOW ShellCheck is configured.
+# A code CI enforces can only go unraised locally through a configuration
+# difference, and an enumerated exclusion list could not keep up - PR 65 passed
+# the excluded-codes gate clean and CI failed it on SC2031, which no list named.
+# Comparing the whole option list is what stays correct for the next such code.
+test_changed_mode_option_list_equals_the_ci_option_list() {
+  local tmp fakebin log diff_file ci_options local_options target
+  tmp=$(fm_test_tmproot fm-lint-option-parity)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-install-shellcheck.sh"
+  fm_lint_write_diff_file "$diff_file" "$target"
+
+  PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_OPTION_LOG="$tmp/ci.options" "$LINT" >/dev/null 2>&1 \
+    || fail "CI lint failed under the ShellCheck stub"
+  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_TEST_OPTION_LOG="$tmp/local.options" "$LINT" >/dev/null 2>&1 \
+    || fail "changed-mode lint failed under the ShellCheck stub"
+
+  ci_options=$(LC_ALL=C sort -u "$tmp/ci.options")
+  local_options=$(LC_ALL=C sort -u "$tmp/local.options")
+  [ -n "$ci_options" ] || fail "the CI run invoked no ShellCheck process to compare"
+  [ -n "$local_options" ] || fail "the changed-mode run invoked no ShellCheck process to compare"
+  [ "$local_options" = "$ci_options" ] \
+    || fail "changed mode did not analyse with CI's ShellCheck options, so a code CI enforces can go unraised locally"$'\n'"CI:    $ci_options"$'\n'"local: $local_options"
+  pass "fm-lint.sh changed mode analyses with exactly CI's ShellCheck option list"
 }
 
 test_changed_mode_invokes_shellcheck_once_per_root() {
@@ -561,8 +598,38 @@ test_changed_mode_invokes_shellcheck_once_per_root() {
   invocation_count=$(grep -c '^external-sources=' "$flag_log" || true)
   [ "$invocation_count" -eq 2 ] \
     || fail "changed-mode lint used $invocation_count ShellCheck calls for two roots"
-  fm_lint_assert_flag_log "$flag_log" no "SC1091,SC2034,SC2153,SC2329"
+  fm_lint_assert_flag_log "$flag_log" yes none
   pass "fm-lint.sh changed mode invokes ShellCheck once per root"
+}
+
+# The other half of that bound: with source following on, a whole shard in one
+# process peaks at the sum of its roots, so the shards must not run at once
+# unless the caller asks for it.
+test_changed_mode_defaults_to_one_shard_at_a_time() {
+  local tmp fakebin log telemetry diff_file
+  tmp=$(fm_test_tmproot fm-lint-local-serial)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  telemetry="$tmp/telemetry.tsv"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  fm_lint_write_diff_file "$diff_file" "bin/fm-install-shellcheck.sh"
+
+  # FM_LINT_JOBS is cleared on purpose: an ambient value is an explicit request
+  # and would make this case assert the caller's choice instead of the default.
+  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --telemetry "$telemetry" >/dev/null 2>&1 \
+    || fail "changed-mode lint failed with no explicit job count"
+  assert_grep $'jobs\t1' "$telemetry" \
+    "changed mode ran its shards concurrently by default, so its peak is a shard sum"
+
+  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --jobs 2 --telemetry "$telemetry" >/dev/null 2>&1 \
+    || fail "changed-mode lint failed with an explicit job count"
+  assert_grep $'jobs\t2' "$telemetry" \
+    "an explicit --jobs did not override the changed-mode default"
+  pass "fm-lint.sh changed mode runs one shard at a time unless asked otherwise"
 }
 
 test_ci_keeps_external_sources_without_local_exclusions() {
@@ -666,110 +733,71 @@ test_fast_mode_on_a_local_branch_keeps_source_following() {
   pass "fm-lint.sh --fast on a local branch keeps source following"
 }
 
-test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
+# The exact divergence that cost PR 65 a CI round, reduced to a fixture: a root
+# that sources a library inside a subshell. Only a source-following pass sees
+# the library assign the caller's names, so only a source-following pass raises
+# SC2031 - a code no exclusion list named. This case is the proof that the local
+# changed-file gate now raises it, and it is the case that goes red again if
+# anything narrows that gate's rule set.
+test_changed_mode_raises_what_ci_raises_on_a_changed_root() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
+    pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode forward closure"
     return
   fi
-  local tmp fakebin diff_file fixture out rc findings
-  tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
-  fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
-  printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
+  local tmp fakebin diff_file fixture lib out rc local_codes ci_codes
+  tmp=$(fm_test_tmproot fm-lint-forward-closure)
+  fixture="$ROOT/tests/fm-lint-forward-closure-fixture.test.sh"
+  # The library is deliberately not a canonical root (.inc, not .sh), so a
+  # concurrent full-set lint never sees the defect this fixture needs.
+  lib="$ROOT/tests/fm-lint-forward-closure-fixture-lib.inc"
+  printf '%s\n%s\n' "$fixture" "$lib" >> "$FM_TEST_CLEANUP_REGISTRY"
+  cat > "$lib" <<'SH'
+#!/usr/bin/env bash
+# Assigned here and only consumed by a caller that cannot see this file without
+# source following.
+cross_file_only=1
+fixture_helper() {
+  local id=$1 dir=$2
+  printf '%s %s\n' "$id" "$dir"
+}
+SH
   cat > "$fixture" <<'SH'
 #!/usr/bin/env bash
-# Assigned here and only consumed by a library the local gate does not follow.
-cross_file_only=1
-outer() {
-  (
-    # Defined here and only invoked by a library the local gate does not follow.
-    cross_file_helper() {
-      printf 'ok\n'
-    }
-    printf 'hi\n'
-  )
-}
-outer
+id=outer
+dir=/tmp
+# shellcheck source=tests/fm-lint-forward-closure-fixture-lib.inc
+( . "tests/fm-lint-forward-closure-fixture-lib.inc"
+  fixture_helper a b )
+printf '%s %s\n' "$id" "$dir"
 SH
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
   diff_file="$tmp/diff.nul"
-  fm_lint_write_diff_file "$diff_file" "tests/fm-lint-local-exclude-fixture.test.sh"
+  fm_lint_write_diff_file "$diff_file" "tests/fm-lint-forward-closure-fixture.test.sh"
 
   rc=0
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] \
-    || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
-  # The disclosure line names the excluded codes on purpose; only a finding
-  # (any other line) mentioning them would mean the exclusion leaked.
-  findings=$(printf '%s\n' "$out" | grep -v 'NOT EVALUATED HERE' || true)
-  assert_not_contains "$findings" "SC2034" "changed-mode local lint still reported SC2034"
-  assert_not_contains "$findings" "SC2329" "changed-mode local lint still reported SC2329"
-  assert_contains "$out" "NOT EVALUATED HERE: SC1091 SC2034 SC2153 SC2329" \
-    "changed-mode local lint did not name the rules it skipped, so its green hides the CI gap"
+  [ "$rc" -ne 0 ] \
+    || fail "changed-mode local lint passed a root CI fails; its green does not mean CI's green"$'\n'"$out"
+  assert_contains "$out" "SC2031" \
+    "changed-mode local lint did not raise the cross-file subshell code that failed PR 65 in CI"
+  local_codes=$(fm_lint_codes_in "$out")
 
   rc=0
   out=$("$LINT" "$fixture" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "explicit-path lint passed a cross-file-only fixture"$'\n'"$out"
-  assert_contains "$out" "SC2034" "explicit-path lint did not keep SC2034"
-  assert_contains "$out" "SC2329" "explicit-path lint did not keep SC2329"
-  rm -f "$fixture"
-  pass "fm-lint.sh changed mode excludes cross-file codes that explicit paths still report"
+  [ "$rc" -ne 0 ] || fail "the CI rule set passed the fixture, so this case proves nothing"$'\n'"$out"
+  ci_codes=$(fm_lint_codes_in "$out")
+  [ "$local_codes" = "$ci_codes" ] \
+    || fail "changed mode and the CI rule set disagreed about a changed root"$'\n'"local: $local_codes"$'\n'"CI:    $ci_codes"
+  rm -f "$fixture" "$lib"
+  pass "fm-lint.sh changed mode raises exactly what CI raises on a changed root ($ci_codes)"
 }
 
-# One ShellCheck process per root. Passing the whole canonical set in a
-# single invocation still follows in-set sources and is not the no-x posture.
-fm_lint_nox_one_root() {
-  local index=$1 path=$2 outdir=$3
-  shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
-}
-
-test_local_exclusion_list_covers_every_no_external_sources_code() {
-  if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): local exclusion completeness"
-    return
-  fi
-  local tmp files_file out unexpected code path found i batch
-  local -a files
-  tmp=$(fm_test_tmproot fm-lint-nox-complete)
-  files_file="$tmp/files"
-  CI=true "$LINT" --list-files > "$files_file"
-  [ -s "$files_file" ] || fail "CI --list-files returned no canonical lint roots"
-  files=()
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    files+=("$path")
-  done < "$files_file"
-  [ "${#files[@]}" -gt 0 ] || fail "CI --list-files returned no readable lint roots"
-  mkdir -p "$tmp/gcc"
-  i=0
-  batch=0
-  for path in "${files[@]}"; do
-    i=$((i + 1))
-    fm_lint_nox_one_root "$i" "$path" "$tmp/gcc" &
-    batch=$((batch + 1))
-    if [ "$batch" -eq 4 ]; then
-      wait
-      batch=0
-    fi
-  done
-  wait
-  found=$(find "$tmp/gcc" -type f | wc -l | tr -d '[:space:]')
-  [ "$found" = "${#files[@]}" ] \
-    || fail "completeness sweep linted $found roots, expected ${#files[@]}"
-  out=$(cat "$tmp/gcc"/* 2>/dev/null || true)
-  unexpected=
-  while IFS= read -r code; do
-    [ -n "$code" ] || continue
-    case "$code" in
-      SC1091|SC2034|SC2153|SC2329) ;;
-      *) unexpected="${unexpected}${unexpected:+ }$code" ;;
-    esac
-  done < <(printf '%s\n' "$out" | sed -n 's/.*\[\(SC[0-9][0-9]*\)\].*/\1/p' | LC_ALL=C sort -u)
-  [ -z "$unexpected" ] \
-    || fail "no-external-sources pass emitted codes outside the local exclusion list: $unexpected"
-  pass "local exclusion list covers every no-external-sources ShellCheck code"
+# fm_lint_codes_in <shellcheck-output>: the sorted, unique SC codes it reported.
+fm_lint_codes_in() {
+  printf '%s\n' "$1" | sed -n 's/.*\(SC[0-9][0-9]*\).*/\1/p' | LC_ALL=C sort -u | tr '\n' ' '
 }
 
 test_pins_an_explicit_version() {
@@ -1440,13 +1468,14 @@ test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
-test_changed_mode_drops_external_sources_and_excludes_cross_file_codes
+test_changed_mode_keeps_the_ci_rule_set
+test_changed_mode_option_list_equals_the_ci_option_list
+test_changed_mode_defaults_to_one_shard_at_a_time
 test_changed_mode_invokes_shellcheck_once_per_root
 test_ci_keeps_external_sources_without_local_exclusions
 test_main_branch_keeps_external_sources
 test_merge_base_less_keeps_external_sources
 test_explicit_path_keeps_external_sources
 test_fast_mode_on_a_local_branch_keeps_source_following
-test_changed_mode_hides_cross_file_codes_that_ci_still_sees
-test_local_exclusion_list_covers_every_no_external_sources_code
+test_changed_mode_raises_what_ci_raises_on_a_changed_root
 test_shards_balance_by_source_closure_not_own_bytes
