@@ -130,6 +130,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
 | `fm-grouping-lib.sh`     | Own the grouping posture, the group key an item carries, and which other items are its siblings |
+| `fm-linear-lib.sh`       | Own the Linear card an item carries and move it to the team's started or completed status at dispatch and merge (`docs/configuration.md` "Linear board") |
 | `fm-meta-keys-lib.sh`    | Own the task record's key vocabulary and its order-free, no-repeat contract, shared by the record's producers and readers |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
