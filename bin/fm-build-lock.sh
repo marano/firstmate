@@ -8,6 +8,8 @@
 #   fm-build-lock.sh [--label <text>] [--exclusive] [--] <command> [args...]
 #                                               acquire a slot, run, release
 #   fm-build-lock.sh --status                   print every slot and its holder
+#   fm-build-lock.sh --holders                  print live holders, TAB-separated,
+#                                               for a parser (see --holders below)
 #   fm-build-lock.sh --lock-path                print the resolved slot 1 path
 #   fm-build-lock.sh --slots-path               print the resolved slot-count file
 #   fm-build-lock.sh --set-slots <n>            set this machine's slot count
@@ -1357,6 +1359,11 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -eq 0 ] || die "--status takes no further arguments"
       ;;
+    --holders)
+      MODE=holders
+      shift
+      [ "$#" -eq 0 ] || die "--holders takes no further arguments"
+      ;;
     --lock-path)
       MODE='lock-path'
       shift
@@ -1622,9 +1629,68 @@ fm_build_lock_print_status() {
   done
 }
 
+# --- machine-readable holder list -------------------------------------------
+#
+# `--holders` is the ONE parseable view of the holder records above, added for
+# firstmate's supervision side: it must decide whether a quiet worker still has
+# a build or test run of its own in flight, and the prose `--status` lines are
+# deliberately written for people, not parsers (see its header). One TAB-
+# separated line per LIVE holder, nothing when none is held:
+#
+#   <pid>\t<held-seconds>\t<cwd>\t<command-or-label>
+#
+# The cwd is the holder's own `pwd -P` at acquisition, recovered from the same
+# `<command> [in <cwd>]` display line `--status` prints, so a reader can
+# attribute a hold to the worktree that took it. A record whose display carries
+# no `[in <absolute path>]` suffix yields an empty cwd field rather than a
+# guess, and a record with no usable start time yields an empty seconds field;
+# neither is dropped, because a live hold a reader cannot attribute still
+# matters more than a tidy table. No field contains a TAB: the command is
+# rendered with newlines already flattened, and a TAB inside either field is
+# stripped rather than allowed to split the line.
+#
+# Only holders whose process is still alive are listed, so a record a killed
+# holder left behind is never reported as running work.
+fm_build_lock_print_holders() {
+  local k highest pid secs display cwd cmd
+  fm_build_lock_read_slots
+  highest=$(fm_build_lock_highest_slot)
+  [ "$highest" -ge "$FM_BUILD_LOCK_SLOTS" ] 2>/dev/null || highest=$FM_BUILD_LOCK_SLOTS
+  k=1
+  while [ "$k" -le "$highest" ]; do
+    fm_build_lock_slot_paths "$k"
+    fm_build_lock_read_holder "$FM_BUILD_LOCK_SLOT_PATH" "$FM_BUILD_LOCK_SLOT_INFO"
+    pid=$FM_BUILD_LOCK_HOLDER_PID
+    secs=$FM_BUILD_LOCK_HOLDER_SECS
+    display=$FM_BUILD_LOCK_HOLDER_DISPLAY
+    k=$((k + 1))
+    [ -n "$FM_BUILD_LOCK_HOLDER_TEXT" ] || continue
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    fm_pid_alive "$pid" || continue
+    case "$secs" in *[!0-9]*) secs= ;; esac
+    case "$display" in
+      *' [in /'*']')
+        cwd=${display##*' [in '}
+        cwd=${cwd%]}
+        cmd=${display%' [in '*}
+        ;;
+      *)
+        cwd=
+        cmd=$display
+        ;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$pid" "$secs" \
+      "$(printf '%s' "$cwd" | tr -d '\t')" "$(printf '%s' "$cmd" | tr -d '\t')"
+  done
+}
+
 case "$MODE" in
   status)
     fm_build_lock_print_status
+    exit 0
+    ;;
+  holders)
+    fm_build_lock_print_holders
     exit 0
     ;;
   set-slots)

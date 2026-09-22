@@ -1954,6 +1954,562 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# --- a worker whose turn ended while its own run was still in flight ---------
+#
+# THE PAIRING UNDER TEST. A held build slot proves WORK is progressing; it does
+# not prove an AGENT is attached to that work. Conflating the two cost two lane
+# runs in two days: on 2026-09-21 a test run finished and its result sat
+# uncollected while six stale escalations against that lane were dismissed on
+# the strength of the lock alone, and on 2026-09-22 the worker's bare background
+# job died with the turn while firstmate, reading a declared wait that named
+# only a harness-internal job id, told it to keep waiting.
+#
+# Every fixture below takes a REAL build-slot hold from a REAL worktree with a
+# real live process, against a private lock root, because the whole question is
+# whether a live hold can be attributed to one task's worktree.
+
+# Take a real build-slot hold whose recorded cwd is <worktree>, and publish the
+# holder pid in TASK_HOLD_PID. `exec` so the recorded holder pid IS that pid
+# rather than some wrapper's, and both its streams go to a file: a hold that
+# inherited a command substitution's pipe would keep that pipe open for its whole
+# life, so returning the pid on stdout would deadlock the caller instead of
+# starting a fixture. The caller releases it with release_task_hold.
+TASK_HOLD_PID=
+take_task_hold() {  # <lockroot> <worktree> <label> [outfile]
+  local lockroot=$1 wt=$2 label=$3 outfile=${4:-/dev/null} i=0
+  TASK_HOLD_PID=
+  ( cd "$wt" && exec env FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+      "$ROOT/bin/fm-build-lock.sh" --label "$label" sleep 120 ) \
+      > "$outfile" 2>&1 &
+  TASK_HOLD_PID=$!
+  # Off the job table: the fixture is always ended with a signal, and a job the
+  # shell still tracks prints a "Killed" line into the suite's own output.
+  disown "$TASK_HOLD_PID" 2>/dev/null || true
+  while [ "$i" -lt 300 ]; do
+    [ -e "$lockroot/fm-build-lock.info" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -9 "$TASK_HOLD_PID" 2>/dev/null || true
+  TASK_HOLD_PID=
+  return 1
+}
+
+# Kill the hold and wait for the process to be gone, DELIBERATELY leaving its
+# holder record behind: SIGKILL gives the holder no chance to clean up, which is
+# exactly the state in which only a liveness test can tell a running hold from a
+# finished one.
+kill_task_hold() {  # <pid>
+  local pid=$1 i=0
+  [ -n "$pid" ] || return 0
+  kill -9 "$pid" 2>/dev/null || true
+  while [ "$i" -lt 300 ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Drop the slot artifacts a killed holder left, so the next phase starts from a
+# genuinely free machine rather than from the previous phase's residue.
+clear_task_hold_root() {  # <lockroot>
+  local lockroot=$1
+  rm -rf "$lockroot/fm-build-lock" "$lockroot/fm-build-lock.info" 2>/dev/null || true
+}
+
+release_task_hold() {  # <pid> <lockroot>
+  kill_task_hold "$1"
+  clear_task_hold_root "$2"
+}
+
+# Drive <task>'s SEMANTIC busy verdict through the real writer, the same path a
+# harness hook uses, so no test hand-writes a busy record.
+set_busy_state() {  # <state> <task> <busy|idle>
+  local state=$1 task=$2 want=$3 gen
+  gen=$(cat "$state/$task.busy-gen" 2>/dev/null || true)
+  [ -n "$gen" ] || gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task") || return 1
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" "$want" --gen "$gen" \
+    --source claude-hook --event test >/dev/null
+}
+
+# crew_task_shell_running: the WORK half, on its own. It must attribute a live
+# hold to the worktree that took it, and must report no evidence for everything
+# else, so a negative never changes a caller's escalation schedule.
+#
+# Mutants that must turn this red:
+#   - match the worktree as a bare prefix (drop the `/` boundary): the
+#     sibling-worktree case is then claimed by the wrong task.
+#   - credit a holder with no recorded cwd to whichever task asked: the
+#     unattributable-hold case then reports evidence.
+test_crew_task_shell_running_classifier() {
+  local dir state lockroot wt sibling hold detail
+  dir=$(make_case task-shell-probe); state="$dir/state"
+  lockroot="$dir/lockroot"; wt="$dir/wt"; sibling="$dir/wt-old"
+  mkdir -p "$lockroot" "$wt/src" "$sibling"
+  printf 'window=t:s\nkind=ship\nharness=claude\nworktree=%s\n' "$wt" > "$state/shelltask.meta"
+  printf 'window=t:m\nkind=secondmate\nharness=pi\nworktree=%s\n' "$wt" > "$state/mate.meta"
+  printf 'window=t:n\nkind=ship\nharness=claude\n' > "$state/noworktree.meta"
+  export FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh"
+  export FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0
+
+  ! crew_task_shell_running shelltask "$state" >/dev/null \
+    || fail "a free machine reported a task-owned run in flight"
+
+  # Phase 1: a live hold taken in the task's own worktree.
+  take_task_hold "$lockroot" "$wt" 'mutex bash tests/lane.test.sh' \
+    || fail "the probe fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+  detail=$(crew_task_shell_running shelltask "$state") \
+    || { release_task_hold "$hold" "$lockroot"
+         fail "a live hold taken in the task's own worktree was not attributed to it"; }
+  case "$detail" in
+    *"pid $hold"*"running: mutex bash tests/lane.test.sh"*) : ;;
+    *) release_task_hold "$hold" "$lockroot"
+       fail "the holder detail named neither the pid nor the command a supervisor must report: '$detail'" ;;
+  esac
+  case "$detail" in
+    *held*s,*) : ;;
+    *) release_task_hold "$hold" "$lockroot"
+       fail "the holder detail carried no elapsed time, which is what tells a long run from a hung one: '$detail'" ;;
+  esac
+  ! crew_task_shell_running mate "$state" >/dev/null \
+    || { release_task_hold "$hold" "$lockroot"
+         fail "a secondmate home's own workers' holds were reported as that record's run"; }
+  ! crew_task_shell_running noworktree "$state" >/dev/null \
+    || { release_task_hold "$hold" "$lockroot"; fail "a task with no recorded worktree reported evidence"; }
+  ! crew_task_shell_running "" "$state" >/dev/null \
+    || { release_task_hold "$hold" "$lockroot"; fail "an empty id reported evidence"; }
+  # An explicitly empty snapshot is a real negative (a free machine the caller
+  # already read), never a missing read to fall back from.
+  ! crew_task_shell_running shelltask "$state" "" >/dev/null \
+    || { release_task_hold "$hold" "$lockroot"
+         fail "an explicitly empty holder snapshot was treated as a missing read"; }
+
+  # Phase 2: the holder dies by SIGKILL and its RECORD SURVIVES. Only a liveness
+  # test can separate this from a running hold, and getting it wrong is the
+  # false positive that would hold a supervisor's ladder for work that no longer
+  # exists - the same conflation, one layer down.
+  kill_task_hold "$hold" || { clear_task_hold_root "$lockroot"; fail "the probe fixture outlived SIGKILL"; }
+  [ -e "$lockroot/fm-build-lock.info" ] \
+    || { clear_task_hold_root "$lockroot"
+         fail "the killed holder's record vanished on its own, so this case cannot test the liveness filter at all"; }
+  ! crew_task_shell_running shelltask "$state" >/dev/null \
+    || { clear_task_hold_root "$lockroot"
+         fail "a dead holder's surviving record was reported as a run still in flight"; }
+  clear_task_hold_root "$lockroot"
+
+  # Phase 3: the path-prefix hazard, in the direction that actually bites. The
+  # hold is taken in a LONGER path whose first characters are the task's own
+  # worktree path, so a bare prefix test claims another worktree's run.
+  take_task_hold "$lockroot" "$sibling" 'mutex bash tests/other.test.sh' \
+    || fail "the sibling-worktree fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+  ! crew_task_shell_running shelltask "$state" >/dev/null \
+    || { release_task_hold "$hold" "$lockroot"
+         fail "a hold taken in $sibling was claimed by $wt, whose path is a bare prefix of it"; }
+  release_task_hold "$hold" "$lockroot"
+
+  unset FM_TASK_SHELL_LOCK_BIN FM_BUILD_LOCK_DIR FM_BUILD_LOCK_CI
+  pass "crew_task_shell_running: a live hold is attributed to the worktree that took it; a mate's home, a missing worktree, a dead holder's surviving record and a prefix-sharing sibling worktree are all no evidence"
+}
+
+# status_wait_subject_class: can a supervisor CHECK what the wait names? The two
+# lines that matter are taken verbatim from the two occurrences.
+#
+# Mutant that must turn this red: accept a bare `run <token>` as a run id, which
+# is what made `background test run bhymd1si9` read as verifiable on the first
+# attempt at this classifier - the exact line firstmate believed. `waiting on run
+# bhymd1si9 of the lane` is in the unverifiable list to keep that mutant
+# observable on its own: it carries the same opaque token with the word
+# background absent, so the pattern is the only thing standing between it and a
+# verifiable verdict.
+test_status_wait_subject_class_classifier() {
+  local l
+  for l in \
+    'paused: waiting on build slot, pid 45757' \
+    'paused: queued on mutex for the test lane' \
+    'paused: validation round run=nm-2026-09-22-a' \
+    'paused: waiting on CI for https://github.com/o/r/pull/9' \
+    'paused: waiting for /Users/x/wt/build/report.json to appear' \
+    'paused: rate limit resets until 2026-09-22T14:00Z' ; do
+    [ "$(status_wait_subject_class "$l")" = verifiable ] \
+      || fail "a wait naming a checkable subject was classified unverifiable: '$l'"
+  done
+  for l in \
+    'paused: waiting on background test run bhymd1si9' \
+    'paused: waiting on background job bhymd1si9' \
+    'paused: waiting on run bhymd1si9 of the lane' \
+    'paused: waiting for the upstream release' \
+    'paused: unverifiable - the only handle is a harness job id' ; do
+    [ "$(status_wait_subject_class "$l")" = unverifiable ] \
+      || fail "a wait whose subject a supervisor cannot resolve was classified verifiable: '$l'"
+  done
+  # A declared clearing time does NOT rescue an opaque subject: waiting out a
+  # time on a job that no longer exists is the 2026-09-22 failure exactly.
+  [ "$(status_wait_subject_class 'paused: background test run bhymd1si9, until 2026-09-22T14:00Z')" = unverifiable ] \
+    || fail "an opaque background job was made verifiable by declaring a clearing time"
+  # A resolvable handle survives the word background appearing in the prose. The
+  # first cut of this classifier read `background` before the handles and so
+  # called a wait on a queued build-lock hold unverifiable purely because the
+  # sentence also used the word - noise on exactly the lines that are doing the
+  # right thing.
+  [ "$(status_wait_subject_class 'paused: waiting on the background job, pid 45757')" = verifiable ] \
+    || fail "a wait handing over a pid was classified unverifiable because it also said background"
+  [ "$(status_wait_subject_class 'paused: the suite runs as a background job under the build lock')" = verifiable ] \
+    || fail "a wait naming a build-lock hold was classified unverifiable because its prose said background"
+  # An explicit self-declaration wins over any incidental handle in the line.
+  [ "$(status_wait_subject_class 'paused: unverifiable - job bhymd1si9 under /Users/x/wt')" = unverifiable ] \
+    || fail "an explicit unverifiable declaration was overridden by an incidental path"
+  ! status_wait_subject_class 'working: implementing' \
+    || fail "a non-wait line was classified as a declared wait"
+  ! status_wait_subject_class '' || fail "an empty line was classified as a declared wait"
+  pass "status_wait_subject_class: a pid, a build slot, a run id, a URL, a path or a clearing time is checkable; a harness-internal job id is not, with or without a declared time"
+}
+
+# Build a fixture sitting exactly on the at-threshold wedge branch: a quiet pane
+# whose hash is already classified and whose idle window opened 500s ago, so the
+# first stale poll lands straight on the branch that would otherwise escalate.
+# Echoes nothing; the caller owns the names.
+arm_turn_ended_fixture() {  # <state> <task> <window> <worktree> <capture-file> <status-line>
+  local state=$1 task=$2 window=$3 wt=$4 capture=$5 line=$6 key pane_hash sig back
+  printf 'window=%s\nkind=ship\nharness=claude\nworktree=%s\n' "$window" "$wt" > "$state/$task.meta"
+  printf '%s\n' "$line" > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$(cat "$capture")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+}
+
+# THE CENTRAL CASE. A turn that ended while a task-owned run is still going must
+# be recognised as THAT condition - held off the wedge ladder, not escalated
+# toward a relaunch that would kill a live test - and the moment that run is gone
+# the supervisor must say so at once, because from then on a finished result is
+# sitting there with nobody attached to collect it.
+#
+# Mutants that must turn this red:
+#   - remove the hold (let the at-threshold branch escalate as before): phase A
+#     alarms "possible wedge" against a lane that is demonstrably running tests,
+#     which is the 2026-09-21 false escalation, six times over.
+#   - suppress instead of hold (absorb and return without ever surfacing): phase
+#     B never fires, and the finished result goes uncollected exactly as it did.
+#   - advance the escalation counter while holding: the ladder keeps climbing
+#     under the hold and reaches relaunch anyway.
+test_turn_ended_with_a_task_owned_run_holds_the_ladder_then_reports_it_finished() {
+  local dir state fakebin out capture_file window key wt lockroot hold pid
+  dir=$(make_case turn-ended-task-shell); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-shellrun"; wt="$dir/wt"; lockroot="$dir/lockroot"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'done 3:49 PM - 1 shell still running' > "$capture_file"
+  arm_turn_ended_fixture "$state" shellrun "$window" "$wt" "$capture_file" \
+    'paused: waiting on the test lane, build slot held'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The AGENT half, established independently of the lock: a positive idle
+  # verdict, which is what "the turn ended" means.
+  set_busy_state "$state" shellrun idle || fail "could not record the idle turn-end verdict"
+  take_task_hold "$lockroot" "$wt" 'mutex bash tests/lane.test.sh' \
+    || fail "the lane fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+
+  # Phase A: run in flight, turn over. HELD, not escalated, and silent on the
+  # first sight exactly as the write deferral is.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    release_task_hold "$hold" "$lockroot"
+    fail "the watcher escalated a lane whose turn ended while its own test run was still holding a build slot: $(cat "$out")"
+  fi
+  grep -F "possible wedge" "$out" >/dev/null && {
+    reap "$pid"; release_task_hold "$hold" "$lockroot"
+    fail "a lane running its own tests was alarmed as a possible wedge: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; release_task_hold "$hold" "$lockroot"
+    fail "the hold enqueued a wake on first sight: $(cat "$state/.wake-queue")"; }
+  [ -e "$state/.taskshell-since-$key" ] || { reap "$pid"; release_task_hold "$hold" "$lockroot"
+    fail "the turn-ended-with-a-run-in-flight chain was not recorded, so its end cannot be noticed"; }
+  grep -F "pid $hold" "$state/.taskshell-holder-$key" >/dev/null || { reap "$pid"; release_task_hold "$hold" "$lockroot"
+    fail "the held run's identity was not recorded: $(cat "$state/.taskshell-holder-$key" 2>/dev/null || true)"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; release_task_hold "$hold" "$lockroot"
+    fail "holding the ladder still advanced the wedge escalation counter, so it climbs to a relaunch anyway"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: the run ends with the turn still over. The result is now sitting
+  # there uncollected - surface AT ONCE, and say that is what happened.
+  release_task_hold "$hold" "$lockroot"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "the watcher stayed quiet after the worker's own run finished with its turn already over, so the result went uncollected: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "no wake was printed when the held run finished"
+  grep -F "has finished and its turn was already over" "$out" >/dev/null \
+    || fail "the wake did not report the uncollected-result condition as itself: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the finished-run wake was reported as a possible wedge instead of as its own condition: $(cat "$out")"
+  grep -Fi "relaunch" "$out" >/dev/null \
+    || fail "the wake did not warn against the relaunch that would kill the lane: $(cat "$out")"
+  [ ! -e "$state/.taskshell-holder-$key" ] \
+    || fail "the finished-run chain outlived its own wake, so it would fire again"
+  pass "a turn that ends with a task-owned run in flight is held off the wedge ladder, then reported as an uncollected result the moment that run is gone"
+}
+
+# THE FALSE-ALARM GUARD. The agent half must be a POSITIVE idle verdict. A lane
+# whose semantic state is merely not-busy - unknown, because its source is
+# missing, stale or unverified - has told us nothing about whether its worker is
+# attached, and claiming a finished turn there is how this fix would rebuild the
+# false alarm it exists to remove.
+#
+# Mutant that must turn this red: read the agent half as "not busy" instead of
+# "== idle" (`[ "$busy_state" = busy ] && return 1`). The unknown lane below is
+# then treated as a finished turn, its ladder is held for a run nobody has shown
+# is unattended, and a genuinely wedged worker sitting next to a build hold
+# never escalates again.
+test_a_lane_that_is_not_positively_idle_is_left_to_the_ordinary_ladder() {
+  local dir state fakebin out capture_file window key wt lockroot hold pid
+  dir=$(make_case turn-ended-unknown-agent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unknownagent"; wt="$dir/wt"; lockroot="$dir/lockroot"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'quiet pane' > "$capture_file"
+  arm_turn_ended_fixture "$state" unknownagent "$window" "$wt" "$capture_file" \
+    'working: implementing'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No busy record at all: the verdict is unknown, NOT idle. The hold is real.
+  take_task_hold "$lockroot" "$wt" 'mutex bash tests/lane.test.sh' \
+    || fail "the unknown-agent fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; release_task_hold "$hold" "$lockroot"
+         fail "a lane whose agent state is unknown was held off the ladder on the strength of a build hold alone, which is the false alarm this fix must not rebuild: $(cat "$out")"; }
+  release_task_hold "$hold" "$lockroot"
+  [ ! -e "$state/.taskshell-since-$key" ] \
+    || fail "an unknown agent state opened a turn-ended chain, so a wedged worker beside a build hold would never escalate again"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the ordinary wedge ladder did not run for a lane that never showed a finished turn: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
+    || fail "the ordinary escalation was not counted for a not-positively-idle lane"
+  pass "a lane that is not POSITIVELY idle keeps the ordinary wedge ladder, however much work its worktree holds"
+}
+
+# THE OTHER HALF OF THE FALSE-ALARM GUARD, and the one the brief names: a lane
+# merely waiting WITH ITS AGENT PRESENT must not be reported. A busy verdict IS
+# an attached agent, so whatever its worktree is doing there is nothing to
+# report - the worker is there to collect its own result.
+#
+# The busy case reaches the supervisor through its own door: a busy pane never
+# enters the stale branch at all, and once it passes the completed-turn bound it
+# goes through busy_turn_bound_check instead. This fixture is built to go through
+# THAT door - busy, with a declared wait, past the bound - so the guard being
+# pinned is that the new triage was not wired into the busy path and opens no
+# chain there. The in-function `== idle` requirement is the second line of the
+# same guard, and the not-positively-idle case above is what exercises it, on the
+# `unknown` verdict that is actually reachable from the stale branch.
+#
+# Mutant that must turn this red: call task_shell_triage from
+# busy_turn_bound_check (or from handle_paused_stale) as well. A lane whose agent
+# is demonstrably present then records a held run, and the next quiet poll
+# reports an uncollected result that nobody ever lost.
+test_a_declared_wait_with_its_agent_present_is_not_reported() {
+  local dir state fakebin out capture_file window key wt lockroot hold pid
+  dir=$(make_case turn-not-ended-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-busyagent"; wt="$dir/wt"; lockroot="$dir/lockroot"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'esc to interrupt' > "$capture_file"
+  arm_turn_ended_fixture "$state" busyagent "$window" "$wt" "$capture_file" \
+    'paused: waiting on the test lane, build slot held'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_busy_state "$state" busyagent busy || fail "could not record the busy verdict"
+  # No turn-ended marker, so the busy-turn bound ages the spawn record: backdate
+  # it and the pane is past the bound on the first poll.
+  touch -t 200001010000 "$state/busyagent.meta"
+  take_task_hold "$lockroot" "$wt" 'mutex bash tests/lane.test.sh' \
+    || fail "the busy-agent fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    release_task_hold "$hold" "$lockroot"
+    fail "the watcher woke for a lane that is merely waiting with its agent present: $(cat "$out")"
+  fi
+  reap "$pid"
+  release_task_hold "$hold" "$lockroot"
+  grep -F "still going" "$out" >/dev/null \
+    && fail "a lane with its agent present was reported as a turn ended over a live run: $(cat "$out")"
+  grep -F "was already over" "$out" >/dev/null \
+    && fail "a lane with its agent present was reported as an uncollected result: $(cat "$out")"
+  [ ! -e "$state/.taskshell-since-$key" ] \
+    || fail "a lane with its agent present opened a turn-ended chain, so a later quiet poll would report an uncollected result that nobody lost"
+  [ ! -e "$state/.taskshell-holder-$key" ] \
+    || fail "a lane with its agent present recorded a held run to report the end of"
+  pass "a declared wait whose agent is present is left alone through the busy door too, and records nothing that could later read as uncollected"
+}
+
+# THE COMMONEST SHAPE OF ALL, and the one a fix like this is most likely to break
+# on its way past: a worker whose turn has ended, with no run of its own and no
+# declared wait at all, is simply a quiet worker. That is the plain wedge case the
+# alarm has always existed for, and it must still reach it - a positive idle
+# verdict is the NORMAL state of every finished turn, so a new classification
+# keyed on idle sits directly in front of every ordinary escalation in the fleet.
+#
+# Mutant that must turn this red: hold or surface on the idle verdict alone,
+# without requiring a live run of the task's own (for example returning 0 from
+# the fall-through instead of 1). Every finished turn in the fleet then stops
+# escalating, and the alarm this whole card defends is gone.
+test_an_idle_worker_with_no_run_and_no_wait_still_wedge_escalates() {
+  local dir state fakebin out capture_file window key wt lockroot pid
+  dir=$(make_case idle-plain-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-plainwedge"; wt="$dir/wt"; lockroot="$dir/lockroot"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'quiet pane' > "$capture_file"
+  arm_turn_ended_fixture "$state" plainwedge "$window" "$wt" "$capture_file" \
+    'working: implementing'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_busy_state "$state" plainwedge idle || fail "could not record the idle turn-end verdict"
+  # A free machine: nothing of this task's own is running.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a quiet finished-turn worker with nothing running and nothing declared never alarmed, so the new idle classification swallowed the ordinary wedge: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the plain wedge printed no stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "a plain quiet worker was not reported as a possible wedge: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
+    || fail "the plain wedge escalation was not counted, so the ladder cannot climb"
+  [ ! -e "$state/.taskshell-since-$key" ] \
+    || fail "a worker with nothing running opened a turn-ended chain"
+  pass "an idle worker with no run of its own and no declared wait still reaches the ordinary wedge ladder"
+}
+
+# GAP 3, end to end. Firstmate must be able to tell a wait it can CHECK from one
+# it cannot, WITHOUT asking the worker. The unverifiable subject is the
+# 2026-09-22 line verbatim; the checkable one names a build-lock holder, which is
+# exactly what let six benign alarms be dismissed correctly the day before.
+#
+# The distinction rides on the declared wait's OWN bounded recheck reason rather
+# than on a wake of its own. That is deliberate and was corrected here after the
+# first cut surfaced unverifiable waits directly: doing so replaced the
+# established bounded-pause contract for every ordinary pause whose subject
+# happens to be unnamed, and broke the dead-agent declared hold, which has its
+# own recheck and must keep it.
+#
+# Both fixtures use the same pane, harness, backdated declaration and cadence, so
+# the ONLY difference between them is the text of the wait - which is the whole
+# claim being made.
+#
+# Mutants that must turn this red:
+#   - classify an opaque or unnamed subject as verifiable: phase A loses the
+#     annotation and firstmate is free to instruct a wait on a dead job.
+#   - annotate unconditionally: phase B gains it, and a wait naming a PR that
+#     firstmate can fetch is smeared with a warning that does not apply.
+#   - annotate a captain-held transfer: phase C gains it, telling the captain
+#     that the wait on the captain names nothing checkable.
+declared_wait_recheck_reason() {  # <case> <status-line> -> queued reason on stdout
+  local name=$1 line=$2 dir state fakebin out capture window key back pid
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-$name"
+  printf 'idle bare shell\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf '%s\n' "$line" > "$state/held.status"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/held.status"
+  printf '%s' "$(seen_sig "$state/held.status")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "idle bare shell")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" FM_BUILD_LOCK_DIR="$dir/lockroot" \
+    FM_BUILD_LOCK_CI=0 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  reap "$pid"
+  cat "$state/.wake-queue" 2>/dev/null || true
+}
+
+test_an_unverifiable_declared_wait_is_distinguishable_from_a_checkable_one() {
+  local opaque checkable held
+  # Phase A: the 2026-09-22 subject. Nothing firstmate can run says whether
+  # bhymd1si9 exists, and the job may already have died with the turn.
+  opaque=$(declared_wait_recheck_reason opaquewait \
+    'paused: waiting on background test run bhymd1si9')
+  case "$opaque" in
+    *'awaiting external'*) : ;;
+    *) fail "the unverifiable wait lost the bounded declared-wait recheck it is entitled to: $opaque" ;;
+  esac
+  case "$opaque" in
+    *'names nothing this supervisor can check'*) : ;;
+    *) fail "a wait naming only a harness-internal job id was rechecked with no sign that firstmate cannot check it: $opaque" ;;
+  esac
+  case "$opaque" in
+    *'rather than instructing it to keep waiting'*) : ;;
+    *) fail "the recheck did not warn against the instruction that lost the 2026-09-22 round: $opaque" ;;
+  esac
+
+  # Phase B: same fixture, a subject firstmate can fetch. The reason must read
+  # exactly as it always has, or the annotation is noise rather than a signal.
+  checkable=$(declared_wait_recheck_reason checkablewait \
+    'paused: waiting on CI for https://github.com/o/r/pull/9')
+  case "$checkable" in
+    *'awaiting external'*) : ;;
+    *) fail "the checkable wait lost its bounded declared-wait recheck: $checkable" ;;
+  esac
+  case "$checkable" in
+    *'names nothing this supervisor can check'*)
+      fail "a wait naming a PR firstmate can fetch was annotated as uncheckable: $checkable" ;;
+  esac
+
+  # Phase C: a captain-held transfer. The subject of that wait is the captain,
+  # so annotating it would point them at a job that was never the question.
+  held=$(declared_wait_recheck_reason captainheldwait \
+    'captain-held [key=route]: tracked by held-decision-route')
+  case "$held" in
+    *'names nothing this supervisor can check'*)
+      fail "a captain-held transfer was annotated as naming nothing checkable: $held" ;;
+  esac
+  pass "an unverifiable declared wait keeps its bounded recheck and is annotated as uncheckable, while a checkable wait and a captain-held transfer read exactly as before"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -5341,6 +5897,13 @@ test_paused_authoritative_working_holds_cadence_and_recheck_ceiling
 test_paused_run_step_working_dead_agent_still_wedge_escalates
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
+test_crew_task_shell_running_classifier
+test_status_wait_subject_class_classifier
+test_turn_ended_with_a_task_owned_run_holds_the_ladder_then_reports_it_finished
+test_a_lane_that_is_not_positively_idle_is_left_to_the_ordinary_ladder
+test_a_declared_wait_with_its_agent_present_is_not_reported
+test_an_unverifiable_declared_wait_is_distinguishable_from_a_checkable_one
+test_an_idle_worker_with_no_run_and_no_wait_still_wedge_escalates
 test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
