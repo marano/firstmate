@@ -447,6 +447,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-linear-lib.sh
+. "$SCRIPT_DIR/fm-linear-lib.sh"
 # shellcheck source=bin/fm-grouping-lib.sh
 . "$SCRIPT_DIR/fm-grouping-lib.sh"
 
@@ -4958,3 +4960,15 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# The board follows the backlog: this item is In flight, so its Linear card
+# belongs at the team's started status. Deliberately AFTER the success report
+# above and after the transition that already refused - the backlog move is what
+# can refuse a dispatch, and the board must never become a second refusal.
+# fm_linear_board_advance always succeeds and is silent in a home with no Linear
+# key (bin/fm-linear-lib.sh). A grouped dispatch moved its members' rows In
+# flight in the same commit, so their cards move with the unit's.
+if [ "$BACKLOG_TRANSITION" = 1 ] && [ "$KIND" = ship ]; then
+  fm_linear_board_advance "$FM_HOME" "$DATA" start "$ID" \
+    ${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}
+fi

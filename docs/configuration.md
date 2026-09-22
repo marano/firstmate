@@ -782,6 +782,31 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Linear board (.env)
+
+Firstmate keeps the captain's Linear board true with exactly two transitions: a card reaches the team's started status when its worker is dispatched (`bin/fm-spawn.sh`), and the team's completed status when its pull request merges (`bin/fm-pr-merge.sh`).
+Every other status on that board belongs to the captain, `Verified` included, and nothing here can reach one.
+`bin/fm-linear-lib.sh` is the single owner of the contract and its refusals.
+
+It is off, and completely silent, unless the home resolves an API key.
+For direct invocations, environment values override `.env`, matching the mail-plane and Relay contracts.
+
+```sh
+FM_LINEAR_API_KEY=   # Linear personal API key, sent verbatim as the Authorization header
+```
+
+`FM_LINEAR_API_URL` (default `https://api.linear.app/graphql`), `FM_LINEAR_TIMEOUT` (default 20 seconds), and `FM_LINEAR_ENV_FILE` are optional.
+`FM_LINEAR_CMD` replaces the HTTP call with a command that receives the request-body file as its only argument and prints the response JSON; it is the seam the tests drive, because they cannot call Linear.
+The calls need `curl` and `jq`; a missing one is reported at use time rather than being installed or assumed.
+
+Which card an item tracks is one `Linear card: BLU-3268` line in that backlog item's own body, recorded and read with `bin/fm-tasks-axi.sh linear <id> [<BLU-1234>]`, which also carries the line across a body rewrite.
+Most items have no card and never will: that is reported once per dispatch or merge and changes nothing else.
+The dispatch move applies to ship work only.
+A scout has no pull request and so no completed transition to pair with a started one, and moving its card at dispatch alone would leave it In Progress after the scout finished; a scout promoted to a ship therefore has its card move straight to the completed status when its pull request merges.
+A card already at or past the phase being applied is left exactly where it is, so a status the captain set by hand survives.
+The completed target is the team's first completed status in its own workflow order, and the chosen status is always named in the output, so a team ordered unusually is visible on its first move.
+A network, API, or configuration failure is reported as an `actionable:` line and never changes whether the worker started or the pull request landed.
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.
@@ -1059,6 +1084,11 @@ FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the 
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
 FM_BACKLOG_ROW_TIMEOUT_SECS=10   # seconds bounding each backlog row read (bin/fm-backlog-transition-lib.sh); nonpositive or invalid values fall back to 10; the first bound hit latches the sweep so later reads return immediately, each still naming its own item
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
+FM_LINEAR_API_KEY=      # Linear personal API key; its presence alone turns the board moves on. See "Linear board"
+FM_LINEAR_API_URL=https://api.linear.app/graphql   # Linear GraphQL endpoint
+FM_LINEAR_TIMEOUT=20    # seconds bounding one Linear call, so a wedged board cannot hold a dispatch or a merge open
+FM_LINEAR_ENV_FILE=     # alternate .env-style file the Linear key is read from
+FM_LINEAR_CMD=          # replaces the HTTP call; receives the request-body file and prints the response JSON. The test seam
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks; hitting it prints an actionable NETWORK_CHECKS line, and it also sets the deferred worker's lease wait and, with FM_SESSION_START_TIMEOUT, its hard lifetime cap (bin/fm-startup-network.sh)
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced

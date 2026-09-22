@@ -52,6 +52,16 @@
 #                 otherwise appended, never at the top, so a hold stamp keeps
 #                 line 1. A body already carrying two key lines is refused
 #                 rather than resolved by position.
+#   linear <id> [<BLU-1234>]
+#                 print, or record, the Linear card this item is tracked by, so
+#                 the dispatch and merge paths can move that card without
+#                 firstmate remembering. Like `group`, the value is one line in
+#                 the item's own body, replaced where it stands and otherwise
+#                 appended, never at the top, so a hold stamp keeps line 1; a
+#                 body already carrying two card lines is refused rather than
+#                 resolved by position. Printed as `none` when the item has no
+#                 card, which is the ordinary case. bin/fm-linear-lib.sh owns the
+#                 identifier grammar and both board transitions.
 #   chunk <unit> "<title>" <member>...
 #                 plan a chunk: create <unit> if it does not exist, record the
 #                 members on it, stamp the shared key, and park each member
@@ -125,6 +135,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-grouping-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-grouping-lib.sh"
+# shellcheck source=bin/fm-linear-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-linear-lib.sh"
 
 usage() {
   awk '
@@ -377,6 +389,35 @@ group_verb() {  # <id> [<key>|--solo]
     || fail "a group key is 1-64 characters of [a-z0-9._-] starting with a letter or digit; '$key' is not"
   grouping_set_key "$id" "$key"
   printf 'ok: group %s -> %s\n' "$id" "$key"
+}
+
+# Record <card> on <id>, leaving every other byte of the body where it was.
+linear_set_card() {  # <id> <card>
+  local id=$1 card=$2 existing
+  grouping_read_body "$id"
+  existing=$(fm_linear_card_of_body "$GROUPING_BODY") \
+    || verb_fail 1 "$id carries more than one Linear-card line; leave exactly one and re-run"
+  [ "$existing" != "$card" ] || return 0
+  grouping_write_body "$id" "$(fm_grouping_body_with_line "$GROUPING_BODY" "$FM_LINEAR_CARD_PREFIX" "$card")"
+}
+
+linear_verb() {  # <id> [<card>]
+  local id=$1 card=${2-} status
+  grouping_id_valid "$id" || fail "usage: fm-tasks-axi.sh linear <id> [<BLU-1234>]"
+  if [ "$#" -eq 1 ]; then
+    fm_linear_card_of_row "$DATA" "$id"
+    status=$?
+    case "$status" in
+      0) printf '%s\n' "${FM_LINEAR_CARD:-none}" ;;
+      3) verb_fail 3 "$FM_LINEAR_ERROR" ;;
+      *) verb_fail 1 "$FM_LINEAR_ERROR" ;;
+    esac
+    return 0
+  fi
+  fm_linear_identifier_valid "$card" \
+    || fail "a Linear card is a team key, a hyphen, and the issue number, as Linear prints one (BLU-3268); '$card' is not"
+  linear_set_card "$id" "$card"
+  printf 'ok: linear %s -> %s\n' "$id" "$card"
 }
 
 # Every planning read a chunk needs about one row, refusing before any write.
@@ -644,40 +685,55 @@ join_verb() {  # <unit> <member>
   printf 'next: if that worker is not running, bring it back with bin/fm-control.sh %s relaunch\n' "$unit"
 }
 
-# The `update` interception described at the dispatch below. It rewrites the
-# staged body file in place, so tasks-axi still performs the update itself.
-grouping_carry_key_through_update() {  # <update args...>
-  local id='' body_file='' arg next=0 existing staged current
+# The item and staged body file an `update` invocation rewrites, for the
+# interception described at the dispatch below. Both are empty when the
+# invocation does not rewrite a body at all.
+REWRITE_ID=
+REWRITE_BODY_FILE=
+body_rewrite_target() {  # <update args...>
+  local arg next=0
+  REWRITE_ID=
+  REWRITE_BODY_FILE=
   for arg in "$@"; do
     if [ "$next" = 1 ]; then
-      body_file=$arg
+      REWRITE_BODY_FILE=$arg
       next=0
       continue
     fi
     case "$arg" in
       --body-file) next=1 ;;
-      --body-file=*) body_file=${arg#*=} ;;
-      --body|--body=*) body_file=- ;;
+      --body-file=*) REWRITE_BODY_FILE=${arg#*=} ;;
+      --body|--body=*) REWRITE_BODY_FILE=- ;;
       -*) ;;
-      *) [ -n "$id" ] || id=$arg ;;
+      *) [ -n "$REWRITE_ID" ] || REWRITE_ID=$arg ;;
     esac
   done
-  [ -n "$id" ] && [ -n "$body_file" ] || return 0
-  grouping_id_valid "$id" || return 0
-  fm_grouping_key_of_row "$DATA" "$id" || return 0
-  existing=$FM_GROUPING_KEY
+  [ -n "$REWRITE_ID" ] && [ -n "$REWRITE_BODY_FILE" ] || return 1
+  grouping_id_valid "$REWRITE_ID"
+}
+
+# Carry one of firstmate's machine-read body lines across a body rewrite. It
+# rewrites the staged body file in place, so tasks-axi still performs the update
+# itself. <reader> is the owning library's own parser for that line, so each line
+# keeps its own grammar and its own two-copies refusal; <noun> and <fix> name the
+# line and its recording command in the refusals.
+carry_body_line_through_update() {  # <id> <body-file> <existing> <prefix> <reader> <noun> <fix>
+  local id=$1 body_file=$2 existing=$3 prefix=$4 reader=$5 noun=$6 fix=$7 staged current
   [ -n "$existing" ] || return 0
   if [ "$body_file" = - ]; then
-    fail "a --body rewrite of $id would drop its recorded group key ($existing); pass the new body with --body-file so the key can be carried across"
+    fail "a --body rewrite of $id would drop its recorded $noun ($existing); pass the new body with --body-file so it can be carried across"
   fi
-  [ -f "$body_file" ] && [ ! -L "$body_file" ]     || fail "cannot read the new body for $id at $body_file"
+  [ -f "$body_file" ] && [ ! -L "$body_file" ] || fail "cannot read the new body for $id at $body_file"
   staged=$(cat "$body_file") || fail "cannot read the new body for $id at $body_file"
-  current=$(fm_grouping_key_of_body "$staged")     || fail "the new body for $id carries more than one group-key line"
+  current=$("$reader" "$staged") \
+    || fail "the new body for $id carries more than one $noun line"
   if [ -n "$current" ]; then
-    [ "$current" = "$existing" ]       || fail "the new body for $id records the group key $current, but its item carries $existing; change it with 'fm-tasks-axi.sh group $id <key>'"
+    [ "$current" = "$existing" ] \
+      || fail "the new body for $id records the $noun $current, but its item carries $existing; change it with '$fix'"
     return 0
   fi
-  printf '%s\n' "$(fm_grouping_body_with_line "$staged" "$FM_GROUPING_KEY_PREFIX" "$existing")" > "$body_file"     || fail "could not carry $id's group key across its body rewrite"
+  printf '%s\n' "$(fm_grouping_body_with_line "$staged" "$prefix" "$existing")" > "$body_file" \
+    || fail "could not carry $id's $noun across its body rewrite"
 }
 
 plan_verb() {
@@ -756,13 +812,32 @@ case "${ARGS[0]:-}" in
     plan_verb
     exit 0
     ;;
+  linear)
+    if [ "${#ARGS[@]}" -lt 2 ] || [ "${#ARGS[@]}" -gt 3 ]; then
+      fail "usage: fm-tasks-axi.sh linear <id> [<BLU-1234>]"
+    fi
+    linear_verb "${ARGS[@]:1}"
+    exit 0
+    ;;
   update)
     # A body rewrite is the sanctioned way to replace a considered note
     # (docs/architecture.md), and firstmate's own machine-read lines live in that
-    # same body. Carry an existing group key across the rewrite rather than
-    # letting a routine note edit silently ungroup the item; a rewrite that
-    # states a DIFFERENT key is refused, because only `group` records one.
-    grouping_carry_key_through_update "${ARGS[@]:1}"
+    # same body. Carry each existing one across the rewrite rather than letting a
+    # routine note edit silently ungroup the item or lose the Linear card the
+    # dispatch and merge paths read; a rewrite that states a DIFFERENT value is
+    # refused, because only `group` and `linear` record one.
+    if body_rewrite_target "${ARGS[@]:1}"; then
+      if fm_grouping_key_of_row "$DATA" "$REWRITE_ID"; then
+        carry_body_line_through_update "$REWRITE_ID" "$REWRITE_BODY_FILE" \
+          "$FM_GROUPING_KEY" "$FM_GROUPING_KEY_PREFIX" fm_grouping_key_of_body \
+          "group key" "fm-tasks-axi.sh group $REWRITE_ID <key>"
+      fi
+      if fm_linear_card_of_row "$DATA" "$REWRITE_ID"; then
+        carry_body_line_through_update "$REWRITE_ID" "$REWRITE_BODY_FILE" \
+          "$FM_LINEAR_CARD" "$FM_LINEAR_CARD_PREFIX" fm_linear_card_of_body \
+          "Linear card" "fm-tasks-axi.sh linear $REWRITE_ID <BLU-1234>"
+      fi
+    fi
     ;;
 esac
 exec tasks-axi ${ARGS[@]+"${ARGS[@]}"}
