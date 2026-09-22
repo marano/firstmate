@@ -286,6 +286,9 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *"/git/refs/heads/"*)
+        # Recorded before the outcome, so a case can model the forge deleting
+        # the ref itself between the guard reads and this call.
+        : > "${FM_TEST_GH_DELETE_ATTEMPTED:-/dev/null}"
         [ ! -f "${FM_TEST_GH_DELETE_BRANCH_FAILS:-}" ] || exit 1
         : > "${FM_TEST_GH_DELETE_BRANCH_CALLED:-/dev/null}"
         exit 0
@@ -298,8 +301,36 @@ case "${1:-} ${2:-}" in
         fi
         exit 0
         ;;
+      # One recorded pull request, read by the orphaned-branch sweep in
+      # bin/fm-branch-orphans.sh. Unmerged unless a case says otherwise, so a
+      # case that does not exercise the sweep has it decline and change
+      # nothing.
+      *"/pulls/"*)
+        if [ -f "${FM_TEST_GH_ORPHAN_PR:-}" ]; then
+          cat "$FM_TEST_GH_ORPHAN_PR"
+        else
+          printf '{"merged_at":null,"head":{"ref":"","repo":{"full_name":""}}}\n'
+        fi
+        exit 0
+        ;;
       *"/branches/"*)
         if [ -f "${FM_TEST_GH_BRANCH_MISSING:-}" ]; then
+          echo 'gh: Not Found (HTTP 404)' >&2
+          exit 1
+        elif [ -f "${FM_TEST_GH_BRANCH_GONE_AFTER_DELETE:-}" ] \
+          && [ -f "${FM_TEST_GH_DELETE_ATTEMPTED:-}" ]; then
+          # The repository's own delete_branch_on_merge removed the head ref
+          # while the guard reads above were in flight, so the branch was
+          # present when they ran and is gone by the time this read repeats.
+          echo 'gh: Not Found (HTTP 404)' >&2
+          exit 1
+        elif [ -f "${FM_TEST_GH_BRANCH_READ_FAILS:-}" ] \
+          && [ -f "${FM_TEST_GH_DELETE_ATTEMPTED:-}" ]; then
+          # Only the post-delete re-read is made to fail transiently, so the
+          # earlier protection read still succeeds and the DELETE is actually
+          # attempted - a case proving the re-read's own failure mode, not a
+          # branch that was unreadable from the very first guard.
+          echo 'gh: unexpected end of JSON input' >&2
           exit 1
         elif [ -f "${FM_TEST_GH_BRANCH_PROTECTED:-}" ]; then
           printf 'true\n'
@@ -418,8 +449,21 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *"/repository/branches/"*)
-        [ ! -e "$case_dir/glab-delete-branch-fails" ] || exit 1
-        : > "$case_dir/glab-delete-branch-called"
+        case " $* " in
+          *" -X DELETE "*)
+            [ ! -e "$case_dir/glab-delete-branch-fails" ] || exit 1
+            : > "$case_dir/glab-delete-branch-called"
+            exit 0
+            ;;
+        esac
+        if [ -e "$case_dir/glab-branch-missing" ]; then
+          echo 'error: 404 Not Found' >&2
+          exit 1
+        fi
+        if [ -e "$case_dir/glab-branch-read-fails" ]; then
+          echo 'error: 500 Internal Server Error' >&2
+          exit 1
+        fi
         exit 0
         ;;
     esac
@@ -554,6 +598,10 @@ run_pr_merge() {
   FM_TEST_GH_OPEN_PR_COUNT="$case_dir/github-open-pr-count" \
   FM_TEST_GH_BRANCH_PROTECTED="$case_dir/github-branch-protected" \
   FM_TEST_GH_BRANCH_MISSING="$case_dir/github-branch-missing" \
+  FM_TEST_GH_BRANCH_READ_FAILS="$case_dir/github-branch-read-fails" \
+  FM_TEST_GH_ORPHAN_PR="$case_dir/github-orphan-pr" \
+  FM_TEST_GH_DELETE_ATTEMPTED="$case_dir/github-delete-attempted" \
+  FM_TEST_GH_BRANCH_GONE_AFTER_DELETE="$case_dir/github-branch-gone-after-delete" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -3832,6 +3880,171 @@ test_branch_deletion_failure_does_not_fail_a_landed_merge() {
   pass "fm-pr-merge reports a landed merge as done even when branch deletion fails"
 }
 
+# The branch-sweep record is fleet-wide rather than per task, so every case
+# reads it from one place.
+orphan_record_file() {  # <case-dir>
+  printf '%s/state/branch-orphans\n' "$1"
+}
+
+# Mutant proof for the durable record: a merged head branch that is still on
+# the remote after its deletion failed must be recorded for a later sweep.
+# Dropping that record - the shape this repository shipped before, where the
+# failure was one stderr line and nothing else - turns this test red.
+test_failed_branch_deletion_is_recorded_for_a_later_sweep() {
+  local case_dir rc record
+  case_dir=$(make_case deletion-failure-recorded)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-delete-branch-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deletion-failure-recorded: a landed merge must still exit zero"
+  record=$(orphan_record_file "$case_dir")
+  [ -f "$record" ] \
+    || fail "deletion-failure-recorded: the failed deletion left no durable record"
+  assert_grep "$GH_TEST_HEAD_BRANCH" "$record" \
+    "deletion-failure-recorded: the record does not name the branch left behind"
+  assert_grep 'https://github.com/example/repo/pull/82' "$record" \
+    "deletion-failure-recorded: the record does not name the merged pull request"
+  assert_grep 'example/repo' "$record" \
+    "deletion-failure-recorded: the record does not name the repository to sweep"
+  assert_grep 'recorded for a later sweep' "$case_dir/stderr" \
+    "deletion-failure-recorded: the operator was not told the branch was recorded"
+  pass "fm-pr-merge records a branch a failed deletion left behind"
+}
+
+# The established cause of the one leak watched live: a repository whose own
+# delete_branch_on_merge is on removes the head ref within seconds of the
+# merge, inside the window this script's guard reads occupy, so its DELETE can
+# arrive at a ref the forge already removed. That is the outcome the step
+# wanted, so it must be reported as such and must leave no record - recording
+# it would queue a branch that does not exist for a sweep that can never
+# succeed.
+test_branch_the_forge_deleted_first_is_not_recorded_as_a_failure() {
+  local case_dir rc
+  case_dir=$(make_case deletion-lost-race-to-forge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-delete-branch-fails"
+  : > "$case_dir/github-branch-gone-after-delete"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "deletion-lost-race-to-forge: a landed merge must still exit zero"
+  assert_grep "branch already gone: $GH_TEST_HEAD_BRANCH" "$case_dir/stdout" \
+    "deletion-lost-race-to-forge: a branch the forge deleted first was not reported as gone"
+  assert_no_grep 'could not delete branch' "$case_dir/stderr" \
+    "deletion-lost-race-to-forge: a won race was reported as a deletion failure"
+  [ ! -f "$(orphan_record_file "$case_dir")" ] \
+    || fail "deletion-lost-race-to-forge: a branch that no longer exists was recorded for a sweep"
+  pass "fm-pr-merge reports a branch the forge deleted first as gone, not as a failure"
+}
+
+# A transient failure on the post-delete-failure re-read (a 5xx, a rate limit,
+# a network blip) is not a 404 and must not be read as proof the branch is
+# gone: that would drop the durable record for a branch that is still on the
+# remote, reopening exactly the leak this record exists to close.
+test_gone_check_transient_failure_is_not_recorded_as_gone() {
+  local case_dir rc record
+  case_dir=$(make_case gone-check-transient)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/github-delete-branch-fails"
+  : > "$case_dir/github-branch-read-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gone-check-transient: a landed merge must still exit zero"
+  assert_no_grep 'branch already gone' "$case_dir/stdout" \
+    "gone-check-transient: a transient read failure was reported as the branch being gone"
+  record=$(orphan_record_file "$case_dir")
+  [ -f "$record" ] \
+    || fail "gone-check-transient: a transient read failure dropped the durable record"
+  assert_grep "$GH_TEST_HEAD_BRANCH" "$record" \
+    "gone-check-transient: the record does not name the branch left behind"
+  pass "fm-pr-merge does not read a transient gone-check failure as the branch being gone"
+}
+
+# A branch recorded by an earlier merge is retried by the next merge on the
+# same repository, which is what turns the record into a swept branch rather
+# than a list that only grows.
+test_recorded_branch_is_swept_by_the_next_merge_on_that_repository() {
+  local case_dir rc record
+  case_dir=$(make_case recorded-branch-swept-by-next-merge)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  record=$(orphan_record_file "$case_dir")
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    fm-branch-orphan-v1 1700000000 github github.com example/repo \
+    fm/left-behind https://github.com/example/repo/pull/7 > "$record"
+  printf '{"merged_at":"2026-09-22T12:54:45Z","head":{"ref":"fm/left-behind","repo":{"full_name":"example/repo"}}}\n' \
+    > "$case_dir/github-orphan-pr"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-branch-swept-by-next-merge: a landed merge must still exit zero"
+  assert_grep 'branch deleted: fm/left-behind' "$case_dir/stdout" \
+    "recorded-branch-swept-by-next-merge: the recorded branch was not swept"
+  assert_grep 'api -X DELETE repos/example/repo/git/refs/heads/fm/left-behind' \
+    "$case_dir/gh.log" \
+    "recorded-branch-swept-by-next-merge: no delete was issued for the recorded branch"
+  [ ! -f "$record" ] \
+    || fail "recorded-branch-swept-by-next-merge: the swept branch kept its record"
+  pass "fm-pr-merge sweeps a recorded branch on the next merge for that repository"
+}
+
+# The sweep re-reads the forge at the moment of deletion rather than trusting
+# the record, because a record can be days old and a deletion is irreversible.
+# A recorded branch whose pull request does not report merged is left alone and
+# keeps its record.
+test_sweep_never_deletes_a_branch_whose_pr_is_not_merged() {
+  local case_dir rc record
+  case_dir=$(make_case sweep-refuses-unmerged-record)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 0ff1ce0000000000000000000000000000ff1ce0
+  : > "$case_dir/gh-axi.log"
+  record=$(orphan_record_file "$case_dir")
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    fm-branch-orphan-v1 1700000000 github github.com example/repo \
+    fm/never-landed https://github.com/example/repo/pull/7 > "$record"
+  printf '{"merged_at":null,"head":{"ref":"fm/never-landed","repo":{"full_name":"example/repo"}}}\n' \
+    > "$case_dir/github-orphan-pr"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "sweep-refuses-unmerged-record: a landed merge must still exit zero"
+  assert_no_grep 'refs/heads/fm/never-landed' "$case_dir/gh.log" \
+    "sweep-refuses-unmerged-record: a branch with no merged pull request was deleted"
+  assert_grep 'fm/never-landed' "$record" \
+    "sweep-refuses-unmerged-record: the unmerged branch lost its record instead of being kept"
+  pass "the branch sweep never deletes a recorded branch whose pull request is not merged"
+}
+
 test_protected_head_branch_is_left_in_place() {
   local case_dir rc
   case_dir=$(make_case protected-branch-left-in-place)
@@ -3919,6 +4132,33 @@ test_gitlab_confirmed_merge_deletes_source_branch() {
   pass "fm-pr-merge deletes the source branch after a confirmed GitLab merge"
 }
 
+# GitLab mirror of test_sweep_keeps_the_record_when_the_gone_check_fails_transiently:
+# a transient failure on the post-delete-failure re-read (not a 404) must not
+# be read as proof the branch is gone, or the durable record this fix exists
+# to guarantee evaporates through the same window a won race is meant to use.
+test_gitlab_deletion_failure_is_recorded_when_gone_check_fails_transiently() {
+  local case_dir rc record
+  case_dir=$(make_gitlab_case gitlab-gone-check-transient)
+  : > "$case_dir/glab-delete-branch-fails"
+  : > "$case_dir/glab-branch-read-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-gone-check-transient: a landed merge must still exit zero"
+  assert_no_grep 'branch already gone' "$case_dir/stdout" \
+    "gitlab-gone-check-transient: a transient read failure was reported as the branch being gone"
+  record=$(orphan_record_file "$case_dir")
+  [ -f "$record" ] \
+    || fail "gitlab-gone-check-transient: a transient read failure dropped the durable record"
+  assert_grep 'fm/example-branch' "$record" \
+    "gitlab-gone-check-transient: the record does not name the branch left behind"
+  pass "fm-pr-merge does not read a transient gone-check failure as the GitLab branch being gone"
+}
+
 # Mutant proof (GitLab side): an unconfirmed merge must leave the branch
 # alone, the same guard test_unproved_github_merge_leaves_branch_alone proves
 # for GitHub.
@@ -4003,10 +4243,16 @@ test_allow_red_refused_on_gitlab
 test_verified_merge_deletes_head_branch_after_proof
 test_unproved_github_merge_leaves_branch_alone
 test_branch_deletion_failure_does_not_fail_a_landed_merge
+test_failed_branch_deletion_is_recorded_for_a_later_sweep
+test_branch_the_forge_deleted_first_is_not_recorded_as_a_failure
+test_gone_check_transient_failure_is_not_recorded_as_gone
+test_recorded_branch_is_swept_by_the_next_merge_on_that_repository
+test_sweep_never_deletes_a_branch_whose_pr_is_not_merged
 test_protected_head_branch_is_left_in_place
 test_branch_base_of_open_pr_is_left_in_place
 test_fork_head_branch_is_left_in_place
 test_gitlab_confirmed_merge_deletes_source_branch
+test_gitlab_deletion_failure_is_recorded_when_gone_check_fails_transiently
 test_gitlab_unconfirmed_merge_leaves_branch_alone
 test_validated_merge_names_the_proving_run
 test_green_pr_without_a_validation_run_is_refused

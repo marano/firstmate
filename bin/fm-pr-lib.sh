@@ -1035,3 +1035,52 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# Percent-encode one path segment for a forge REST path, so a branch name
+# carrying a slash or any other reserved character addresses the branch it
+# names rather than a deeper path. Lives here rather than in a single caller
+# because the merge path and the orphaned-branch sweep must encode a branch
+# identically; bin/fm-pr-merge.sh and bin/fm-branch-orphans.sh both use it.
+url_encode_path_segment() {  # <segment>
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
+# True only when a GitHub branch-existence read fails with a confirmed 404,
+# i.e. the branch is actually gone. A network hiccup, rate limit, or auth
+# failure on the same read also exits nonzero but is not a 404, and must not
+# be treated as proof of absence - a caller that did would silently drop a
+# branch that is still on the remote instead of recording it for retry. Lives
+# here because bin/fm-pr-merge.sh and bin/fm-branch-orphans.sh both need it.
+fm_github_branch_confirmed_gone() {  # <owner/repo> <url-encoded branch>
+  local out
+  out=$(gh api "repos/$1/branches/$2" 2>&1 >/dev/null) && return 1
+  case "$out" in
+    *'HTTP 404'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# GitLab equivalent of fm_github_branch_confirmed_gone, using the same 404-in-
+# the-error-text discipline already relied on for the protected-branch read.
+fm_gitlab_branch_confirmed_gone() {  # <host> <url-encoded project> <url-encoded branch>
+  local out
+  out=$(GITLAB_HOST="$1" glab api "projects/$2/repository/branches/$3" 2>&1 >/dev/null) && return 1
+  case "$out" in
+    *404*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
