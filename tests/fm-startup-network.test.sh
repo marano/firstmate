@@ -130,6 +130,214 @@ wait_for_startup_network_wake() {  # <home> [tenths]
   grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null
 }
 
+# --- worker lifetime ---------------------------------------------------------
+
+# The stage launches its worker detached on purpose - own process group, own
+# stdio, nohup - so a truncated digest cannot take it down with it. Nothing in
+# that design ever gave the worker a reason to STOP. Its only deadline covered
+# the sweeps fm_run_timed runs; every blocking step around them was an unbounded
+# fm_lock_acquire_wait, and the acquisition lease is one any other process in
+# the home can hold. A worker that reached one while the lease was held outlived
+# its session, kept that dead session's --lock-pid and --generation, and spun
+# fm_lock_acquire_wait's 100ms retry until a human noticed: measured at 4 days
+# 20 hours and a sixth of a core, reported `S` by ps throughout, because a
+# process that sleeps 100ms per iteration is sleeping in every sample.
+#
+# Reproducing that needs two things the stage cannot supply itself: a process
+# holding one of its locks, and a session process the test can actually kill.
+
+# Take <lockdir> with the fleet's own lock primitive and keep holding it, so the
+# stage meets a live holder rather than one its stale-owner recovery reclaims.
+# Prints the holder's pid.
+start_lock_holder() {  # <home> <root> <lockdir>
+  local home=$1 root=$2 lockdir=$3 script pid waited=0
+  script="$TMP_ROOT/hold-lock.sh"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+set -u
+FM_HOME=$1
+export FM_HOME
+# shellcheck source=bin/fm-wake-lib.sh
+. "$2/fm-wake-lib.sh"
+fm_lock_acquire_wait "$3"
+: > "$3.held"
+while :; do sleep 60; done
+SH
+  chmod +x "$script"
+  "$script" "$home" "$root/bin" "$lockdir" >/dev/null 2>&1 &
+  pid=$!
+  while [ ! -e "$lockdir.held" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$lockdir.held" ] || fail "the stand-in lease holder never took $lockdir"
+  printf '%s\n' "$pid"
+}
+
+# A stand-in session: it owns the fleet lock under its OWN pid, starts the
+# deferred stage the way a session start does, and then stays alive until the
+# test kills it. Its pid is what the worker records as lock_pid, so killing it
+# is exactly the event the worker has to notice. Prints that pid.
+start_stand_in_session() {  # <home> <root> <log> [env-assignments...]
+  local home=$1 root=$2 log=$3 script pid waited=0
+  shift 3
+  script="$TMP_ROOT/stand-in-session.sh"
+  cat > "$script" <<'SH'
+#!/usr/bin/env bash
+set -u
+home=$1; root=$2; log=$3
+shift 3
+printf '%s\n' $$ > "$home/state/.lock"
+env "$@" PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID=$$ FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="$root" FM_FAKE_BOOTSTRAP_LOG="$log" \
+  "$root/bin/fm-startup-network.sh" start --locked 1 --harvest-pid $$ >/dev/null 2>&1
+: > "$home/state/.stand-in-session-started"
+while :; do sleep 60; done
+SH
+  chmod +x "$script"
+  "$script" "$home" "$root" "$log" "$@" >/dev/null 2>&1 &
+  pid=$!
+  while [ ! -e "$home/state/.stand-in-session-started" ] && [ "$waited" -lt 150 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$home/state/.stand-in-session-started" ] \
+    || fail "the stand-in session never returned from start"
+  printf '%s\n' "$pid"
+}
+
+# Seconds until <pid> is gone, or the limit when it is still there. Reported in
+# seconds rather than as a bare boolean so a failure says HOW long it survived.
+seconds_until_gone() {  # <pid> <limit-seconds>
+  local pid=$1 limit=$2 waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$((limit * 2))" ]; do
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  printf '%s\n' "$((waited / 2))"
+}
+
+# Never leave this suite's own stand-ins behind: the defect under test is a
+# process outliving its owner, and a test for it that leaks one is the same bug.
+reap_pids() {  # <pid>...
+  local pid
+  for pid in "$@"; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
+
+# The detection signature a human used to find the original orphan, turned into
+# an assertion: ppid 1 plus this world's path in argv. It catches the half of the
+# problem a worker-pid check cannot see - a CHILD of the worker that survives it.
+# fm_run_timed deliberately gives what it bounds a process group of its own, so
+# any helper started that way outlives a signal aimed at the worker's group and
+# reparents to init still spinning, which is how a lifetime deadline can create
+# the very orphan it exists to prevent.
+assert_no_orphans_under() {  # <path> <context>
+  local path=$1 context=$2 leftovers
+  leftovers=$(ps -Ao pid=,ppid=,command= 2>/dev/null | awk -v p="$path" '$2 == 1 && index($0, p)')
+  [ -z "$leftovers" ] || fail "$context left a process reparented to init: $leftovers"
+}
+
+# THE session-coupling assertion. The worker is blocked on a held lease when its
+# session dies, which is the exact state the orphan was found in. Its lifetime
+# budget here is deliberately far longer than the window asserted, so passing
+# proves the worker noticed its SESSION rather than merely waiting out a bound.
+test_worker_dies_with_its_session_instead_of_outliving_a_held_lease() {
+  local rec home root log holder session worker gone
+  rec=$(new_world session-coupled-lifetime)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  holder=$(start_lock_holder "$home" "$root" "$home/state/.lock.acquire")
+  # A long delivery budget makes the lifetime bound ~70s, so a worker that only
+  # ever dies at that bound cannot pass the 20s window below.
+  session=$(start_stand_in_session "$home" "$root" "$log" \
+    FM_STARTUP_NETWORK_TIMEOUT=5 FM_SESSION_START_TIMEOUT=60)
+  await_worker_record "$home"
+  worker=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status" | tail -1)
+  case "$worker" in ''|*[!0-9]*|0) reap_pids "$holder" "$session"; fail "the stage recorded no worker pid" ;; esac
+  kill -0 "$worker" 2>/dev/null \
+    || { reap_pids "$holder" "$session"; fail "the worker was gone before its session was killed"; }
+
+  reap_pids "$session"
+  gone=$(seconds_until_gone "$worker" 20)
+  if kill -0 "$worker" 2>/dev/null; then
+    reap_pids "$holder" "$worker"
+    fail "the worker outlived its session by more than 20s while blocked on a held lease - it is an orphan carrying a dead session's lock identity"
+  fi
+  reap_pids "$holder"
+  [ "$gone" -le 20 ] || fail "the worker took ${gone}s to follow its session"
+  assert_no_orphans_under "$home" "ending the worker"
+  pass "fm-startup-network: a worker blocked on a held lease dies with the session that asked for the work"
+}
+
+# Bounding the lease wait is only half an answer: the stage's contract is that a
+# skipped sweep is always an actionable line and never silence, so a lease it
+# gave up on has to read like a lock that changed hands. The session stays alive
+# here, so the only deadline in play is the lease's own.
+test_a_held_lease_downgrades_to_a_reported_probe_instead_of_waiting_forever() {
+  local rec home root log holder report
+  rec=$(new_world lease-refused)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  holder=$(start_lock_holder "$home" "$root" "$home/state/.lock.acquire")
+
+  FM_STARTUP_NETWORK_TIMEOUT=2 FM_SESSION_START_TIMEOUT=2 \
+    FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$ >/dev/null
+  FM_STARTUP_NETWORK_TIMEOUT=2 FM_SESSION_START_TIMEOUT=2 \
+    run_stage "$home" "$root" wait 30 >/dev/null \
+    || { reap_pids "$holder"; fail "the worker never published after giving up on the lease"; }
+  reap_pids "$holder"
+
+  assert_grep 'network=only detect_only=1' "$log" \
+    "the worker ran mutating sweeps without the lease that authorizes them"
+  assert_no_grep 'detect_only=0' "$log" \
+    "the worker swept as though it held the lease"
+  report=$(FM_STARTUP_NETWORK_TIMEOUT=2 run_stage "$home" "$root" report)
+  assert_contains "$report" "still held this home's lock-acquisition lease" \
+    "giving up on the lease was silent instead of actionable: $report"
+  assert_contains "$report" "run --locked 1" \
+    "the refusal did not name how to rerun the skipped sweeps"
+  pass "fm-startup-network: a lease held against the stage downgrades it with a reported reason"
+}
+
+# THE total-runtime assertion, asked separately because it holds even when the
+# session is fine: a stage that can block forever on a lock has no bound at all,
+# and this one is the bound. The session here stays alive throughout, so only
+# the lifetime deadline can end the worker.
+test_the_worker_lifetime_is_bounded_even_while_its_session_lives() {
+  local rec home root log holder worker gone
+  rec=$(new_world bounded-lifetime)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  holder=$(start_lock_holder "$home" "$root" "$home/state/.lock.acquire")
+  FM_STARTUP_NETWORK_TIMEOUT=2 FM_SESSION_START_TIMEOUT=2 \
+    FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$ >/dev/null
+  await_worker_record "$home"
+  worker=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status" | tail -1)
+  case "$worker" in ''|*[!0-9]*|0) reap_pids "$holder"; fail "the stage recorded no worker pid" ;; esac
+
+  gone=$(seconds_until_gone "$worker" 30)
+  if kill -0 "$worker" 2>/dev/null; then
+    reap_pids "$holder" "$worker"
+    fail "the worker was still running 30s into a 6s lifetime budget - nothing bounds this stage's total runtime"
+  fi
+  reap_pids "$holder"
+  kill -0 "$$" 2>/dev/null || fail "the lifetime deadline signalled beyond the worker"
+  [ "$gone" -le 30 ] || fail "the worker ran ${gone}s past a 6s lifetime budget"
+  assert_no_orphans_under "$home" "the lifetime deadline"
+  pass "fm-startup-network: the stage's total runtime is bounded even when a lock is held against it"
+}
+
 # --- tests -------------------------------------------------------------------
 
 # `start` is called from inside a session-open hook whose stdout the harness
@@ -779,4 +987,7 @@ test_records_share_one_origin_so_offsets_form_a_timeline
 test_timings_are_published_and_only_the_on_demand_report_prints_them
 test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
 test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
+test_worker_dies_with_its_session_instead_of_outliving_a_held_lease
+test_a_held_lease_downgrades_to_a_reported_probe_instead_of_waiting_forever
+test_the_worker_lifetime_is_bounded_even_while_its_session_lives
 echo "# fm-startup-network.test.sh: all assertions passed"
