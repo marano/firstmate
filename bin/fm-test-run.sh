@@ -1040,6 +1040,7 @@ tests/fm-arm-pretool-check.test.sh${t}shellcheck
 tests/fm-cd-pretool-check.test.sh${t}shellcheck
 tests/fm-lint-workflows.test.sh${t}actionlint
 tests/fm-lint.test.sh${t}shellcheck
+tests/fm-lint.test.sh${t}actionlint
 EOF
 }
 
