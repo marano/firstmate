@@ -28,6 +28,10 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
       stderr += chunk.toString();
     });
     child.on("error", reject);
+    // Same contract as the guard's runner: an encoder that exits before reading
+    // its body answers with its exit code below, and must not crash the host
+    // through an unhandled EPIPE on this write.
+    child.stdin.on("error", () => {});
     child.on("close", (code) => {
       if (code === 0 && stdout) {
         resolveResult(stdout);
