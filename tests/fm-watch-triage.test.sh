@@ -1974,11 +1974,17 @@ test_stale_terminal_status_overridden_by_active_run() {
 # inherited a command substitution's pipe would keep that pipe open for its whole
 # life, so returning the pid on stdout would deadlock the caller instead of
 # starting a fixture. The caller releases it with release_task_hold.
+# The hold leads its own process group, as a command a harness ran in a fresh
+# group of its own does: that is one run with one hold, which ends when the hold
+# ends. Taken as a plain child of this long-lived shell it would share the
+# shell's group, and the watcher would rightly read that shell as a run still
+# alive between two holds (start_per_script_runner models that case on purpose).
 TASK_HOLD_PID=
 take_task_hold() {  # <lockroot> <worktree> <label> [outfile]
   local lockroot=$1 wt=$2 label=$3 outfile=${4:-/dev/null} i=0
   TASK_HOLD_PID=
-  ( cd "$wt" && exec env FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+  ( cd "$wt" && exec perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!\n"' \
+      env FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
       "$ROOT/bin/fm-build-lock.sh" --label "$label" sleep 120 ) \
       > "$outfile" 2>&1 &
   TASK_HOLD_PID=$!
@@ -2267,6 +2273,261 @@ test_turn_ended_with_a_task_owned_run_holds_the_ladder_then_reports_it_finished(
   [ ! -e "$state/.taskshell-holder-$key" ] \
     || fail "the finished-run chain outlived its own wake, so it would fire again"
   pass "a turn that ends with a task-owned run in flight is held off the wedge ladder, then reported as an uncollected result the moment that run is gone"
+}
+
+# The live holders of the private lock root, one `--holders` line each.
+task_holders() {  # <lockroot>
+  FM_BUILD_LOCK_DIR="$1" FM_BUILD_LOCK_CI=0 "$ROOT/bin/fm-build-lock.sh" --holders 2>/dev/null
+}
+
+# Wait until the lock root has a live holder (want=held) or none (want=free).
+wait_task_holders() {  # <lockroot> <held|free>
+  local lockroot=$1 want=$2 i=0 now
+  while [ "$i" -lt 300 ]; do
+    now=$(task_holders "$lockroot")
+    case "$want" in
+      held) [ -n "$now" ] && return 0 ;;
+      free) [ -z "$now" ] && return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# One watcher over a task-shell fixture, with the task-shell triage reading the
+# fixture's private lock root.
+task_shell_watch_bg() {  # <state> <fakebin> <out> <window> <capture-file> <lockroot>
+  PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$4" FM_FAKE_TMUX_CAPTURE="$5" \
+    FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$2/fm-crew-state.sh" \
+    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_BUILD_LOCK_DIR="$6" FM_BUILD_LOCK_CI=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$3" &
+}
+
+# A per-script runner shaped like bin/fm-test-run.sh under a harness's
+# per-command wrapper: it leads its own process group, takes one build-slot hold
+# per script, holds NOTHING between two of them, and ends only after its last.
+# It also leaves a stray background job in its group that outlives it, as a
+# worker's `&` job does. Driven through files in <ctl>: `release1` ends the first
+# hold, `next` takes the second, `release2` ends the second and the run with it.
+# Publishes the runner pid in TASK_RUNNER_PID; the stray's pid lands in
+# <ctl>/stray. Every wait is bounded, so an escaped fixture stops itself.
+TASK_RUNNER_PID=
+start_per_script_runner() {  # <lockroot> <worktree> <ctl-dir>
+  local lockroot=$1 wt=$2 ctl=$3
+  TASK_RUNNER_PID=
+  mkdir -p "$ctl"
+  cat > "$ctl/runner.sh" <<'RUNNER'
+lock=$1 ctl=$2
+deadline=$((SECONDS + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}))
+await() {
+  while [ ! -e "$ctl/$1" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 1
+    sleep 0.05
+  done
+}
+hold() {  # <label> <release-file>
+  "$lock" --label "$1" -- bash -c '
+    end=$((SECONDS + $2))
+    while [ ! -e "$1" ] && [ "$SECONDS" -lt "$end" ]; do sleep 0.05; done
+  ' _ "$ctl/$2" "$((deadline - SECONDS))"
+}
+sleep "$((deadline - SECONDS))" &
+printf '%s\n' "$!" > "$ctl/stray"
+hold "bin/fm-test-run.sh tests/first.test.sh" release1
+await next
+hold "bin/fm-test-run.sh tests/second.test.sh" release2
+RUNNER
+  ( cd "$wt" && exec perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!\n"' \
+      env FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
+      bash "$ctl/runner.sh" "$ROOT/bin/fm-build-lock.sh" "$ctl" ) > "$ctl/runner.out" 2>&1 &
+  TASK_RUNNER_PID=$!
+  disown "$TASK_RUNNER_PID" 2>/dev/null || true
+}
+
+stop_per_script_runner() {  # <ctl-dir> <lockroot>
+  local ctl=$1 stray
+  : > "$ctl/release1"; : > "$ctl/next"; : > "$ctl/release2"
+  [ -z "$TASK_RUNNER_PID" ] || kill_task_hold "$TASK_RUNNER_PID" || true
+  stray=$(cat "$ctl/stray" 2>/dev/null || true)
+  [ -z "$stray" ] || kill_task_hold "$stray" || true
+  clear_task_hold_root "$2"
+}
+
+# THE RUN, NOT ONE HOLD. bin/fm-test-run.sh takes the build lock once per
+# script, so between two scripts - and while its next script queues for a slot -
+# the run holds nothing at all. The detector read the first holder's end as the
+# end of the run and told firstmate to steer a worker whose tests were still
+# running, on two lanes within an hour of shipping. The run is the holder's
+# ancestors in its own process group; it has finished only when they have.
+#
+# Mutants that must turn this red:
+#   - key the verdict on the holder alone (current main): phase B reports the
+#     live runner's run as finished.
+#   - count any live member of the holder's process group as the run: phase D
+#     never fires, because the stray job the run left behind outlives it.
+#   - never record the run (drop task_shell_run_record): phase B fires again.
+test_a_per_script_runner_between_holds_is_not_reported_finished() {
+  local dir state fakebin out capture_file window key wt lockroot ctl pid stray hold2 i
+  dir=$(make_case turn-ended-per-script-runner); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-scriptrunner"; wt="$dir/wt"; lockroot="$dir/lockroot"; ctl="$dir/ctl"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'done 3:49 PM - 1 shell still running' > "$capture_file"
+  arm_turn_ended_fixture "$state" scriptrunner "$window" "$wt" "$capture_file" \
+    'paused: waiting on the stock-bash lane, build slot held'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_busy_state "$state" scriptrunner idle || fail "could not record the idle turn-end verdict"
+  start_per_script_runner "$lockroot" "$wt" "$ctl"
+  wait_task_holders "$lockroot" held \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the per-script runner never took its first hold"; }
+
+  # Phase A: first script's hold live. Held.
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_per_script_runner "$ctl" "$lockroot"
+    fail "the watcher did not hold a lane whose per-script runner was holding a build slot: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || { stop_per_script_runner "$ctl" "$lockroot"; fail "could not acknowledge the phase-A watcher stop"; }
+
+  # Phase B: between two scripts. No holder at all, the runner alive.
+  : > "$ctl/release1"
+  wait_task_holders "$lockroot" free \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the first script's hold never ended"; }
+  kill -0 "$TASK_RUNNER_PID" 2>/dev/null \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the runner ended with its first hold, so phase B tests nothing"; }
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_per_script_runner "$ctl" "$lockroot"
+    fail "a per-script runner between two holds was reported as a finished run: $(cat "$out")"
+  fi
+  grep -F "has finished" "$out" >/dev/null && { reap "$pid"; stop_per_script_runner "$ctl" "$lockroot"
+    fail "a live run between two holds was reported as finished: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; stop_per_script_runner "$ctl" "$lockroot"
+    fail "the run between two holds enqueued a wake: $(cat "$state/.wake-queue")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; stop_per_script_runner "$ctl" "$lockroot"
+    fail "the run between two holds advanced the wedge escalation counter"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { stop_per_script_runner "$ctl" "$lockroot"; fail "could not acknowledge the phase-B watcher stop"; }
+
+  # Phase C: the next script's hold. Held again, now naming that hold.
+  : > "$ctl/next"
+  wait_task_holders "$lockroot" held \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the runner never took its second hold"; }
+  hold2=$(task_holders "$lockroot" | cut -f1)
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    stop_per_script_runner "$ctl" "$lockroot"
+    fail "the watcher did not hold the runner's second hold: $(cat "$out")"
+  fi
+  grep -F "pid $hold2" "$state/.taskshell-holder-$key" >/dev/null || { reap "$pid"; stop_per_script_runner "$ctl" "$lockroot"
+    fail "the second hold was not recorded: $(cat "$state/.taskshell-holder-$key" 2>/dev/null || true)"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { stop_per_script_runner "$ctl" "$lockroot"; fail "could not acknowledge the phase-C watcher stop"; }
+
+  # Phase D: the last script ends and the run with it, leaving only its stray
+  # background job alive in the group. That is a finished run: surface AT ONCE.
+  : > "$ctl/release2"
+  wait_task_holders "$lockroot" free \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the second script's hold never ended"; }
+  i=0
+  while is_live_non_zombie "$TASK_RUNNER_PID" && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  ! is_live_non_zombie "$TASK_RUNNER_PID" \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the runner outlived its last hold"; }
+  stray=$(cat "$ctl/stray" 2>/dev/null || true)
+  if [ -z "$stray" ] || ! kill -0 "$stray" 2>/dev/null; then
+    stop_per_script_runner "$ctl" "$lockroot"
+    fail "the stray job did not outlive the run, so phase D cannot tell the run from its group"
+  fi
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; stop_per_script_runner "$ctl" "$lockroot"
+      fail "the watcher stayed quiet after the per-script run finished with its turn over: $(cat "$out")"; }
+  grep -F "has finished and its turn was already over" "$out" >/dev/null \
+    || { stop_per_script_runner "$ctl" "$lockroot"; fail "the finished per-script run was not reported as itself: $(cat "$out")"; }
+  stop_per_script_runner "$ctl" "$lockroot"
+  pass "a per-script runner between two build-slot holds is held as a live run, and reported finished only once the run itself has ended"
+}
+
+# THE AGENT'S OWN GROUP IS NOT A RUN. A harness that runs commands inside its own
+# agent's process group puts the agent among the holder's in-group ancestors,
+# alive for as long as the lane is: recorded as the run, it would keep a finished
+# result held off the supervisor. In a pane that group is the terminal's
+# foreground group, so no run is recorded there and the single-hold reading
+# stands. Modelled with a real terminal: a tmux pane's shell takes the hold as a
+# plain child and stays alive after it, as such an agent does.
+#
+# Mutants that must turn this red:
+#   - drop the foreground-group check from task_shell_run_record: the live pane
+#     shell is recorded as the run, and the finished hold is never reported.
+test_a_hold_in_its_terminals_foreground_group_still_reports_finished() {
+  local dir state fakebin out capture_file window key wt lockroot sock tmux_bin hold parent pid
+  local hold_pgid hold_tpgid parent_pgid
+  tmux_bin=$(command -v tmux 2>/dev/null) || { echo "skip: tmux not found (foreground-group run guard)"; return 0; }
+  dir=$(make_case turn-ended-foreground-group); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-fggroup"; wt="$dir/wt"; lockroot="$dir/lockroot"; sock="fm-triage-fg-$$"
+  mkdir -p "$wt/src" "$lockroot"
+  printf 'done 3:49 PM - 1 shell still running' > "$capture_file"
+  arm_turn_ended_fixture "$state" fggroup "$window" "$wt" "$capture_file" \
+    'paused: waiting on the test lane, build slot held'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_busy_state "$state" fggroup idle || fail "could not record the idle turn-end verdict"
+  SHELL=/bin/sh "$tmux_bin" -L "$sock" -f /dev/null new-session -d -s fg -x 80 -y 24 \
+    "cd '$wt' && FM_BUILD_LOCK_DIR='$lockroot' FM_BUILD_LOCK_CI=0 '$ROOT/bin/fm-build-lock.sh' --label 'mutex bash tests/lane.test.sh' sleep 120; sleep 120" \
+    || fail "real tmux could not start the foreground-group fixture"
+  if ! wait_task_holders "$lockroot" held; then
+    "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+    fail "the pane never took its hold"
+  fi
+  hold=$(task_holders "$lockroot" | cut -f1)
+  parent=$(ps -o ppid= -p "$hold" 2>/dev/null | tr -d ' ')
+  read -r hold_pgid hold_tpgid <<EOF
+$(ps -o pgid= -o tpgid= -p "$hold" 2>/dev/null)
+EOF
+  parent_pgid=$(ps -o pgid= -p "$parent" 2>/dev/null | tr -d ' ')
+  # The divergence this case exists for: the hold's parent shares its group, and
+  # that group is the terminal's foreground one. Without it the case is vacuous.
+  if [ -z "$hold_pgid" ] || [ "$hold_pgid" != "$hold_tpgid" ] || [ "$parent_pgid" != "$hold_pgid" ]; then
+    kill_task_hold "$hold"; "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+    clear_task_hold_root "$lockroot"
+    fail "the fixture is not a hold in its terminal's foreground group (pgid=$hold_pgid tpgid=$hold_tpgid parent-pgid=$parent_pgid)"
+  fi
+
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    kill_task_hold "$hold"; "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+    clear_task_hold_root "$lockroot"
+    fail "the watcher did not hold the pane's live build-slot hold: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the phase-A watcher stop"
+
+  release_task_hold "$hold" "$lockroot"
+  kill -0 "$parent" 2>/dev/null || { "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+    fail "the pane shell ended with its hold, so this case tests nothing"; }
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+    fail "a finished hold whose parent is its terminal's foreground group was held as a live run: $(cat "$out")"
+  fi
+  "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+  grep -F "has finished and its turn was already over" "$out" >/dev/null \
+    || fail "the finished hold was not reported as itself: $(cat "$out")"
+  pass "a hold taken inside its terminal's foreground group is never mistaken for a run, so its end is still reported at once"
 }
 
 # THE FALSE-ALARM GUARD. The agent half must be a POSITIVE idle verdict. A lane
@@ -5900,6 +6161,8 @@ test_wedge_escalation_deferred_while_worktree_is_written
 test_crew_task_shell_running_classifier
 test_status_wait_subject_class_classifier
 test_turn_ended_with_a_task_owned_run_holds_the_ladder_then_reports_it_finished
+test_a_per_script_runner_between_holds_is_not_reported_finished
+test_a_hold_in_its_terminals_foreground_group_still_reports_finished
 test_a_lane_that_is_not_positively_idle_is_left_to_the_ordinary_ladder
 test_a_declared_wait_with_its_agent_present_is_not_reported
 test_an_unverifiable_declared_wait_is_distinguishable_from_a_checkable_one
