@@ -1132,7 +1132,12 @@ for _ in $(seq 1 24); do
   pe "$HR" start race-src >/dev/null &
   race_pids+=("$!")
 done
-wait_for "$RACE_LOG" || fail "no contender acquired the stale claim"
+# This fixture starts 24 concurrent contenders, unlike this file's other
+# wait_for calls, which start at most a couple. Only one needs to win the
+# reclaim, but on a loaded machine even that one contender's turn can be
+# delayed well past the default 10s budget by CPU contention among the other
+# 23, which is unrelated to how quickly the reclaim itself resolves.
+wait_for "$RACE_LOG" 300 || fail "no contender acquired the stale claim"
 sleep 0.5
 [ "$(wc -l < "$RACE_LOG" | tr -d ' ')" = 1 ] || fail "stale-claim race started more than one runner"
 : > "$RACE_TRIGGER"
