@@ -997,7 +997,7 @@ list_stock_bash() {
 # proven from what a run actually did rather than from this text:
 #   - a script listed here whose tool the lane did not install skips its
 #     tool-dependent cases, prints tests/lib.sh's FM_TEST_TOOL_MISSING marker,
-#     and reds the run (require_declared_tools below);
+#     and reds the run (REQUIRE_DECLARED_TOOLS above);
 #   - a script NOT listed here that needs a tool prints the same marker and reds
 #     the same way, naming itself as missing from this table.
 # --check-coverage additionally refuses an entry naming a test that does not
@@ -1041,8 +1041,8 @@ installable_pinned_tools() {
   "$ROOT/bin/fm-install-pinned-tools.sh" --list
 }
 
-# Tools the scripts of a run reported missing, as "<script><TAB><tool>" lines.
-# tests/lib.sh's fm_tool_skip prints the marker this reads.
+# The pinned tools a script's output reported missing, one name per line,
+# sorted and deduplicated. tests/lib.sh's fm_tool_skip prints the marker.
 tool_markers_in() {  # <output-file>
   sed -n 's/^FM_TEST_TOOL_MISSING \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$1" 2>/dev/null \
     | LC_ALL=C sort -u
@@ -3300,6 +3300,7 @@ required_ok_count_for() {
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
   local base family expected gate_skip gate_reason fail_delta want_ok got_ok
+  local missing_tool
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
@@ -3307,23 +3308,6 @@ record_script_result() {
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
     rc=1
-  fi
-
-  # A missing pinned tool is silent coverage loss: the case passes as a skip and
-  # the run stays green. Where the tools are supposed to be installed, red it and
-  # say which side is wrong, so neither this lane's install set nor
-  # script_required_tools can drift away from what the tests actually need.
-  if [ "$REQUIRE_DECLARED_TOOLS" -eq 1 ]; then
-    local missing_tool
-    while IFS= read -r missing_tool; do
-      [ -n "$missing_tool" ] || continue
-      if required_tools_for_script "$script" | LC_ALL=C grep -q -x -F "$missing_tool"; then
-        log "pinned tool missing in $script: $missing_tool is required by script_required_tools but was not on PATH for this lane"
-      else
-        log "pinned tool missing in $script: $missing_tool is needed but script_required_tools does not list it, so no lane installs it"
-      fi
-      rc=1
-    done < <(tool_markers_in "$out")
   fi
 
   gate_skip=false
@@ -3335,6 +3319,24 @@ record_script_result() {
     # A capability skip is the runner's only record of what this host could not
     # exercise, so name it rather than leaving a silent green.
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
+  fi
+
+  # A missing pinned tool is silent coverage loss: the case passes as a skip and
+  # the run stays green. Where those tools are supposed to be installed, red it
+  # and say which side is wrong, so neither this lane's install set nor
+  # script_required_tools can drift away from what the tests actually need. This
+  # runs after the gate-skip accounting above, so a script that both gate-skips
+  # and reports a missing tool is still recorded as the gate skip it was.
+  if [ "$REQUIRE_DECLARED_TOOLS" -eq 1 ]; then
+    while IFS= read -r missing_tool; do
+      [ -n "$missing_tool" ] || continue
+      if required_tools_for_script "$script" | LC_ALL=C grep -q -x -F "$missing_tool"; then
+        log "pinned tool missing in $script: $missing_tool is required by script_required_tools but was not on PATH for this lane"
+      else
+        log "pinned tool missing in $script: $missing_tool is needed but script_required_tools does not list it, so no lane installs it"
+      fi
+      rc=1
+    done < <(tool_markers_in "$out")
   fi
 
   if want_ok=$(required_ok_count_for "$script"); then

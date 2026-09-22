@@ -213,27 +213,38 @@ puts "note must print only when the lint step failed, got if: #{condition}" unle
 # the derivation is really what the workflow runs and that it still covers every
 # test that needs a tool.
 
-# Print, per job, the run bodies of its steps as "<job><TAB><step-index><TAB><body>"
-# with newlines inside a body folded to spaces.
-job_run_bodies() {
+# The lanes the workflow itself installs tools for, one per line, resolved from
+# the install steps rather than from a list kept here. A shard matrix names its
+# lane through one step variable, so that variable is resolved against the
+# job's matrix exactly as GitHub would resolve it, giving one lane per shard.
+# A job that installs tools without naming a lane - the stock-Bash job asks its
+# own lane owner - contributes nothing here and is checked separately.
+# \x24 is a literal dollar sign, kept out of this single-quoted program for the
+# same reason the concurrency resolver above keeps its quotes out of it.
+workflow_install_lanes() {
   ruby -ryaml -e '
-YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
-  (job["steps"] || []).each_with_index do |step, index|
-    body = step["run"].to_s.gsub(/\s+/, " ").strip
-    next if body.empty?
-    puts [name, index, body].join("\t")
+YAML.load_file(ARGV[0]).fetch("jobs").each do |_name, job|
+  shards = ((job["strategy"] || {})["matrix"] || {})["shard"]
+  (job["steps"] || []).each do |step|
+    body = step["run"].to_s
+    next unless body.include?("bin/fm-install-pinned-tools.sh")
+    named = body.match(/--lane\s+"?([^"\s|]+)"?/)
+    next if named.nil?
+    token = named[1]
+    unless token.start_with?("\x24")
+      puts token
+      next
+    end
+    spelled = (step["env"] || {})[token.delete("\x24{}")]
+    raise "no step env resolves #{token}" if spelled.nil?
+    (shards || [nil]).each do |shard|
+      puts spelled
+        .gsub("\x24{{ matrix.shard }}", shard.to_s)
+        .gsub("\x24{{ strategy.job-total }}", (shards || []).size.to_s)
+    end
   end
 end
-' "$CI_WORKFLOW"
-}
-
-# The lanes the workflow itself installs tools for, one per line, resolved from
-# the install steps rather than from a list kept here.
-workflow_install_lanes() {
-  job_run_bodies \
-    | awk -F '\t' '$3 ~ /fm-install-pinned-tools\.sh/ { print $3 }' \
-    | sed -n 's/.*--list-required-tools --lane \([^ |]*\).*/\1/p' \
-    | tr -d \''"'\' | LC_ALL=C sort -u
+' "$CI_WORKFLOW" | LC_ALL=C sort -u
 }
 
 test_only_the_lint_job_names_a_linter_installer() {
