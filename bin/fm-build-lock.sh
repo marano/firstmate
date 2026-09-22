@@ -168,10 +168,11 @@
 # program name, stepping over an interpreter or `env` prefix; a `bash -c`
 # argument that merely mentions one is a script rather than a program name and
 # is deliberately not inspected. This is enforced here because prose did not
-# hold: both runners' headers and the firstmate-coding-guidelines skill already
-# forbade the wrap, while the generated ship brief's own rule 8 told workers to
-# wrap "a full CI script", which both of these are. docs/verification/build-lock-contention.md
-# measures what that cost.
+# hold: both runners' headers, CONTRIBUTING.md and the
+# firstmate-coding-guidelines skill all forbade the wrap already, while the
+# generated ship brief's own rule 8 told workers to wrap "a full CI script",
+# which both of these are. docs/verification/build-lock-contention.md measures
+# what that cost.
 #
 # A NESTED INVOCATION INSIDE A HOLD RUNS STRAIGHT THROUGH. A slot is not
 # reentrant, so a wrapped command that itself calls this script - `mutex` around
@@ -1432,8 +1433,9 @@ fi
 # inner acquire passes straight through as a nested hold, which is the
 # whole-lane hold measured in docs/verification/build-lock-contention.md.
 #
-# Prose forbade that wrap in three places - both runners' headers and the
-# firstmate-coding-guidelines skill - and it still happened, because the ship
+# Prose forbade that wrap in four places - both runners' headers,
+# CONTRIBUTING.md and the firstmate-coding-guidelines skill - and it still
+# happened, because the ship
 # brief's rule 8 tells a worker to wrap "a full CI script" and these are full
 # CI scripts by any reading. The instruction was the defect, so the runtime
 # decides it here rather than the caller: an invocation asked to wrap one of

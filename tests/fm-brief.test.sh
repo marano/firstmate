@@ -1301,6 +1301,13 @@ test_ship_and_scout_teach_the_build_mutex() {
       "$kind brief did not forbid one mutex around a loop of separate runs"
     assert_grep 'wrap each run in the loop instead' "$brief" \
       "$kind brief did not say to wrap each run of a loop separately"
+    # A worker obeying "a full CI script" above wrapped bin/fm-test-run.sh, whose
+    # own per-script holds then became no-ops inside that outer hold - a measured
+    # 20-minute whole-lane hold. The rule has to name that case, or the positive
+    # list above reads as covering it.
+    # Mutant: drop the "takes the lock per unit itself" line.
+    assert_grep 'A script that takes the lock per unit itself is the one thing never to wrap' "$brief" \
+      "$kind brief did not name a self-locking runner as the one command never to wrap"
     # Mutant: drop the "never run the command without mutex" line.
     assert_grep "never run the command without \`mutex\` to get out of the line" "$brief" \
       "$kind brief did not forbid leaving the line by running unlocked"
