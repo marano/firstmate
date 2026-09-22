@@ -3395,6 +3395,75 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
   pass "a wedged task that is not awaiting landing still alarms and still escalates, near misses included"
 }
 
+# THE 2026-09-21 false alarms. A no-mistakes ship ends with its PR head AHEAD of
+# the worker's local branch (the pipeline pushes its own fix commits), and firstmate
+# stops the finished worker's agent. That task alarmed with a bare "stale: <window>"
+# because the landing owner called the ahead head landing-blocked. Both directions
+# are proven over a real worktree, a real stop record and a real validation
+# receipt: a validated ahead head with a dead endpoint raises NO stale wake, while
+# the same task with an unvouched ahead head, or a behind head, STILL does - and the
+# alarm that fires leaves a triage-log line naming the landing class that decided it.
+landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind> -> key
+  local case_dir=$1 task_id=$2 num=$3 receipt=$4 shape=$5 base pr_head
+  local state_dir="$case_dir/state" win="test:fm-$task_id"
+  fm_git_worktree "$case_dir/repo" "$case_dir/wt" "fm/$task_id" >/dev/null 2>&1 \
+    || fail "could not build $task_id's worktree"
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  if [ "$shape" = ahead ]; then
+    git -C "$case_dir/wt" reset --hard -q "$base"
+  else
+    pr_head=$base
+  fi
+  if [ "$receipt" = yes ]; then
+    ( . "$ROOT/bin/fm-validation-receipt-lib.sh"
+      fm_validation_receipt_write "$state_dir" "$task_id" github github.com o/r "$num" "$pr_head" "fm/$task_id" 01RUNRUNRUNRUNRUNRUNRUNRUN ) \
+      || fail "could not write $task_id's validation receipt"
+  fi
+  landing_stale_task "$state_dir" "$task_id" "$win" "$case_dir/pane.txt" "fm-$task_id \$" \
+    "done: PR https://github.com/o/r/pull/$num checks green run=r$num" "worktree=$case_dir/wt" \
+    "pr=https://github.com/o/r/pull/$num" "pr_head=$pr_head"
+  landing_stop_agent "$state_dir" "$task_id"
+}
+
+test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
+  local dir state fakebin out capture window key pid
+  # QUIET: validated ahead head, agent stopped, dead endpoint (a bare shell).
+  dir=$(make_case landing-ahead-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-ahead-ok"
+  key=$(landing_ahead_task "$dir" ahead-ok 41 yes ahead)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a stopped worker whose PR head is validated and ahead of its branch"
+
+  # LOUD 1: the same task with no receipt vouching for the ahead head.
+  dir=$(make_case landing-ahead-unvouched); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-ahead-unvouched"
+  key=$(landing_ahead_task "$dir" ahead-unvouched 42 no ahead)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unvouched ahead head on a stopped worker never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the unvouched ahead head printed the wrong wake: $(cat "$out")"
+  grep -F "surfaced stale" "$state/.watch-triage.log" | grep -F "landing=landing-blocked" | grep -F "$window" >/dev/null \
+    || fail "the alarm that fired left no triage-log line naming the landing class: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unvouched leg's watcher stop"
+
+  # LOUD 2: a validated head the branch has advanced PAST (unpushed local work).
+  dir=$(make_case landing-behind-validated); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-behind-validated"
+  key=$(landing_ahead_task "$dir" behind-validated 43 yes behind)
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'never pushed' || fail "could not advance the behind leg's branch"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a validated head the branch advanced past never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the behind head printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the behind leg's watcher stop"
+  pass "a validated ahead head on a stopped worker raises no stale wake; an unvouched or behind head still does, with a log line"
+}
+
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
 # 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
 # and/or the harness's rendered busy footer) is unconditional, unbounded proof
@@ -5241,6 +5310,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
 test_awaiting_landing_never_enters_the_wedge_ladder
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
+test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
