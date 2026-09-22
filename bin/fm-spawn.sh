@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--delivers <id>[,<id>...]] [--apart-reason <one line>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--delivers <id>[,<id>...]] [--apart-reason <one line>] [--yolo-downgrade-reason <one line>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -24,6 +24,18 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   MERGE AUTHORITY IS NOT RIGOR, and a notice is not enough for it: every merge
+#   path reads the yolo posture RECORDED on the task, never the registry, so a
+#   first dispatch passing --yolo off where the registry grants standing
+#   authority would revoke that grant in a record nobody re-reads. It is
+#   REFUSED, before an endpoint or local copy exists. Pass --yolo on, or, when
+#   the downgrade is deliberate, --yolo-downgrade-reason "<one line>", which is
+#   recorded as yolo_downgrade_reason= so a later reader is told why. A relaunch
+#   carries the recorded posture forward rather than choosing one, so it prints
+#   that reason (or its absence) as a notice and continues.
+#   --yolo-downgrade-reason records, on the task, why a ship dispatch carries
+#   less merge authority than its project's standing posture. First dispatch
+#   only, one line, ship spawns only, and refused unless --yolo is off.
 #   --delivers names the other backlog items this ship task delivers in the same
 #   job - a grouped dispatch, where <task-id> is the dispatch unit. It is recorded
 #   as delivers= in the unit's task record and every member moves In flight in
@@ -581,6 +593,8 @@ DELIVERS_ARG=
 DELIVERS_SET=0
 APART_REASON=
 APART_REASON_SET=0
+YOLO_DOWNGRADE_REASON=
+YOLO_DOWNGRADE_REASON_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -628,6 +642,10 @@ for a in "$@"; do
     apart_reason)
       APART_REASON=$a
       APART_REASON_SET=1
+      ;;
+    yolo_downgrade_reason)
+      YOLO_DOWNGRADE_REASON=$a
+      YOLO_DOWNGRADE_REASON_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -686,6 +704,11 @@ for a in "$@"; do
   --apart-reason=*)
     APART_REASON=${a#--apart-reason=}
     APART_REASON_SET=1
+    ;;
+  --yolo-downgrade-reason) want_value=yolo_downgrade_reason ;;
+  --yolo-downgrade-reason=*)
+    YOLO_DOWNGRADE_REASON=${a#--yolo-downgrade-reason=}
+    YOLO_DOWNGRADE_REASON_SET=1
     ;;
   --delivers) want_value=delivers ;;
   --delivers=*)
@@ -754,6 +777,41 @@ if [ "$APART_REASON_SET" -eq 1 ]; then
     echo "error: --apart-reason clears a grouping refusal, and only a ship dispatch is guarded" >&2
     exit 1
   }
+fi
+
+# The one-line reason a task ships with LESS merge authority than the captain's
+# standing posture for its project. Same shape and same purpose as
+# --apart-reason: the record is what makes a deliberate deviation auditable
+# rather than merely allowed, and a value carrying a newline would write a
+# second record line, which is how a record gets a key its producer never wrote.
+if [ "$YOLO_DOWNGRADE_REASON_SET" -eq 1 ]; then
+  [ -n "$YOLO_DOWNGRADE_REASON" ] || {
+    echo "error: --yolo-downgrade-reason requires a non-empty value" >&2
+    exit 1
+  }
+  case "$YOLO_DOWNGRADE_REASON" in
+    *$'\n'*|*$'\r'*)
+      echo "error: --yolo-downgrade-reason must be one line" >&2
+      exit 1
+      ;;
+  esac
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --relaunch keeps the task's recorded merge authority and its recorded reason; --yolo-downgrade-reason applies only to a first dispatch" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || {
+    echo "error: --yolo-downgrade-reason records why a ship task carries less merge authority than its project's standing posture, and only a ship spawn records one" >&2
+    exit 1
+  }
+  # An absent --yolo is left to the ship contract's own refusal below, which
+  # names the missing flag rather than the reason that depends on it.
+  case "$YOLO" in
+    ''|off) : ;;
+    *)
+      echo "error: --yolo-downgrade-reason records a DOWNGRADE; this spawn passed --yolo $YOLO, which is nothing to explain" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # A grouped dispatch's membership is recorded once, at the unit's first spawn
@@ -2787,10 +2845,39 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
-  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
+  STANDING_POSTURE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null) || STANDING_POSTURE=
+  STANDING_MODE=$(printf '%s' "$STANDING_POSTURE" | cut -d' ' -f1)
+  STANDING_YOLO=$(printf '%s' "$STANDING_POSTURE" | cut -d' ' -s -f2)
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+
+  # Merge authority is NOT delivery rigor, and a notice is not enough for it.
+  # Every merge path reads the posture RECORDED on the task, never the registry,
+  # so a spawn that records a weaker yolo than the captain's standing grant does
+  # not merely deviate - it revokes an authority the captain already gave, in a
+  # record nobody re-reads. 2026-09-22: a harness permission layer refused
+  # `--yolo on`, firstmate respawned the same work with `--yolo off`, and two
+  # green PRs then sat unmerged overnight while the captain was told a guard had
+  # withheld them. The refusal was of a COMMAND; what actually stopped the merge
+  # was the downgraded record. So a first dispatch that cannot record the
+  # standing posture STOPS here: firstmate either finds an invocation that
+  # records it or escalates, and a downgrade it can justify is recorded with
+  # --yolo-downgrade-reason so a later reader is told why rather than guessing.
+  # A relaunch does not choose the posture - it carries forward what first
+  # dispatch recorded, and --yolo is refused with --relaunch - so it says so
+  # loudly instead of refusing recovery of work already under way.
+  if [ "$STANDING_YOLO" = on ] && [ "$YOLO" = off ]; then
+    if [ "$RELAUNCH" -eq 1 ]; then
+      RELAUNCH_YOLO_REASON=$(fm_meta_get "$RELAUNCH_META" yolo_downgrade_reason 2>/dev/null || true)
+      echo "notice: $ID carries yolo=off while the captain's standing merge authority for $PROJ_NAME is on - ${RELAUNCH_YOLO_REASON:-no reason was recorded for the downgrade}; this relaunch keeps the recorded posture, so correct the record if that is wrong" >&2
+    elif [ "$YOLO_DOWNGRADE_REASON_SET" -eq 0 ]; then
+      echo "error: $ID would record yolo=off while the captain granted standing merge authority for $PROJ_NAME - every merge path reads this task's record, not the registry, so this spawn would silently revoke it; spawn with --yolo on, or, if the downgrade is deliberate, record why with --yolo-downgrade-reason \"<one line>\". Nothing was created." >&2
+      exit 1
+    else
+      echo "notice: $ID ships yolo=off below the standing merge authority for $PROJ_NAME on the recorded reason: $YOLO_DOWNGRADE_REASON" >&2
+    fi
   fi
 fi
 
@@ -4398,6 +4485,11 @@ preserve_relaunch_meta() {
   # reason a grouping refusal was cleared, which is what makes an ungrouped
   # dispatch auditable rather than merely allowed.
   [ "$APART_REASON_SET" -eq 0 ] || echo "apart_reason=$APART_REASON"
+  # Also first-dispatch-only and carried forward by a relaunch: the recorded
+  # reason this task carries less merge authority than its project's standing
+  # posture, which is what makes a deliberate downgrade auditable rather than
+  # merely allowed.
+  [ "$YOLO_DOWNGRADE_REASON_SET" -eq 0 ] || echo "yolo_downgrade_reason=$YOLO_DOWNGRADE_REASON"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

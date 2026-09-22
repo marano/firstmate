@@ -70,6 +70,161 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
     "$SPAWN" "$@" 2>&1
 }
 
+# A home whose spawn path can run to completion, so the posture a dispatch
+# RECORDS is observable rather than only the refusal that precedes it: a real
+# project clone with an origin, a pooled worktree, a pinned markdown backlog so
+# the transition gate uses this home's own backlog rather than the developer's
+# ambient config, and a fake tmux under which a launched agent reads alive.
+# Echoes "<home>|<project-dir>|<fakebin>", like make_home.
+make_spawnable_home() {  # <name> <registry-line> <task-id>
+  local name=$1 registry=$2 id=$3 case_dir home fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$fakebin"
+  printf '%s\n' claude > "$home/config/crew-harness"
+  printf '%s\n' "$registry" > "$home/data/projects.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'claude\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows)
+    for meta in "$FM_HOME"/state/*.meta; do
+      [ -e "$meta" ] || continue
+      meta=${meta##*/}
+      printf 'fm-%s\n' "${meta%.meta}"
+    done
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes claude
+  fm_git_init_commit "$case_dir/proj"
+  fm_git_add_origin "$case_dir/proj" "$case_dir/proj.origin.git"
+  git -C "$case_dir/proj" worktree add --quiet -b pooled "$case_dir/wt"
+  printf '%s\n' "$home|$case_dir/proj|$fakebin"
+}
+
+run_spawnable() {  # <home> <fakebin> <pane-path> <spawn-args...>
+  local home=$1 fakebin=$2 pane=$3
+  shift 3
+  mkdir -p "$home/../user-home"
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store, so it runs against a throwaway HOME rather than the developer's.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HOME="$home/../user-home" \
+    CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" "$SPAWN" "$@" 2>&1
+}
+
+# THE defect of 2026-09-22, and why it is a refusal rather than the notice its
+# neighbour above prints. Merge authority is not delivery rigor: every merge
+# path reads the posture RECORDED on the task, never the registry, so a spawn
+# that records a weaker yolo than the captain's standing grant revokes an
+# authority he already gave, in a record nobody re-reads. A harness permission
+# layer refused `--yolo on`, firstmate respawned with `--yolo off`, and two
+# green PRs sat unmerged overnight while the captain was told a guard had
+# withheld them. The refusal was of a COMMAND; the downgraded record is what
+# actually stopped the merge - and the same flag was accepted again hours later,
+# so the path is reached only sometimes and leaves no pattern to notice.
+test_spawn_refuses_a_silent_merge_authority_downgrade() {
+  local rec home proj fakebin out status
+  rec=$(make_home yolo-downgrade "- proj [no-mistakes +yolo] - fixture (added 2026-09-16)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" yolo-down-c1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" yolo-down-c1 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn recording less merge authority than the standing grant was accepted"
+  assert_contains "$out" "the captain granted standing merge authority for proj" \
+    "the refusal did not name the authority it would have revoked"
+  assert_contains "$out" "--yolo-downgrade-reason" \
+    "the refusal did not print how to record a deliberate downgrade"
+  assert_absent "$home/state/yolo-down-c1.meta" "the refused spawn published a task record"
+
+  # Matching the standing grant is quiet, and so is a project with no grant to
+  # revoke: the guard reads the captain's answer, not the flag in isolation.
+  write_brief "$home" yolo-down-c2 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" yolo-down-c2 "$proj" claude --mode no-mistakes --yolo on)
+  assert_not_contains "$out" "standing merge authority" \
+    "a spawn honouring the standing grant was questioned"
+
+  rec=$(make_home yolo-nogrant "- proj [no-mistakes] - fixture (added 2026-09-16)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" yolo-down-c3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" yolo-down-c3 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "standing merge authority" \
+    "a project with no standing grant was treated as a downgrade"
+
+  pass "fm-spawn: a dispatch that would silently weaken the captain's standing merge authority is refused"
+}
+
+# A downgrade firstmate can justify stays possible, but only as a RECORDED one:
+# the reason lands on the task record, so a later reader is told why rather than
+# being told a guard withheld the work.
+test_a_recorded_reason_allows_a_merge_authority_downgrade() {
+  local rec home proj fakebin out status
+  rec=$(make_spawnable_home yolo-reason "- proj [no-mistakes +yolo] - fixture (added 2026-09-16)" yolo-reason-c1)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" yolo-reason-c1 no-mistakes
+  out=$(run_spawnable "$home" "$fakebin" "$(dirname "$proj")/wt" yolo-reason-c1 "$proj" claude \
+    --mode no-mistakes --yolo off --yolo-downgrade-reason "the captain withheld this one PR by name")
+  status=$?
+  [ "$status" -eq 0 ] || fail "a recorded reason did not clear the refusal: $out"
+  assert_contains "$out" "the captain withheld this one PR by name" \
+    "the accepted downgrade was not announced with its reason"
+  assert_grep "^yolo=off$" "$home/state/yolo-reason-c1.meta" \
+    "the task record does not carry the posture the dispatch was given"
+  assert_grep "^yolo_downgrade_reason=the captain withheld this one PR by name$" \
+    "$home/state/yolo-reason-c1.meta" \
+    "the reason is not on the task record, so a later reader is left to guess"
+
+  pass "fm-spawn: a deliberate merge-authority downgrade is recorded on the task, not merely allowed"
+}
+
+# The flag records a downgrade and nothing else, so every shape that is not one
+# is refused before an endpoint or local copy exists.
+test_the_downgrade_reason_flag_refuses_every_other_shape() {
+  local rec home proj fakebin out status label flags expect n=0
+  rec=$(make_home yolo-reason-shapes "- proj [no-mistakes +yolo] - fixture (added 2026-09-16)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  while IFS='|' read -r label flags expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    write_brief "$home" "yolo-shape-$n" no-mistakes
+    # shellcheck disable=SC2086  # flags is an intentional word-split arg list
+    out=$(run_spawn "$home" "$fakebin" "yolo-shape-$n" "$proj" claude $flags)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: the refusal did not explain itself"
+    assert_absent "$home/state/yolo-shape-$n.meta" "$label: refused spawn wrote task metadata"
+  done <<'ROWS'
+an empty reason|--mode no-mistakes --yolo off --yolo-downgrade-reason=|--yolo-downgrade-reason requires a non-empty value
+a reason on a spawn that is not downgrading|--mode no-mistakes --yolo on --yolo-downgrade-reason=deliberate|which is nothing to explain
+a reason on a scout|--scout --yolo-downgrade-reason=deliberate|only a ship spawn records one
+a reason on a relaunch|--relaunch --mode no-mistakes --yolo-downgrade-reason=deliberate|applies only to a first dispatch
+ROWS
+  pass "fm-spawn: the downgrade reason is refused on every shape that is not a first ship dispatch"
+}
+
 # A ship spawn must stop when its delivery contract was never decided or cannot be
 # a task mode, and must leave no task metadata behind when it does.
 test_ship_spawn_requires_a_valid_delivery_contract() {
@@ -934,6 +1089,9 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_spawn_refuses_a_silent_merge_authority_downgrade
+test_a_recorded_reason_allows_a_merge_authority_downgrade
+test_the_downgrade_reason_flag_refuses_every_other_shape
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_faces_the_grouping_guard
