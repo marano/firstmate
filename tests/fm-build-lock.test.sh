@@ -706,6 +706,78 @@ expect_code 0 $? "an ancestor-owned nested invocation must succeed"
 assert_equals 'ancestor' "$(cat "$TMP_ROOT/ancestor.out" 2>/dev/null)" "the ancestor-nested command must run"
 pass "a nested invocation under an owner that exported no hold variables runs straight through"
 
+# --- a command that takes the lock itself is never wrapped ------------------
+# bin/fm-test-run.sh and bin/fm-stock-bash-lane.sh take a hold per unit
+# themselves. Wrapping one is the loop-inside-one-hold shape: the outer hold
+# spans the whole run while every inner acquire passes straight through as a
+# nested hold, which measured as a 20-minute whole-lane hold. So an invocation
+# asked to wrap one takes no hold at all and runs it straight through.
+#
+# Proved four ways, because they fail for different reasons: the command still
+# runs, no hold is taken (against a root a real acquire would refuse), the
+# inner per-unit holds are really live rather than passed through, and the same
+# script under an unrecognised name still takes the hold. That last assertion
+# drives the signals apart, so the case cannot pass by standing down for
+# everything.
+# Mutant: replace the fm_build_lock_self_locking_command branch with `if false`
+# - the stand-down and per-unit assertions go red.
+# Mutant: make fm_build_lock_self_locking_command return 0 unconditionally
+# - the unrecognised-name assertion goes red.
+
+SELF_BIN="$TMP_ROOT/self-locking-bin"
+mkdir -p "$SELF_BIN"
+# A stand-in that does no locking of its own, for the "no hold is taken" proof.
+for self_name in fm-test-run.sh fm-stock-bash-lane.sh ordinary-runner.sh; do
+  # shellcheck disable=SC2016 # The generated script expands these itself.
+  printf '#!/usr/bin/env bash\nprintf "ran-%%s\\n" "$(basename "$0")"\n' \
+    > "$SELF_BIN/$self_name"
+  chmod +x "$SELF_BIN/$self_name"
+done
+
+# UNUSABLE_ROOT's parent is a regular file, so a run that reaches the lock
+# refuses with code 2; a run that stands down never looks at the root at all.
+for self_name in fm-test-run.sh fm-stock-bash-lane.sh; do
+  SELF_OUT=$(FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" "$SELF_BIN/$self_name" 2>/dev/null)
+  assert_equals "ran-$self_name" "$SELF_OUT" \
+    "wrapping $self_name must run it straight through without taking a hold"
+done
+
+# The interpreter-prefixed form a caller may equally write.
+SELF_OUT=$(FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" bash "$SELF_BIN/fm-test-run.sh" 2>/dev/null)
+assert_equals 'ran-fm-test-run.sh' "$SELF_OUT" \
+  "wrapping a self-locking runner behind its interpreter must also stand down"
+
+# The divergence: the very same script under a name that takes no lock of its
+# own must still reach the lock, and so must refuse the unusable root.
+FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" "$SELF_BIN/ordinary-runner.sh" >/dev/null 2>&1
+expect_code 2 $? \
+  "an ordinary command must still reach the lock rather than stand down with it"
+
+# --exclusive cannot widen a hold that is never taken, so it is ignored and said.
+SELF_EXCL_ERR="$TMP_ROOT/self-exclusive.err"
+FM_BUILD_LOCK_DIR="$UNUSABLE_ROOT" "$SCRIPT" --exclusive "$SELF_BIN/fm-test-run.sh" \
+  >/dev/null 2>"$SELF_EXCL_ERR"
+grep -q -- '--exclusive is ignored' "$SELF_EXCL_ERR" \
+  || fail "standing down for a self-locking runner must say that --exclusive is ignored"
+
+# The payoff: through the stand-down, the runner's own per-unit holds are the
+# live ones. The unit reports what --status sees, which must name the UNIT, not
+# an outer hold around the whole run.
+cat > "$SELF_BIN/fm-test-run.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+"$SCRIPT" --label unit-1 -- sh -c '"$SCRIPT" --status > "\$1"' _ "$TMP_ROOT/unit-status.out"
+EOF
+chmod +x "$SELF_BIN/fm-test-run.sh"
+"$SCRIPT" "$SELF_BIN/fm-test-run.sh" >/dev/null 2>&1 \
+  || fail "the per-unit stand-in failed to run through the stand-down"
+grep -q 'running: unit-1' "$TMP_ROOT/unit-status.out" \
+  || fail "through the stand-down the live hold must be the runner's own per-unit hold, not an outer whole-run hold"
+settle_queue
+assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" \
+  "the per-unit holds taken through a stand-down must all be released"
+pass "a command that takes the lock itself is run straight through, leaving its per-unit holds live"
+
 # --- a ceiling reaches the supervisor through the task status file ---------
 # A long hold used to warn only on the holder's own stderr, which nobody reads
 # when the command runs in the background. With FM_TASK_STATUS set, the first
