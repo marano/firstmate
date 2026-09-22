@@ -1119,7 +1119,7 @@ test_portable_shard_union_and_coverage_guard() {
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$s3" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
@@ -1144,7 +1144,7 @@ test_portable_shard_union_and_coverage_guard() {
 # run, so assert them through the guard's own reported numbers.
 test_portable_parallel_lanes_stay_duration_balanced() {
   local out max imbalance unhinted
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   unhinted=$(printf '%s\n' "$out" | sed -n 's/.*parallel_unhinted=\([0-9]*\).*/\1/p')
   max=$(printf '%s\n' "$out" | sed -n 's/.*parallel_max_ms=\([0-9]*\).*/\1/p')
   imbalance=$(printf '%s\n' "$out" | sed -n 's/.*parallel_imbalance_ms=\([0-9]*\).*/\1/p')
@@ -1214,7 +1214,7 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
   # reaches its CI job cap. The coverage guard therefore reports the unmeasured
   # share and refuses past its bound; assert that contract is live rather than
   # trusting the hint table to stay fresh on its own.
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "serial_unhinted=" "coverage guard must report the unmeasured serial share"
   serial=$(printf '%s\n' "$out" | sed -n 's/.*[^_]serial=\([0-9][0-9]*\).*/\1/p')
   unhinted=$(printf '%s\n' "$out" | sed -n 's/.*serial_unhinted=\([0-9][0-9]*\).*/\1/p')
@@ -1240,7 +1240,7 @@ test_portable_serial_shard_budget_is_reported_and_bounded() {
   # timed-out job uploads no timing artifact. The guard therefore also bounds
   # the heaviest shard's packed weight, so growth reds a seconds-long guard
   # instead of a half-hour shard.
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "serial_max_ms=" "coverage guard must report the heaviest shard's packed weight"
   assert_contains "$out" "serial_shard_budget_ms=" "coverage guard must report the per-shard budget"
   max=$(printf '%s\n' "$out" | sed -n 's/.*serial_max_ms=\([0-9][0-9]*\).*/\1/p')
@@ -1388,7 +1388,11 @@ test_default_exclusions_govern_the_default_selection_and_stay_runnable() {
   assert_contains "$(run_default --list --family secondmate)" "tests/fm-secondmate-safety.test.sh" "a named family must run"
   # Every table entry is real, has a reason, and stays in its lane so the
   # coverage guard still accounts for the file.
-  run_default --check-coverage >/dev/null 2>&1 || fail "the coverage guard must stay green with the default exclusions"
+  # 2>&1 >/dev/null keeps the guard's refusal, which it writes to stderr, and
+  # drops only its success summary: discarding both is what made a red here
+  # report that the guard failed without ever saying what it objected to.
+  out=$(run_default --check-coverage 2>&1 >/dev/null) \
+    || fail "the coverage guard must stay green with the default exclusions"$'\n'"$out"
   n=$(run_default --list-default-exclusions | awk -F'\t' 'NF<2 || $2==""' | wc -l | tr -d ' ')
   [ "$n" -eq 0 ] || fail "every default exclusion needs a reason"
 
@@ -2422,7 +2426,7 @@ test_stock_bash_lane_is_every_test_minus_named_exclusions() {
 }
 
 test_stock_bash_exclusions_carry_a_checkable_reason() {
-  local line path reason
+  local line path reason guard_out
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -2437,8 +2441,11 @@ test_stock_bash_exclusions_carry_a_checkable_reason() {
       *) fail "stock-bash exclusion reason must be cost:<ms> or incompat:<why>: $line" ;;
     esac
   done < <("$RUNNER" --list-stock-bash-exclusions)
-  "$RUNNER" --check-coverage >/dev/null \
-    || fail "--check-coverage must accept the shipped stock-bash exclusion table"
+  # The reason travels IN the message rather than on whatever line happens to
+  # precede it: with several scripts writing to one log, "the line above" is not
+  # a place a reader can rely on finding it.
+  guard_out=$("$RUNNER" --check-coverage 2>&1 >/dev/null) \
+    || fail "--check-coverage must accept the shipped stock-bash exclusion table"$'\n'"$guard_out"
   pass "stock-bash exclusions: each names a real test and an admissible reason"
 }
 
