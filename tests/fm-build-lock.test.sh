@@ -1281,7 +1281,7 @@ grammar_case() {  # <name> <expected-n> <expect-warning 0|1> [writer...]
   if [ "$warn" = 1 ]; then
     assert_grep "build-lock-slots" "$err" "the warning for $name must name the file"
   fi
-  gauge_run "$lockroot" "$((expect + 1))"
+  GAUGE_WANT=$expect gauge_run "$lockroot" "$((expect + 1))"
   assert_equals "$expect" "$GAUGE_MAX" "a slot count that is $name must be read as $expect"
   settle_root "$lockroot"
 }

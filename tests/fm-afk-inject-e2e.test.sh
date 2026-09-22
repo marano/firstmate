@@ -620,6 +620,31 @@ claude_fixture_restart() {
   [ -e "$CLAUDE_LOG.composer" ] || fail "Scenario E: the claude-shaped fixture composer did not start"
 }
 
+# Wait, bounded, for the fixture's composer to hold exactly <expected>.
+# The fixture redraws once per character, so how long typed text takes to land
+# is a property of the machine, not of the contract under test: reading the
+# composer after a fixed sleep reports a half-typed PREFIX as a wrong buffer.
+# Polling the real condition cannot hide a fixture that never takes the text -
+# the wait is bounded and the caller still fails, by name, when it expires.
+wait_for_composer() {  # <expected>
+  local expected=$1 i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$CLAUDE_LOG.composer" 2>/dev/null)" = "$expected" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Fail naming what the composer actually held. A composer assertion that
+# reports only "did not match" costs a whole CI run per observation and still
+# does not say whether the text was truncated, altered, or never arrived.
+composer_mismatch() {  # <what> <expected>
+  local what=$1 expected=$2 got
+  got=$(cat "$CLAUDE_LOG.composer" 2>/dev/null || true)
+  fail "$what (expected ${#expected} chars: $expected; composer holds ${#got} chars: $got)"
+}
+
 # One daemon flush against the fixture, exactly as housekeeping runs it.
 claude_flush() {
   PATH="$TMUX_SHIM_DIR:$PATH" FM_STATE_OVERRIDE="$STATE_DIR" LOG="$STATE_DIR/scenario-e.log" \
@@ -649,9 +674,14 @@ claude_buffer_three() {
 
 # Type text the way an earlier daemon did, and let the fixture swallow Enter.
 claude_strand() {  # <text>
+  local stripped=${1//$'\xE2\x81\xA3'/}
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l "$1"
-  sleep 0.5
+  wait_for_composer "$stripped" \
+    || composer_mismatch "Scenario E: the fixture never took the whole typed digest into its composer" "$stripped"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" Enter
+  # The swallowed Enter leaves the buffer intact, so it changes nothing on this
+  # side to poll for. It needs no barrier either: the pane is a FIFO, so a
+  # later flush's keys queue behind this Enter and it is still swallowed first.
   sleep 0.5
 }
 
@@ -685,7 +715,8 @@ test_scenario_e() {
   text=$(claude_digest_text)
   stripped=${text//$'\xE2\x81\xA3'/}
   claude_strand "$text"
-  [ "$(cat "$CLAUDE_LOG.composer")" = "$stripped" ] || fail "Scenario E: the fixture did not strand the digest"
+  [ "$(cat "$CLAUDE_LOG.composer")" = "$stripped" ] \
+    || composer_mismatch "Scenario E: the fixture did not strand the digest" "$stripped"
   printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
   echo "demo-gamma.status: failed: a newer event buffered behind the stranded digest" >> "$STATE_DIR/.subsuper-escalations"
   claude_flush || true
@@ -709,9 +740,11 @@ test_scenario_e() {
   claude_fixture_restart
   claude_buffer_three
   text=$(claude_digest_text)
+  stripped=${text//$'\xE2\x81\xA3'/}
   claude_strand "$text"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l " and one more thing"
-  sleep 0.5
+  wait_for_composer "$stripped and one more thing" \
+    || composer_mismatch "Scenario E: the fixture never took the captain's appended text" "$stripped and one more thing"
   composer=$(cat "$CLAUDE_LOG.composer")
   printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
   claude_flush && fail "Scenario E: a flush reported success over captain text"
@@ -721,7 +754,8 @@ test_scenario_e() {
     || fail "Scenario E: the refusal to touch captain text was not logged"
   claude_fixture_restart
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l "captain draft only"
-  sleep 0.5
+  wait_for_composer "captain draft only" \
+    || composer_mismatch "Scenario E: the fixture never took the captain's draft" "captain draft only"
   claude_flush && fail "Scenario E: a flush reported success over a captain draft"
   [ ! -s "$CLAUDE_LOG" ] || fail "Scenario E: a captain draft was submitted in place of the stranded digest: $(cat "$CLAUDE_LOG")"
   [ "$(cat "$CLAUDE_LOG.composer")" = "captain draft only" ] || fail "Scenario E: a captain draft was changed"
@@ -764,14 +798,16 @@ claude_daemon_start() {  # <stdout-file>
 # composer cannot be proven to hold only the daemon's text; the buffer has
 # waited well past max-defer.
 claude_strand_unprovable() {
-  local text
+  local text stripped
   claude_fixture_restart
   claude_buffer_three
   echo $(( $(date +%s) - 60 )) > "$STATE_DIR/.subsuper-escalations.since"
   text=$(claude_digest_text)
+  stripped=${text//$'\xE2\x81\xA3'/}
   claude_strand "$text"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$CLAUDE_PANE" -l " and one more thing"
-  sleep 0.5
+  wait_for_composer "$stripped and one more thing" \
+    || composer_mismatch "Scenario F: the fixture never took the captain's appended text" "$stripped and one more thing"
   printf '3\n%s\n' "$text" > "$STATE_DIR/.subsuper-stranded"
 }
 
