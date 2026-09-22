@@ -156,8 +156,14 @@ last_status_line() {
 # reopened the work.
 #
 # Prints the last non-blank line whose verb is not a resolution, or the empty
-# string when the log holds none. Callers asking "is this task finished" ask
-# THIS, so a second reader never re-derives the fold and rots the same way.
+# string when the log holds none. Callers asking "is this task finished"
+# should ask THIS rather than re-deriving the fold, so a second copy cannot
+# rot the same way. Not every such caller has been converted yet:
+# bin/fm-idle-fleet-lib.sh and bin/fm-inactive-reconcile.sh still match
+# `done|failed` against last_status_line, so a resolution recorded after an
+# outcome reads as neither of them there too. That is this same defect in
+# other consumers, with its own blast radius to reason about, and it is left
+# to its own change rather than swept in behind this one.
 status_outcome_line() {  # <status-file>
   local f=$1 line
   [ -e "$f" ] || return 0
