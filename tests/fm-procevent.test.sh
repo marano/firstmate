@@ -2554,9 +2554,20 @@ HFLOOR="$TMP_ROOT/launch-floor"; new_home "$HFLOOR"
 fm_test_track_procevent_home "$HFLOOR"
 pe_register "$HFLOOR" lavish floor-src -- \
   "$STORM_SOURCE" "$TMP_ROOT/launch-times" "$HFLOOR" "$ROOT"
+# Every relaunch runs under the inherited runner marker, so none of them
+# refreshes the owner lease - the expired-lease check further down proves that.
+# The launches counted here therefore need a present owner to keep the lease
+# fresh, rather than having to fit inside it: this test is that owner, listing
+# the home once a second until it has seen three launches and then going silent
+# so the lease lapses. While the owner is present the relaunching never ends on
+# its own, so the deadline only bounds how long a runner that stopped
+# relaunching takes to be reported. Not having to fit inside the lease is also
+# what lets the floor sit well above what one relaunch costs by itself, so a
+# runner that skipped the floor lands its launches measurably closer together.
+STORM_FLOOR_SECONDS=2
 FM_PROCEVENT_OWNER_LEASE_SECONDS=4 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
-  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HFLOOR" reconcile >/dev/null
-floor_deadline=$((SECONDS + 12))
+  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=$STORM_FLOOR_SECONDS pe "$HFLOOR" reconcile >/dev/null
+floor_deadline=$((SECONDS + 60))
 while :; do
   floor_count=0
   [ ! -f "$TMP_ROOT/launch-times" ] \
@@ -2564,14 +2575,20 @@ while :; do
   [ "$floor_count" -ge 3 ] && break
   [ "$SECONDS" -lt "$floor_deadline" ] \
     || fail "the orphan-storm fixture did not relaunch its source command"
+  if [ "$SECONDS" != "${floor_listed-}" ]; then
+    pe "$HFLOOR" list >/dev/null \
+      || fail "the orphan-storm owner could not list its home"
+    floor_listed=$SECONDS
+  fi
   sleep 0.1
 done
 launch_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
 launch_span=$(perl -e '@t=<>; printf "%.3f", $t[-1] - $t[0]' "$TMP_ROOT/launch-times")
-perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * 0.8 ? 0 : 1)' "$launch_span" "$launch_count" \
+perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * $ARGV[2] * 0.8 ? 0 : 1)' \
+  "$launch_span" "$launch_count" "$STORM_FLOOR_SECONDS" \
   || fail "an orphaned source launched $launch_count times in only ${launch_span}s"
 [ "$launch_count" -le 6 ] \
-  || fail "an orphaned source stormed $launch_count launches during its owner-dead grace window"
+  || fail "an orphaned source stormed $launch_count launches during its grace window"
 pass "an orphaned source command obeys the launch floor during its grace window"
 
 HPACE="$TMP_ROOT/registration-pacing"; new_home "$HPACE"
@@ -2689,10 +2706,12 @@ wait "$ROLLBACK_START_PID" || fail "the rollback-paced source failed"
   || fail "the rollback-paced source did not invoke twice"
 pass "a pre-reboot monotonic stamp is treated as expired"
 
+# Each sample outlasts the launch floor, so a storm still relaunching at its
+# floor always lands a launch inside it.
 storm_deadline=$((SECONDS + 15))
 while :; do
   storm_before=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
-  sleep 2
+  sleep $((STORM_FLOOR_SECONDS + 1))
   storm_after=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
   [ "$storm_before" = "$storm_after" ] && break
   [ "$SECONDS" -lt "$storm_deadline" ] \
