@@ -350,7 +350,9 @@ pool_candidates() {
       list_parallel_candidates
       ;;
     portable:0)
-      "$ROOT/bin/fm-test-run.sh" --list-scheduled --proven-isolated
+      # --include-excluded: the proof pool is what BELONGS to the proven set,
+      # not what runs by default, so an excluded test is still proven.
+      "$ROOT/bin/fm-test-run.sh" --list-scheduled --include-excluded --proven-isolated
       ;;
     *:1)
       "$ROOT/bin/fm-test-run.sh" --list --family "$POOL" \

@@ -9,6 +9,18 @@ on:
 permissions:
   contents: read
 
+# TESTS NOT RUN BY DEFAULT, HERE AND LOCALLY. bin/fm-test-run.sh owns one table
+# of default exclusions (`bin/fm-test-run.sh --list-default-exclusions` prints
+# it, each with its reason) and every lane below inherits it, so CI and a local
+# run cannot drift apart. A green run does NOT vouch for those tests: the
+# secondmate and real-herdr-gated families, and the Pi, unused-harness and
+# unused-backend scripts. The files stay in the repository and run on demand
+# (`bin/fm-test-run.sh tests/fm-backend-orca.test.sh`, or `--include-excluded`).
+# The "Prove exclusions" step of the timing aggregate job checks the table
+# against what the run actually recorded: it reds naming any excluded script
+# that ran and any other script that did not. Measurement and reasoning: the
+# unused-capability audit, scenario C.
+
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
 # CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
 # The group uses the PR number for pull_request events, so every run of one PR
@@ -108,11 +120,6 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Install the Pi package for the Pi extension tests
-        run: |
-          set -eu
-          npm install -g @earendil-works/pi-coding-agent
-          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -260,14 +267,6 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      # The Pi extension tests read the installed Pi package's own types and
-      # runtime, so without it they gate-skip and pass silently. It is a public
-      # npm package and needs no credential, so CI can hold the real thing.
-      - name: Install the Pi package for the Pi extension tests
-        run: |
-          set -eu
-          npm install -g @earendil-works/pi-coding-agent
-          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
@@ -278,7 +277,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # The Pi package is installed above and CI provides npm and tsc, so
+          # CI provides npm and tsc, so
           # any missing typecheck prerequisite is a broken lane, not a valid skip.
           # The job cap is this lane's hang tripwire, so it keeps the runner
           # unbounded per script; the runner's default bound is for local runs.
@@ -297,8 +296,13 @@ jobs:
   # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
   # platform invariant fails (focus, cleanup, default-session tripwire), keep
   # the failure evidence and move the job to macOS rather than skip assertions.
+  # SWITCHED OFF: unless the repository variable FM_CI_RUN_HERDR is 'true' this
+  # job is skipped, and the run shows it as skipped rather than absent. The
+  # family is also in the runner's default exclusions; this job names it with
+  # --family, which always runs it, so setting the variable is the only step.
   tests-herdr:
     name: Behavior tests (Herdr)
+    if: ${{ vars.FM_CI_RUN_HERDR == 'true' }}
     runs-on: ubuntu-latest
     # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
     # tripwire, not the expected end of the lane. The family-run step owns the
@@ -452,6 +456,30 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      # Prove the default exclusions from what the run recorded, not from any
+      # text: a misspelled name excludes nothing, and a mistaken one drops a
+      # script nobody named. Runs on pull requests too.
+      - name: Prove exclusions against the recorded timings
+        if: success()
+        run: |
+          set -eu
+          [ -f "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" ] || {
+            echo "::error::no aggregate timing to prove the exclusions against"
+            exit 1
+          }
+          bin/fm-test-run.sh --check-exclusions \
+            "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" | tee "$RUNNER_TEMP/fm-test/exclusions.txt"
+          {
+            echo "### Tests NOT run by default"
+            echo
+            echo "A green run does not vouch for these (bin/fm-test-run.sh --list-default-exclusions):"
+            echo
+            echo '```'
+            bin/fm-test-run.sh --list-default-exclusions | cut -f1
+            echo
+            cat "$RUNNER_TEMP/fm-test/exclusions.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       # Serial shard balance rots as tests grow (docs/fm-test-portable-shards.md).
       # This runs on pull requests as well as main. The per-script comparison it
       # replaced could not: a script's measured duration depends on which shard
