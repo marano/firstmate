@@ -75,6 +75,20 @@ Over the 419 canonical roots the closure distribution is p50 52,336 bytes, p75 1
 Closure bytes rank cost well but do not predict it exactly: `tests/fm-x-mode.test.sh` has a larger closure than `bin/fm-procevent.sh` and costs a third as much.
 Reproduce a row with `mutex /usr/bin/time -lp shellcheck --norc --external-sources -- <root>`, and list the closure weights the same way `bin/fm-lint.sh` does, from its `fm_lint_root_weights`.
 
+## What the changed-file gate costs end to end
+
+The same window ran `bin/fm-lint.sh` itself, reading its own telemetry rather than a wrapper's aggregate, on two changed sets:
+
+| Changed set | Roots | Shards | Wall | Peak worker RSS |
+| --- | ---: | ---: | ---: | ---: |
+| PR 65's own set, including `bin/fm-watch.sh` | 4 | 1 at a time | 86 s | 4,404,160 KiB (4.20 GB) |
+| this change's own set | 3 | 1 at a time | 5.1 s | 225 MB |
+
+`max_worker_rss_kib` is the peak of one shard worker, and at one shard at a time no two workers are ever resident together, so 4.20 GB is the concurrent peak for the worst changed set measured here.
+Wrapping the whole run in `/usr/bin/time -lp` instead reports 5,836 MB, because the parent's `RUSAGE_CHILDREN` aggregate is not a single process's peak; read the telemetry for this number.
+That worst case is roughly half the "above 8 GB on a single root" that `#3778` rejected, and unlike the shape `#3778` measured it no longer grows with the number of changed roots.
+A changed set touching the heaviest roots is the expensive case and costs about a minute and a half; a typical one costs seconds.
+
 ## What the local pass could not evaluate before that
 
 The local changed-file pass used to drop `--external-sources` and exclude `SC1091,SC2034,SC2153,SC2329`, and that exclusion list was not the whole gap.
