@@ -89,6 +89,23 @@ With the same synthetic runner at a count of 1, wrapped identically, the only di
 That is the difference between waiting out the whole run and waiting out one unit.
 `tests/fm-build-lock.test.sh` pins the behavior, and `bin/fm-build-lock.sh`'s header owns the rule and which programs it names.
 
+## Why not a bounded hold, and why not a fair-shared queue
+
+The card behind this work named three candidate shapes.
+The measurements pick the third and rule out the other two.
+
+A bounded hold can only be enforced by ending the command that holds it, and this lock already settled that question the other way: ceilings report and never kill, because a wrongly killed build is worse than a slow one.
+A bound that does not kill is the ceiling warning that already exists.
+The measurement also removes the premise: the long holds were not long units, they were whole-lane wraps, so a bound would have ended healthy runs over a wrap rule the runtime can simply enforce.
+
+Fair-sharing the queue does not address hold length at all.
+Acquisition is already arrival-ordered, so a waiter's wait is bounded by the waiters ahead of it rather than by luck, and with one holder and one waiter every queue policy still waits out the holder.
+Letting the N oldest tickets try, the obvious generalisation, was measured to re-admit barging: a fast poller took the freed slot ahead of an earlier arrival in every run, overtaking it 7, 7 and 23 times inside one poll window.
+
+A long run yielding between phases is the shape that wins, and `bin/fm-test-run.sh` already implements it per serial script and per concurrent phase.
+What the measurements show is that those yields were being defeated from outside, by an outer hold that turned every one of them into a nested pass-through.
+So the change makes the existing yielding effective rather than adding a mechanism beside it, and no second locking primitive is introduced.
+
 ## What is still unbounded
 
 One hold remains long by itself: `tests/fm-watch-triage.test.sh` is a single script of 238 cases, 709.9 s on CI and over 13 minutes measured locally, so it is one legitimate hold and no wrap rule reduces it.
