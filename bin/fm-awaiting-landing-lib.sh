@@ -37,15 +37,21 @@
 # reintroduces a defect this library exists to prevent, and tests/
 # fm-awaiting-landing.test.sh reds by name for each.
 #
-#   1. OUTCOME. The last status line's verb is exactly `done`. Quiet is only
-#      ever licensed by positive evidence that the WORK finished. A task with a
-#      genuinely dead agent and no terminal outcome is a wedge and must keep
-#      alarming: a fix that buys quiet by blinding supervision is worse than the
-#      noise it removes. `done` specifically, not the broader terminal/
-#      captain-relevant verb set (bin/fm-classify-lib.sh's status_is_terminal_verb
-#      also admits needs-decision, blocked, and failed): an agent stopped while
-#      its work was still open genuinely needs firstmate, and silencing a
-#      stopped `blocked:` task leaves it unwatched forever.
+#   1. OUTCOME. The task's current outcome line - bin/fm-classify-lib.sh's
+#      status_outcome_line, which owns that question - has the verb `done`.
+#      Quiet is only ever licensed by positive evidence that the WORK finished.
+#      A task with a genuinely dead agent and no terminal outcome is a wedge and
+#      must keep alarming: a fix that buys quiet by blinding supervision is
+#      worse than the noise it removes. `done` specifically, not the broader
+#      terminal/captain-relevant verb set (status_is_terminal_verb also admits
+#      needs-decision, blocked, and failed): an agent stopped while its work was
+#      still open genuinely needs firstmate, and silencing a stopped `blocked:`
+#      task leaves it unwatched forever. The outcome line rather than the LAST
+#      line, and the grammar owner's reader rather than a second fold written
+#      here: 2026-09-22, appending the `resolved` line firstmate is instructed
+#      to write when it closes an open call dropped this exemption from a lane
+#      that was otherwise untouched, re-arming the alarms this library exists to
+#      stop.
 #   2. ACKNOWLEDGEMENT. A recorded pr=, or the deliberate-stop record. One of
 #      these is firstmate's own durable proof that it has TAKEN THE WORK IN
 #      HAND - it armed the merge poll, or it stopped the agent on purpose.
@@ -180,7 +186,7 @@ fm_awaiting_landing_read() {  # <id> <state-dir>
   [ -n "$id" ] && [ -n "$state" ] || return 0
 
   # Leg 1: the work reported itself finished.
-  line=$(last_status_line "$state/$id.status")
+  line=$(status_outcome_line "$state/$id.status")
   [ -n "$line" ] || return 0
   verb=$(status_line_verb "$line")
   [ "$verb" = "done" ] || return 0
