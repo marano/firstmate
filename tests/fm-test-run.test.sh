@@ -25,6 +25,34 @@ export FM_BUILD_LOCK_CI=0
 export FM_BUILD_LOCK_POLL=0.1
 unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
 
+# Fail a case whose evidence lives under a temp directory the case must still
+# remove, reading that evidence BEFORE the removal.
+#
+# Writing it inline as `{ rm -rf "$tmp"; fail "... $(cat "$tmp/err")"; }` looks
+# equivalent and is not: the removal runs first, so the command substitution
+# that builds the message reads a file that is already gone and the case reports
+# an empty reason. That is the exact "failed while telling nobody why" shape
+# these cases exist to catch, and it cost a real debugging round here.
+#
+# An absent file and a present-but-empty one are reported differently, because
+# which of the two it is says whether the command under test never ran or ran
+# and said nothing.
+fail_with_evidence() {  # <tmp-dir> <message> [<evidence-file>...]
+  local dir=$1 message=$2 f evidence=''
+  shift 2
+  for f in "$@"; do
+    if [ ! -e "$f" ]; then
+      evidence="$evidence"$'\n'"--- $f does not exist ---"
+    elif [ -s "$f" ]; then
+      evidence="$evidence"$'\n'"--- $f ---"$'\n'"$(cat "$f")"
+    else
+      evidence="$evidence"$'\n'"--- $f is empty ---"
+    fi
+  done
+  rm -rf "$dir"
+  fail "$message$evidence"
+}
+
 # Copy the runner into a fixture tree together with the build lock it runs
 # every script under.
 install_runner() {  # <destination-bin-dir-or-path>
@@ -1091,7 +1119,7 @@ test_portable_shard_union_and_coverage_guard() {
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$s3" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
@@ -1116,7 +1144,7 @@ test_portable_shard_union_and_coverage_guard() {
 # run, so assert them through the guard's own reported numbers.
 test_portable_parallel_lanes_stay_duration_balanced() {
   local out max imbalance unhinted
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   unhinted=$(printf '%s\n' "$out" | sed -n 's/.*parallel_unhinted=\([0-9]*\).*/\1/p')
   max=$(printf '%s\n' "$out" | sed -n 's/.*parallel_max_ms=\([0-9]*\).*/\1/p')
   imbalance=$(printf '%s\n' "$out" | sed -n 's/.*parallel_imbalance_ms=\([0-9]*\).*/\1/p')
@@ -1186,7 +1214,7 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
   # reaches its CI job cap. The coverage guard therefore reports the unmeasured
   # share and refuses past its bound; assert that contract is live rather than
   # trusting the hint table to stay fresh on its own.
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "serial_unhinted=" "coverage guard must report the unmeasured serial share"
   serial=$(printf '%s\n' "$out" | sed -n 's/.*[^_]serial=\([0-9][0-9]*\).*/\1/p')
   unhinted=$(printf '%s\n' "$out" | sed -n 's/.*serial_unhinted=\([0-9][0-9]*\).*/\1/p')
@@ -1212,7 +1240,7 @@ test_portable_serial_shard_budget_is_reported_and_bounded() {
   # timed-out job uploads no timing artifact. The guard therefore also bounds
   # the heaviest shard's packed weight, so growth reds a seconds-long guard
   # instead of a half-hour shard.
-  out=$("$RUNNER" --check-coverage)
+  out=$("$RUNNER" --check-coverage 2>&1)
   assert_contains "$out" "serial_max_ms=" "coverage guard must report the heaviest shard's packed weight"
   assert_contains "$out" "serial_shard_budget_ms=" "coverage guard must report the per-shard budget"
   max=$(printf '%s\n' "$out" | sed -n 's/.*serial_max_ms=\([0-9][0-9]*\).*/\1/p')
@@ -1360,7 +1388,11 @@ test_default_exclusions_govern_the_default_selection_and_stay_runnable() {
   assert_contains "$(run_default --list --family secondmate)" "tests/fm-secondmate-safety.test.sh" "a named family must run"
   # Every table entry is real, has a reason, and stays in its lane so the
   # coverage guard still accounts for the file.
-  run_default --check-coverage >/dev/null 2>&1 || fail "the coverage guard must stay green with the default exclusions"
+  # 2>&1 >/dev/null keeps the guard's refusal, which it writes to stderr, and
+  # drops only its success summary: discarding both is what made a red here
+  # report that the guard failed without ever saying what it objected to.
+  out=$(run_default --check-coverage 2>&1 >/dev/null) \
+    || fail "the coverage guard must stay green with the default exclusions"$'\n'"$out"
   n=$(run_default --list-default-exclusions | awk -F'\t' 'NF<2 || $2==""' | wc -l | tr -d ' ')
   [ "$n" -eq 0 ] || fail "every default exclusion needs a reason"
 
@@ -2230,6 +2262,153 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# --- pinned tool requirements -----------------------------------------------
+#
+# Each CI lane job installs the pinned linters its own lane's tests invoke and
+# no others, derived here from lane membership rather than from a per-job table
+# in ci.yml. These cases hold the derivation and the two ways the requirement
+# table is stopped from rotting: a test needing a tool no lane installs, and a
+# lane whose promised tool never arrived.
+
+# The first lane whose membership holds <script>, or empty.
+lane_holding() {  # <script>
+  local lane
+  while IFS= read -r lane; do
+    [ -n "$lane" ] || continue
+    if "$RUNNER" --list --lane "$lane" | grep -qxF "$1"; then
+      printf '%s\n' "$lane"
+      return 0
+    fi
+  done < <("$RUNNER" --list-lanes)
+  return 1
+}
+
+test_required_tools_follow_the_lane_that_holds_the_test() {
+  local lane tools
+  lane=$(lane_holding tests/fm-lint.test.sh) \
+    || fail "no lane holds tests/fm-lint.test.sh, so nothing would install its linter"
+  tools=$("$RUNNER" --list-required-tools --lane "$lane") \
+    || fail "--list-required-tools failed for lane $lane"
+  printf '%s\n' "$tools" | grep -qx shellcheck \
+    || fail "lane $lane runs tests/fm-lint.test.sh but does not require shellcheck, got: ${tools:-<none>}"
+  pass "a lane requires the pinned tool its own tests invoke"
+}
+
+test_required_tools_are_membership_derived_not_constant() {
+  local tmp lane other tools
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tools.XXXXXX")
+  printf 'tests/fm-lint.test.sh\tfmnosuchtool\n' >"$tmp/table"
+  lane=$(lane_holding tests/fm-lint.test.sh) || { rm -rf "$tmp"; fail "no lane holds tests/fm-lint.test.sh"; }
+  tools=$(FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" --list-required-tools --lane "$lane")
+  [ "$tools" = fmnosuchtool ] \
+    || { rm -rf "$tmp"; fail "the lane holding the only listed test must require its tool, got: ${tools:-<none>}"; }
+  other=$(FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" --list-required-tools \
+    --lane "$lane" --exclude-script tests/fm-lint.test.sh)
+  [ -z "$other" ] \
+    || { rm -rf "$tmp"; fail "a selection without the listed test must require nothing, got: $other"; }
+  rm -rf "$tmp"
+  pass "a lane's pinned tools come from its membership, not from a constant"
+}
+
+test_a_missing_tool_no_table_names_reds_the_run() {
+  local tmp f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-toolmiss.XXXXXX")
+  f="$tmp/tool.test.sh"
+  out="$tmp/out.txt"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+. "$FM_TEST_LIB"
+fm_tool_skip fmnosuchtool "a case that needs a pinned tool this host lacks"
+exit 0
+SH
+  chmod +x "$f"
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=1 \
+    "$RUNNER" "$f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a test needing a tool no lane installs must red the run"; }
+  grep -q 'script_required_tools does not list it' "$tmp/err.txt" \
+    || fail_with_evidence "$tmp" "the runner must say the table does not name the tool" "$tmp/err.txt"
+  grep -q 'fmnosuchtool' "$tmp/err.txt" \
+    || fail_with_evidence "$tmp" "the runner must name the missing tool" "$tmp/err.txt"
+  grep -q '^ok - SKIP (fmnosuchtool not resolved)' "$out" \
+    || fail_with_evidence "$tmp" "the case must still read as the skip it is" "$out"
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=0 \
+    "$RUNNER" "$f" >"$tmp/out2.txt" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$tmp"; fail "the same marker must stay inert where the tools are not installed"; }
+  rm -rf "$tmp"
+  pass "a test needing a pinned tool no lane installs reds the run and names itself"
+}
+
+test_a_declared_tool_that_never_arrived_reds_the_run() {
+  local tmp f rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-toolgap.XXXXXX")
+  f="$tmp/tool.test.sh"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+. "$FM_TEST_LIB"
+fm_tool_skip fmnosuchtool "a case whose declared pinned tool was not installed"
+exit 0
+SH
+  chmod +x "$f"
+  printf '%s\tfmnosuchtool\n' "$f" >"$tmp/table"
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=1 \
+    FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" "$f" >"$tmp/out.txt" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a declared tool that never arrived must red the run"; }
+  grep -q 'required by script_required_tools but was not on PATH' "$tmp/err.txt" \
+    || fail_with_evidence "$tmp" "the runner must say the promised tool did not arrive" "$tmp/err.txt"
+  rm -rf "$tmp"
+  pass "a lane whose promised pinned tool never arrived reds rather than skipping quietly"
+}
+
+test_coverage_guard_refuses_an_unusable_tool_table() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tooltable.XXXXXX")
+  printf 'tests/fm-no-such-test.test.sh\tshellcheck\n' >"$tmp/missing"
+  printf 'tests/fm-lint.test.sh\tfmnosuchtool\n' >"$tmp/unknown"
+  # Control first. The tool checks are the LAST thing run_coverage_guard does,
+  # so any one of its earlier checks failing also exits non-zero, and the two
+  # assertions below would then blame the tool table for something that has
+  # nothing to do with it. Proving the guard passes on the real table separates
+  # "this table is refused" from "the guard is unhappy about something else",
+  # which is the difference between a red that names its cause and one that
+  # sends the reader to the wrong file.
+  set +e
+  "$RUNNER" --check-coverage >/dev/null 2>"$tmp/baseline.txt"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail_with_evidence "$tmp" "the coverage guard must pass on the real table before this case can attribute a refusal to the table under test" "$tmp/baseline.txt"
+  set +e
+  FM_TEST_REQUIRED_TOOLS_FILE="$tmp/missing" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err1.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool entry naming a test that does not exist"; }
+  grep -q 'names a test that does not exist' "$tmp/err1.txt" \
+    || fail_with_evidence "$tmp" "the refusal must name the problem" "$tmp/err1.txt"
+  set +e
+  FM_TEST_REQUIRED_TOOLS_FILE="$tmp/unknown" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err2.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool with no installer"; }
+  grep -q 'cannot install' "$tmp/err2.txt" \
+    || fail_with_evidence "$tmp" "the refusal must name the uninstallable tool" "$tmp/err2.txt"
+  rm -rf "$tmp"
+  pass "the coverage guard refuses a tool table that would install for nobody"
+}
+
 test_stock_bash_lane_is_every_test_minus_named_exclusions() {
   local listed excluded all rejoined
   listed=$("$RUNNER" --list --lane stock-bash | LC_ALL=C sort)
@@ -2247,7 +2426,7 @@ test_stock_bash_lane_is_every_test_minus_named_exclusions() {
 }
 
 test_stock_bash_exclusions_carry_a_checkable_reason() {
-  local line path reason
+  local line path reason guard_out
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -2262,8 +2441,11 @@ test_stock_bash_exclusions_carry_a_checkable_reason() {
       *) fail "stock-bash exclusion reason must be cost:<ms> or incompat:<why>: $line" ;;
     esac
   done < <("$RUNNER" --list-stock-bash-exclusions)
-  "$RUNNER" --check-coverage >/dev/null \
-    || fail "--check-coverage must accept the shipped stock-bash exclusion table"
+  # The reason travels IN the message rather than on whatever line happens to
+  # precede it: with several scripts writing to one log, "the line above" is not
+  # a place a reader can rely on finding it.
+  guard_out=$("$RUNNER" --check-coverage 2>&1 >/dev/null) \
+    || fail "--check-coverage must accept the shipped stock-bash exclusion table"$'\n'"$guard_out"
   pass "stock-bash exclusions: each names a real test and an admissible reason"
 }
 
@@ -2288,7 +2470,7 @@ SH
     fail "a short ok-count must fail the run even though the script exited 0"
   fi
   grep -q 'required ok-count mismatch' "$out" \
-    || { rm -rf "$tmp"; fail "the mismatch must name itself: $(cat "$out")"; }
+    || fail_with_evidence "$tmp" "the mismatch must name itself" "$out"
   cat >"$f" <<'SH'
 #!/usr/bin/env bash
 echo "skip: herdr not found"
@@ -2390,6 +2572,11 @@ test_list_all_exact_suite_coverage
 test_multi_script_run_releases_the_build_lock_between_scripts
 test_stock_bash_lane_is_every_test_minus_named_exclusions
 test_stock_bash_exclusions_carry_a_checkable_reason
+test_required_tools_follow_the_lane_that_holds_the_test
+test_required_tools_are_membership_derived_not_constant
+test_a_missing_tool_no_table_names_reds_the_run
+test_a_declared_tool_that_never_arrived_reds_the_run
+test_coverage_guard_refuses_an_unusable_tool_table
 test_require_ok_count_catches_a_shrinking_case_list
 test_family_selection
 test_single_script_selection

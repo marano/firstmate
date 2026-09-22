@@ -1881,6 +1881,16 @@ fm_wake_append() {
   return "$status"
 }
 
+# Name the step of an append that failed, on stderr, before returning its
+# status. A silent non-zero append is the shape that made the concurrent
+# append/drain regression in tests/fm-wake-queue.test.sh uninformative: the one
+# CI failure it has produced said only that a subprocess failed, so it taught
+# nothing about which of the three durable writes below gave way. Every caller
+# already treats a non-zero append as an error, so this only adds the reason.
+_fm_wake_append_failed() {  # <step> <path>
+  printf 'fm_wake_append: %s failed: %s\n' "$1" "$2" >&2
+}
+
 # fm_wake_append_locked <kind> <key> <payload>
 # Locked core of fm_wake_append: appends the wake row under an already-held
 # FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
@@ -1903,6 +1913,7 @@ fm_wake_append_locked() {
   status=0
 
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
+  [ "$status" -eq 0 ] || _fm_wake_append_failed "recovery marker publish" "$recovery_marker"
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
     case "$seq" in
@@ -1910,9 +1921,11 @@ fm_wake_append_locked() {
     esac
     seq=$((seq + 1))
     printf '%s\n' "$seq" > "$seq_file" || status=$?
+    [ "$status" -eq 0 ] || _fm_wake_append_failed "sequence write" "$seq_file"
   fi
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+    [ "$status" -eq 0 ] || _fm_wake_append_failed "queue row append" "$FM_WAKE_QUEUE"
   fi
   return "$status"
 }

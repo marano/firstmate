@@ -6,6 +6,9 @@
 # Usage:
 #   fm-stock-bash-lane.sh [--json <path>]   run the lane
 #   fm-stock-bash-lane.sh --list            print the test scripts it runs
+#   fm-stock-bash-lane.sh --required-tools  print the pinned linters those tests
+#                                           need, one per line, so CI installs
+#                                           exactly those and no others
 #   fm-stock-bash-lane.sh --help
 #
 # Run it locally before pushing a change to firstmate's shell, and treat a
@@ -38,9 +41,12 @@
 #      name although that file is cost-excluded.
 #
 # It never installs anything: `jq` and `tasks-axi` must already be on PATH, as
-# must the repository-pinned linters the lint suites need. CI installs them in
-# the steps before this one. docs/verification/stock-bash-lane.md records the
-# measurements behind the lane's selection and what it still cannot cover.
+# must the repository-pinned linters the lint suites need.
+# CI installs them in the step before this one, from this script's own
+# `--required-tools` answer, so the job downloads only what this lane's
+# selection actually invokes.
+# docs/verification/stock-bash-lane.md records the measurements behind the
+# lane's selection and what it still cannot cover.
 #
 # Environment:
 #   FM_STOCK_BASH   the stock Bash to pin (default /bin/bash)
@@ -78,6 +84,17 @@ list_lane() {
   printf '%s\n' "$PF_TEST"
 }
 
+# The pinned linters this lane's complete selection needs. Asked over --list
+# rather than over the stock-bash lane alone, because the retained
+# public-followup regression is part of what this job runs and so part of what
+# it must have installed. bin/fm-test-run.sh owns which test needs which tool.
+required_tools() {
+  local scripts
+  scripts=$(list_lane) || return 1
+  # shellcheck disable=SC2086 # One script path per line, none with whitespace.
+  "$ROOT/bin/fm-test-run.sh" --list-required-tools $scripts
+}
+
 require_stock() {  # <what> <version>
   case "$2" in
     3.2.57*) return 0 ;;
@@ -92,6 +109,11 @@ case "${1:-}" in
   --list)
     [ "$#" -eq 1 ] || { lane_error "--list takes no further arguments"; exit 2; }
     list_lane
+    exit $?
+    ;;
+  --required-tools)
+    [ "$#" -eq 1 ] || { lane_error "--required-tools takes no further arguments"; exit 2; }
+    required_tools
     exit $?
     ;;
   --json)

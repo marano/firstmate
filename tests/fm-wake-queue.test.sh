@@ -19,24 +19,87 @@ GUARD="$ROOT/bin/fm-guard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
+# Diagnostics for a failed subprocess of the concurrency case below. The one CI
+# failure this case has ever produced said only "concurrent append/drain
+# subprocess failed", which is why it could not be acted on: it named no
+# subprocess, no exit status, no output, and nothing about the durable state it
+# left behind. Four later passes of the same question then removed any reliable
+# way to reproduce it on demand, so the next occurrence has to be self-
+# explanatory from its own log.
+concurrent_failure_report() {  # <logs-dir> <state> <label> <status>
+  local logs=$1 state=$2 label=$3 status=$4 out
+  out="$logs/$label.out"
+  printf '%s exited %s\n' "$label" "$status"
+  if [ -s "$out" ]; then
+    printf -- '--- %s output ---\n' "$label"
+    sed -e 's/^/    /' "$out"
+  else
+    printf '    (%s produced no output)\n' "$label"
+  fi
+  printf -- '--- durable state after the run ---\n'
+  printf '    queue rows: %s\n' "$(grep -c . "$state/.wake-queue" 2>/dev/null || echo 0)"
+  printf '    malformed queue rows: %s\n' \
+    "$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)"
+  printf '    sequence file: %s\n' "$(cat "$state/.wake-queue.seq" 2>/dev/null || echo '<absent>')"
+  printf '    recovery marker: %s\n' "$(cat "$state/.watcher-down" 2>/dev/null || echo '<absent>')"
+  printf '    lock paths present: %s\n' \
+    "$(find "$state" -maxdepth 1 \( -name '.wake-queue.lock*' -o -name '.watcher-down.lock*' \) \
+      2>/dev/null | tr '\n' ' ')"
+}
+
 test_concurrent_append_and_drain() {
-  local dir state out1 out2 pids i pid count unique malformed sequence generation
+  local dir state logs out1 out2 pids i pid count unique malformed sequence generation
+  local status label failures=
   dir=$(make_case concurrent)
   state="$dir/state"
+  logs="$dir/subprocess-logs"
+  mkdir -p "$logs"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
-    append_wake "$state" signal "status-$i" "signal: $state/status-$i.status" &
+    # Each subprocess owns a named log and records its own exit status, so a
+    # failure is attributable to one append (or to the drain) after the fact.
+    # Nothing here serialises the appends: they still all start before any of
+    # them is waited on, which is the concurrency this case exists to hold.
+    (
+      rc=0
+      append_wake "$state" signal "status-$i" "signal: $state/status-$i.status" \
+        > "$logs/append-$i.out" 2>&1 || rc=$?
+      printf '%s\n' "$rc" > "$logs/append-$i.rc"
+    ) &
     pids="$pids $!"
     i=$((i + 1))
   done
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" &
+  (
+    rc=0
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out1" 2> "$logs/drain-one.out" || rc=$?
+    printf '%s\n' "$rc" > "$logs/drain-one.rc"
+  ) &
   pids="$pids $!"
   for pid in $pids; do
-    wait "$pid" || fail "concurrent append/drain subprocess failed"
+    wait "$pid" || true
   done
+  # Read the recorded statuses rather than wait's, so every failure is reported
+  # with the name of the subprocess that produced it instead of the first one
+  # stopping the case.
+  i=1
+  while [ "$i" -le 41 ]; do
+    if [ "$i" -le 40 ]; then
+      label="append-$i"
+    else
+      label="drain-one"
+    fi
+    i=$((i + 1))
+    if [ ! -f "$logs/$label.rc" ]; then
+      failures="$failures$(concurrent_failure_report "$logs" "$state" "$label" "<recorded no exit status: killed by a signal>")"$'\n'
+      continue
+    fi
+    status=$(cat "$logs/$label.rc")
+    [ "$status" = 0 ] || failures="$failures$(concurrent_failure_report "$logs" "$state" "$label" "$status")"$'\n'
+  done
+  [ -z "$failures" ] || fail "concurrent append/drain subprocess failed:"$'\n'"$failures"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"

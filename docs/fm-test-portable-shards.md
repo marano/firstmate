@@ -127,6 +127,20 @@ It names each excluded script that executed (`FM_EXCLUSION_EXECUTED`) and each o
 An explicit `--family` or script run, such as the Herdr job, neither proves nor breaks it.
 Excluding a test is a cost and flakiness decision, not a verdict on it: two of the excluded Pi tests were red at the time (cards `fm-pi-watch-shard-interference` and the `fm-calm-pi-extension` red on main), and excluding them hides those reds rather than fixing them.
 
+## Pinned linter installs
+
+Lane membership also decides which pinned external linters a CI job downloads.
+`bin/fm-test-run.sh --list-required-tools` prints, for any selection, the union of the tools its scripts invoke, from the `script_required_tools` table beside the lane memberships; each lane job pipes that answer into `bin/fm-install-pinned-tools.sh`, which owns the tool-to-installer mapping and refuses a name it cannot install.
+The stock-Bash job asks `bin/fm-stock-bash-lane.sh --required-tools` instead, because that lane owner also runs a retained regression outside the lane.
+So a lane holding no test that invokes either linter downloads neither, and `.github/workflows/ci.yml` names no tool at all outside the Lint job, whose own two installs are not lane-derived because `bin/fm-lint.sh` needs both by definition.
+
+A release-download outage on 2026-09-21 reddened six jobs across two main runs and five were in lanes that never invoke the tool whose download failed; a hand-maintained per-job tool matrix was rejected as the answer because that shape had already rotted into four of the same six reds.
+A failed install stays fatal, so a lane that genuinely needs a binary still fails loudly when it cannot get one.
+
+The table is held against rot from both sides, proven from what a run recorded rather than from any text.
+A case skipped for a missing pinned tool prints `tests/lib.sh`'s `fm_tool_skip` marker, and wherever those tools are supposed to be installed - CI, or `FM_TEST_REQUIRE_DECLARED_TOOLS=1` - the run reds naming the script and the tool, whether the table promised that tool and the install did not deliver it or the table never named it at all.
+`--check-coverage` separately refuses an entry naming a test that does not exist or a tool with no installer, and reports the table size as `required_tools=`.
+
 ## Coverage guard
 
 `bin/fm-test-run.sh --check-coverage` verifies that all three parallel lanes partition the proven-isolated set.

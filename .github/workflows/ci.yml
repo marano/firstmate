@@ -21,6 +21,21 @@ permissions:
 # that ran and any other script that did not. Measurement and reasoning: the
 # unused-capability audit, scenario C.
 
+# PINNED LINTERS ARE INSTALLED PER LANE, NOT PER JOB. Each lane job asks
+# bin/fm-test-run.sh which pinned linters its own lane's tests invoke and pipes
+# that answer into bin/fm-install-pinned-tools.sh, so a lane that invokes
+# neither downloads neither. Nothing here names a tool: a hand-maintained
+# per-job tool matrix in this file is exactly the shape that rotted into four
+# of the six reds in main's 2026-09-21 streak, so the requirement is derived
+# from lane membership instead (bin/fm-test-run.sh's script_required_tools).
+# The install stays fatal on failure: a lane that genuinely needs a binary must
+# still fail loudly when it cannot get one. The Lint job below is the one job
+# whose tools are not lane-derived, because bin/fm-lint.sh needs both by
+# definition, and that job's own failure in that outage was a real dependency.
+# Measurement: the outage reddened six jobs across runs 35614818348 and
+# 35616665561, and five were in lanes holding no test that invokes the tool
+# whose download failed.
+
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
 # CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
 # The group uses the PR number for pull_request events, so every run of one PR
@@ -105,15 +120,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install pinned ShellCheck
+      # Derived from this lane's own membership; see the note at the top.
+      - name: Install the pinned lint tools this lane needs
         run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned actionlint
-        run: |
-          set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          set -euo pipefail
+          bin/fm-test-run.sh --list-required-tools --lane portable-parallel-1 \
+            | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
@@ -146,15 +158,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install pinned ShellCheck
+      # Derived from this lane's own membership; see the note at the top.
+      - name: Install the pinned lint tools this lane needs
         run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned actionlint
-        run: |
-          set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          set -euo pipefail
+          bin/fm-test-run.sh --list-required-tools --lane portable-parallel-2 \
+            | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
@@ -188,15 +197,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install pinned ShellCheck
+      # Derived from this lane's own membership; see the note at the top.
+      - name: Install the pinned lint tools this lane needs
         run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned actionlint
-        run: |
-          set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          set -euo pipefail
+          bin/fm-test-run.sh --list-required-tools --lane portable-parallel-3 \
+            | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |
@@ -244,15 +250,18 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install pinned ShellCheck
+      # Derived from this shard's own membership; see the note at the top. The
+      # lane name is spelled exactly as the run step below spells it, and for
+      # the same reason: job-total rather than a literal, so a matrix that
+      # disagrees with bin/fm-test-run.sh is refused rather than silently
+      # installing another shard's tools.
+      - name: Install the pinned lint tools this shard needs
+        env:
+          FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
         run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned actionlint
-        run: |
-          set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          set -euo pipefail
+          bin/fm-test-run.sh --list-required-tools --lane "$FM_SERIAL_LANE" \
+            | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Require tmux for e2e tests
         run: |
@@ -537,18 +546,16 @@ jobs:
           mkdir -p "$shim"
           ln -sf /bin/bash "$shim/bash"
           printf '%s\n' "$shim" >> "$GITHUB_PATH"
-      # The lint suites need the repository's pinned linters, exactly as the
-      # portable lanes install them; without these two the suites fail for a
-      # missing tool rather than for anything about the shell under test.
-      - name: Install pinned ShellCheck
+      # The lint suites need the repository's pinned linters; without them those
+      # suites fail for a missing tool rather than for anything about the shell
+      # under test. Asked of the lane owner rather than of the stock-bash lane
+      # alone, because this job also runs the retained public-followup
+      # regression and so must have whatever that needs too.
+      - name: Install the pinned lint tools this lane needs
         run: |
-          set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned actionlint
-        run: |
-          set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
+          set -euo pipefail
+          bin/fm-stock-bash-lane.sh --required-tools \
+            | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
         run: |

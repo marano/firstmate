@@ -159,7 +159,12 @@ test_stock_bash_job_runs_the_shared_lane_owner() {
   reported=$(ruby -ryaml -e '
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash").fetch("steps")
 runs = steps.map { |step| step["run"].to_s }
-owner = runs.select { |run| run.lines.any? { |line| line.strip.start_with?("bin/fm-stock-bash-lane.sh") } }
+# An inspection call (--required-tools, --list) asks the owner a question; only
+# a call that RUNS the lane counts against the one-execution rule.
+owner = runs.select { |run| run.lines.any? { |line|
+  command = line.strip
+  command.start_with?("bin/fm-stock-bash-lane.sh") && command !~ /--required-tools|--list\b/
+} }
 puts "the job runs bin/fm-stock-bash-lane.sh #{owner.size} times, want 1" unless owner.size == 1
 runs.each do |run|
   run.lines.each do |line|
@@ -196,6 +201,148 @@ puts "note must print only when the lint step failed, got if: #{condition}" unle
   pass "a failed Lint job ends its log with the repair note, and only when the lint failed"
 }
 
+
+# --- pinned linter installs -------------------------------------------------
+#
+# Every lane job used to install both pinned linters unconditionally, so an
+# outage on either release reddened lanes that never invoke it: on 2026-09-21
+# that cost six jobs across two main runs, five of them in lanes holding no test
+# that calls the tool whose download failed. The fix is not a per-job tool
+# matrix in ci.yml - that shape is what rotted into four of the same six reds -
+# but a per-job install set DERIVED from lane membership, so these cases check
+# the derivation is really what the workflow runs and that it still covers every
+# test that needs a tool.
+
+# The lanes the workflow itself installs tools for, one per line, resolved from
+# the install steps rather than from a list kept here. A shard matrix names its
+# lane through one step variable, so that variable is resolved against the
+# job's matrix exactly as GitHub would resolve it, giving one lane per shard.
+# A job that installs tools without naming a lane - the stock-Bash job asks its
+# own lane owner - contributes nothing here and is checked separately.
+# \x24 is a literal dollar sign, kept out of this single-quoted program for the
+# same reason the concurrency resolver above keeps its quotes out of it.
+workflow_install_lanes() {
+  ruby -ryaml -e '
+YAML.load_file(ARGV[0]).fetch("jobs").each do |_name, job|
+  shards = ((job["strategy"] || {})["matrix"] || {})["shard"]
+  (job["steps"] || []).each do |step|
+    body = step["run"].to_s
+    next unless body.include?("bin/fm-install-pinned-tools.sh")
+    named = body.match(/--lane\s+"?([^"\s|]+)"?/)
+    next if named.nil?
+    token = named[1]
+    unless token.start_with?("\x24")
+      puts token
+      next
+    end
+    spelled = (step["env"] || {})[token.delete("\x24{}")]
+    raise "no step env resolves #{token}" if spelled.nil?
+    (shards || [nil]).each do |shard|
+      puts spelled
+        .gsub("\x24{{ matrix.shard }}", shard.to_s)
+        .gsub("\x24{{ strategy.job-total }}", (shards || []).size.to_s)
+    end
+  end
+end
+' "$CI_WORKFLOW" | LC_ALL=C sort -u
+}
+
+test_only_the_lint_job_names_a_linter_installer() {
+  local reported
+  reported=$(ruby -ryaml -e '
+installers = ["bin/fm-install-shellcheck.sh", "bin/fm-install-actionlint.sh"]
+YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
+  body = (job["steps"] || []).map { |step| step["run"].to_s }.join("\n")
+  named = installers.select { |installer| body.include?(installer) }
+  if name == "lint"
+    puts "the Lint job must install both pinned linters itself, found #{named.size}" unless named.size == 2
+    next
+  end
+  next if named.empty?
+  puts "#{name} names a pinned linter installer directly: #{named.join(", ")}"
+end
+' "$CI_WORKFLOW") || fail "could not read the jobs from ci.yml"
+  [ -z "$reported" ] || fail "a job outside Lint hard-codes which pinned linters it installs:"$'\n'"$reported"
+  pass "no lane job names a pinned linter installer, so no per-job tool matrix can rot here"
+}
+
+test_every_lane_job_derives_its_tools_from_its_own_lane() {
+  local reported
+  reported=$(ruby -ryaml -e '
+jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+jobs.each do |name, job|
+  runs = (job["steps"] || []).map { |step| step["run"].to_s }
+  suite = runs.select { |run| run =~ /fm-test-run\.sh .*--lane|fm-stock-bash-lane\.sh/ }
+  installs = runs.select { |run| run.include?("bin/fm-install-pinned-tools.sh") }
+  next if suite.empty? && installs.empty?
+  if suite.empty?
+    puts "#{name} installs pinned tools but runs no lane"
+    next
+  end
+  unless installs.size == 1
+    puts "#{name} must install its pinned tools in exactly one derived step, found #{installs.size}"
+    next
+  end
+  install = installs.first
+  unless install =~ /--list-required-tools|--required-tools/
+    puts "#{name} installs tools without asking what its lane needs: #{install.gsub(/\s+/, " ").strip}"
+  end
+  # Compare the lane token as spelled, shell expansion and all: the serial
+  # shards name theirs through one variable, so equality is what matters.
+  lanes = (suite + [install]).flat_map { |run| run.scan(/--lane\s+(\S+)/) }
+  lanes = lanes.flatten.map { |lane| lane.delete("\x22\x27") }.reject(&:empty?).uniq
+  if lanes.size > 1
+    puts "#{name} installs for a different lane than it runs: #{lanes.join(" vs ")}"
+  end
+end
+' "$CI_WORKFLOW") || fail "could not read the lane jobs from ci.yml"
+  [ -z "$reported" ] || fail "a lane job does not derive its pinned tools from its own lane:"$'\n'"$reported"
+  pass "every lane job derives its pinned tools from the lane it runs, in one step"
+}
+
+# The whole point of the change: the tools ARE still installed wherever a test
+# needs one. Proven against the runner's own answer rather than against the
+# workflow text, so moving a test between lanes moves its tool with it.
+test_installed_tools_cover_every_test_that_needs_one() {
+  local needed lane covered missing
+  needed=$("$ROOT/bin/fm-test-run.sh" --list-required-tools --all --include-excluded) \
+    || fail "could not ask bin/fm-test-run.sh what the whole suite needs"
+  [ -n "$needed" ] || fail "no test requires a pinned tool, so this case proves nothing"
+  covered=$(
+    while IFS= read -r lane; do
+      [ -n "$lane" ] || continue
+      "$ROOT/bin/fm-test-run.sh" --list-required-tools --lane "$lane" || exit 1
+    done < <(workflow_install_lanes)
+    "$ROOT/bin/fm-stock-bash-lane.sh" --required-tools || exit 1
+  ) || fail "could not derive the tools ci.yml's lanes install"
+  covered=$(printf '%s\n' "$covered" | LC_ALL=C sort -u)
+  missing=$(comm -23 <(printf '%s\n' "$needed") <(printf '%s\n' "$covered"))
+  [ -z "$missing" ] || fail "tests need pinned tools no CI lane installs:"$'\n'"$missing"
+  pass "every pinned tool a test needs is installed by the lane that runs it"
+}
+
+# ...and the blast radius really is narrower than it was. Installing every tool
+# in every lane would satisfy the coverage case above while restoring exactly
+# the failure this change exists to remove, so pin the count too.
+test_no_lane_installs_a_tool_its_tests_never_invoke() {
+  local lanes lane tools tool_count lane_count pair_count
+  lanes=$(workflow_install_lanes)
+  [ -n "$lanes" ] || fail "ci.yml installs pinned tools for no lane at all"
+  tool_count=$("$ROOT/bin/fm-install-pinned-tools.sh" --list | grep -c .)
+  lane_count=$(printf '%s\n' "$lanes" | grep -c .)
+  pair_count=0
+  while IFS= read -r lane; do
+    [ -n "$lane" ] || continue
+    tools=$("$ROOT/bin/fm-test-run.sh" --list-required-tools --lane "$lane" | grep -c . || true)
+    pair_count=$((pair_count + tools))
+  done <<LANES
+$lanes
+LANES
+  [ "$pair_count" -lt "$((lane_count * tool_count))" ] \
+    || fail "every lane installs every pinned tool ($pair_count of $((lane_count * tool_count))), which is the unconditional install this change removed"
+  pass "lane tool installs are $pair_count of a possible $((lane_count * tool_count)), so a download outage no longer reds lanes that never use the tool"
+}
+
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
@@ -204,3 +351,7 @@ test_previously_unbounded_jobs_keep_their_caps
 test_measured_lanes_keep_their_existing_bounds
 test_stock_bash_job_runs_the_shared_lane_owner
 test_failed_lint_ends_with_the_repair_note
+test_only_the_lint_job_names_a_linter_installer
+test_every_lane_job_derives_its_tools_from_its_own_lane
+test_installed_tools_cover_every_test_that_needs_one
+test_no_lane_installs_a_tool_its_tests_never_invoke

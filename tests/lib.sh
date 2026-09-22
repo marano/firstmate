@@ -89,6 +89,29 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# fm_tool_skip <tool> <what>: report a case skipped because a pinned external
+# tool this host has no copy of could not be resolved.
+#
+# Use it for EVERY case that needs one of the pinned linters, and never write a
+# bare `pass "SKIP (...)"` for a missing tool again. The marker it prints is how
+# bin/fm-test-run.sh learns that a lane's tests wanted a tool the lane did not
+# install, so CI reds naming the script and the tool instead of banking a green
+# run that quietly exercised nothing. Locally the marker is inert and the case
+# reads as the skip it is.
+#
+# A test that needs a pinned tool is also declared in bin/fm-test-run.sh's
+# script_required_tools, which is what makes CI install it for that test's lane.
+# Adding the call here without that declaration is exactly the drift the marker
+# catches: CI will red naming this script as missing from the table.
+fm_tool_skip() {  # <tool> <what> [<required-version>]
+  printf 'FM_TEST_TOOL_MISSING %s\n' "$1"
+  if [ -n "${3:-}" ]; then
+    pass "SKIP ($1 $3 not resolved): $2"
+  else
+    pass "SKIP ($1 not resolved): $2"
+  fi
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
