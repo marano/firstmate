@@ -2230,6 +2230,140 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# --- pinned tool requirements -----------------------------------------------
+#
+# Each CI lane job installs the pinned linters its own lane's tests invoke and
+# no others, derived here from lane membership rather than from a per-job table
+# in ci.yml. These cases hold the derivation and the two ways the requirement
+# table is stopped from rotting: a test needing a tool no lane installs, and a
+# lane whose promised tool never arrived.
+
+# The first lane whose membership holds <script>, or empty.
+lane_holding() {  # <script>
+  local lane
+  while IFS= read -r lane; do
+    [ -n "$lane" ] || continue
+    if "$RUNNER" --list --lane "$lane" | grep -qxF "$1"; then
+      printf '%s\n' "$lane"
+      return 0
+    fi
+  done < <("$RUNNER" --list-lanes)
+  return 1
+}
+
+test_required_tools_follow_the_lane_that_holds_the_test() {
+  local lane tools
+  lane=$(lane_holding tests/fm-lint.test.sh) \
+    || fail "no lane holds tests/fm-lint.test.sh, so nothing would install its linter"
+  tools=$("$RUNNER" --list-required-tools --lane "$lane") \
+    || fail "--list-required-tools failed for lane $lane"
+  printf '%s\n' "$tools" | grep -qx shellcheck \
+    || fail "lane $lane runs tests/fm-lint.test.sh but does not require shellcheck, got: ${tools:-<none>}"
+  pass "a lane requires the pinned tool its own tests invoke"
+}
+
+test_required_tools_are_membership_derived_not_constant() {
+  local tmp lane other tools
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tools.XXXXXX")
+  printf 'tests/fm-lint.test.sh\tfmnosuchtool\n' >"$tmp/table"
+  lane=$(lane_holding tests/fm-lint.test.sh) || { rm -rf "$tmp"; fail "no lane holds tests/fm-lint.test.sh"; }
+  tools=$(FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" --list-required-tools --lane "$lane")
+  [ "$tools" = fmnosuchtool ] \
+    || { rm -rf "$tmp"; fail "the lane holding the only listed test must require its tool, got: ${tools:-<none>}"; }
+  other=$(FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" --list-required-tools \
+    --lane "$lane" --exclude-script tests/fm-lint.test.sh)
+  [ -z "$other" ] \
+    || { rm -rf "$tmp"; fail "a selection without the listed test must require nothing, got: $other"; }
+  rm -rf "$tmp"
+  pass "a lane's pinned tools come from its membership, not from a constant"
+}
+
+test_a_missing_tool_no_table_names_reds_the_run() {
+  local tmp f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-toolmiss.XXXXXX")
+  f="$tmp/tool.test.sh"
+  out="$tmp/out.txt"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+. "$FM_TEST_LIB"
+fm_tool_skip fmnosuchtool "a case that needs a pinned tool this host lacks"
+exit 0
+SH
+  chmod +x "$f"
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=1 \
+    "$RUNNER" "$f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a test needing a tool no lane installs must red the run"; }
+  grep -q 'script_required_tools does not list it' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the runner must say the table does not name the tool: $(cat "$tmp/err.txt")"; }
+  grep -q 'fmnosuchtool' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the runner must name the missing tool: $(cat "$tmp/err.txt")"; }
+  grep -q '^ok - SKIP (fmnosuchtool not resolved)' "$out" \
+    || { rm -rf "$tmp"; fail "the case must still read as the skip it is: $(cat "$out")"; }
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=0 \
+    "$RUNNER" "$f" >"$tmp/out2.txt" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$tmp"; fail "the same marker must stay inert where the tools are not installed"; }
+  rm -rf "$tmp"
+  pass "a test needing a pinned tool no lane installs reds the run and names itself"
+}
+
+test_a_declared_tool_that_never_arrived_reds_the_run() {
+  local tmp f rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-toolgap.XXXXXX")
+  f="$tmp/tool.test.sh"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+. "$FM_TEST_LIB"
+fm_tool_skip fmnosuchtool "a case whose declared pinned tool was not installed"
+exit 0
+SH
+  chmod +x "$f"
+  printf '%s\tfmnosuchtool\n' "$f" >"$tmp/table"
+  set +e
+  FM_TEST_LIB="$ROOT/tests/lib.sh" FM_TEST_REQUIRE_DECLARED_TOOLS=1 \
+    FM_TEST_REQUIRED_TOOLS_FILE="$tmp/table" "$RUNNER" "$f" >"$tmp/out.txt" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a declared tool that never arrived must red the run"; }
+  grep -q 'required by script_required_tools but was not on PATH' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the runner must say the promised tool did not arrive: $(cat "$tmp/err.txt")"; }
+  rm -rf "$tmp"
+  pass "a lane whose promised pinned tool never arrived reds rather than skipping quietly"
+}
+
+test_coverage_guard_refuses_an_unusable_tool_table() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tooltable.XXXXXX")
+  printf 'tests/fm-no-such-test.test.sh\tshellcheck\n' >"$tmp/missing"
+  printf 'tests/fm-lint.test.sh\tfmnosuchtool\n' >"$tmp/unknown"
+  set +e
+  FM_TEST_REQUIRED_TOOLS_FILE="$tmp/missing" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err1.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool entry naming a test that does not exist"; }
+  grep -q 'names a test that does not exist' "$tmp/err1.txt" \
+    || { rm -rf "$tmp"; fail "the refusal must name the problem: $(cat "$tmp/err1.txt")"; }
+  set +e
+  FM_TEST_REQUIRED_TOOLS_FILE="$tmp/unknown" "$RUNNER" --check-coverage >/dev/null 2>"$tmp/err2.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "the coverage guard must refuse a tool with no installer"; }
+  grep -q 'cannot install' "$tmp/err2.txt" \
+    || { rm -rf "$tmp"; fail "the refusal must name the uninstallable tool: $(cat "$tmp/err2.txt")"; }
+  rm -rf "$tmp"
+  pass "the coverage guard refuses a tool table that would install for nobody"
+}
+
 test_stock_bash_lane_is_every_test_minus_named_exclusions() {
   local listed excluded all rejoined
   listed=$("$RUNNER" --list --lane stock-bash | LC_ALL=C sort)
@@ -2390,6 +2524,11 @@ test_list_all_exact_suite_coverage
 test_multi_script_run_releases_the_build_lock_between_scripts
 test_stock_bash_lane_is_every_test_minus_named_exclusions
 test_stock_bash_exclusions_carry_a_checkable_reason
+test_required_tools_follow_the_lane_that_holds_the_test
+test_required_tools_are_membership_derived_not_constant
+test_a_missing_tool_no_table_names_reds_the_run
+test_a_declared_tool_that_never_arrived_reds_the_run
+test_coverage_guard_refuses_an_unusable_tool_table
 test_require_ok_count_catches_a_shrinking_case_list
 test_family_selection
 test_single_script_selection

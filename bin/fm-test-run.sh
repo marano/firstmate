@@ -24,6 +24,7 @@
 #   fm-test-run.sh --list-concurrent-safe-families
 #   fm-test-run.sh --concurrent-safe-family-jobs-max <name>
 #   fm-test-run.sh --list-lanes
+#   fm-test-run.sh --list-required-tools --lane portable-parallel-1
 #   fm-test-run.sh --list-stock-bash-exclusions
 #   fm-test-run.sh --check-coverage
 #
@@ -67,6 +68,16 @@
 #                   gave (empty when it ran), so a lane can say which harness or
 #                   tool this host could not exercise.
 #   --list          print selected script paths (one per line) and exit 0
+#   --list-required-tools
+#                   print the pinned external linters the CURRENT selection
+#                   needs, sorted and deduplicated, one per line, and exit 0.
+#                   Nothing is printed when the selection needs none. Each CI
+#                   lane job installs exactly this answer for its own lane
+#                   (bin/fm-install-pinned-tools.sh), so no workflow file keeps
+#                   a per-job tool matrix that can rot away from lane
+#                   membership. script_required_tools below owns which test
+#                   needs which tool; FM_TEST_REQUIRED_TOOLS_FILE replaces that
+#                   table (tests).
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
 #                   Only --lane portable-parallel-1, portable-parallel-2, or
@@ -176,8 +187,17 @@
 #   against. Inspection modes execute nothing and stay available, and a run with
 #   no FM_TASK_ID set is unchanged.
 #
+# A script that skipped a case for a missing pinned external tool prints
+# tests/lib.sh's FM_TEST_TOOL_MISSING marker. Where those tools are supposed to
+# be installed - CI, or FM_TEST_REQUIRE_DECLARED_TOOLS=1 - the run fails naming
+# the script and the tool, whether script_required_tools promised that tool and
+# the install did not deliver it, or the table never named it at all. Locally
+# the marker is inert, so a contributor with no pinned linter still gets the
+# ordinary suite result.
+#
 # Exit status is non-zero if any selected script exits non-zero, a configured
-# --fail-on-gate-skip token appears, the measured duration exceeds
+# --fail-on-gate-skip token appears, a selected script reported a missing
+# pinned tool while those are required, the measured duration exceeds
 # --max-wall-ms, timing-artifact finalization fails, or a concurrent worker
 # violates its isolation check. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate; each one
@@ -982,8 +1002,15 @@ list_stock_bash() {
 #     the same way, naming itself as missing from this table.
 # --check-coverage additionally refuses an entry naming a test that does not
 # exist or a tool bin/fm-install-pinned-tools.sh does not know how to install.
+# FM_TEST_REQUIRED_TOOLS_FILE replaces the table, for the regressions in
+# tests/fm-test-run.test.sh that must drive a requirement the real table does
+# not carry. Same seam as FM_PORTABLE_SERIAL_HINTS_FILE above.
 script_required_tools() {
   local t=$'\t'
+  if [ -n "${FM_TEST_REQUIRED_TOOLS_FILE:-}" ]; then
+    cat "$FM_TEST_REQUIRED_TOOLS_FILE"
+    return
+  fi
   cat <<EOF
 tests/fm-arm-pretool-check.test.sh${t}shellcheck
 tests/fm-cd-pretool-check.test.sh${t}shellcheck
