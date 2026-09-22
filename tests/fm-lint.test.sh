@@ -616,13 +616,15 @@ test_changed_mode_defaults_to_one_shard_at_a_time() {
   diff_file="$tmp/diff.nul"
   fm_lint_write_diff_file "$diff_file" "bin/fm-install-shellcheck.sh"
 
-  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+  # FM_LINT_JOBS is cleared on purpose: an ambient value is an explicit request
+  # and would make this case assert the caller's choice instead of the default.
+  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS='' FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --telemetry "$telemetry" >/dev/null 2>&1 \
     || fail "changed-mode lint failed with no explicit job count"
   assert_grep $'jobs\t1' "$telemetry" \
     "changed mode ran its shards concurrently by default, so its peak is a shard sum"
 
-  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+  PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS='' FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --jobs 2 --telemetry "$telemetry" >/dev/null 2>&1 \
     || fail "changed-mode lint failed with an explicit job count"
   assert_grep $'jobs\t2' "$telemetry" \
