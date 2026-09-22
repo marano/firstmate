@@ -72,25 +72,21 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
 
 # A home whose spawn path can run to completion, so the posture a dispatch
 # RECORDS is observable rather than only the refusal that precedes it: a real
-# project clone with an origin, a pooled worktree, a pinned markdown backlog so
-# the transition gate uses this home's own backlog rather than the developer's
-# ambient config, and a fake tmux under which a launched agent reads alive.
+# project clone with an origin, a pooled worktree, and a fake tmux under which a
+# launched agent reads alive. The backlog backend is pinned to manual so the
+# automatic transition gate stays out of this case entirely - it belongs to
+# tests/fm-backlog-atomicity.test.sh, and pinning it here would make the
+# delivery contract's own coverage depend on an installed tasks-axi.
 # Echoes "<home>|<project-dir>|<fakebin>", like make_home.
-make_spawnable_home() {  # <name> <registry-line> <task-id>
-  local name=$1 registry=$2 id=$3 case_dir home fakebin
+make_spawnable_home() {  # <name> <registry-line>
+  local name=$1 registry=$2 case_dir home fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$fakebin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$fakebin"
   printf '%s\n' claude > "$home/config/crew-harness"
+  printf '%s\n' manual > "$home/config/backlog-backend"
   printf '%s\n' "$registry" > "$home/data/projects.md"
-  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
-  cat > "$home/.tasks.toml" <<'EOF'
-backend = "markdown"
-
-[markdown]
-path = "data/backlog.md"
-EOF
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -178,7 +174,7 @@ EOF
 # being told a guard withheld the work.
 test_a_recorded_reason_allows_a_merge_authority_downgrade() {
   local rec home proj fakebin out status
-  rec=$(make_spawnable_home yolo-reason "- proj [no-mistakes +yolo] - fixture (added 2026-09-16)" yolo-reason-c1)
+  rec=$(make_spawnable_home yolo-reason "- proj [no-mistakes +yolo] - fixture (added 2026-09-16)")
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
@@ -189,9 +185,10 @@ EOF
   [ "$status" -eq 0 ] || fail "a recorded reason did not clear the refusal: $out"
   assert_contains "$out" "the captain withheld this one PR by name" \
     "the accepted downgrade was not announced with its reason"
-  assert_grep "^yolo=off$" "$home/state/yolo-reason-c1.meta" \
+  # assert_grep matches a fixed string, so these are the record's literal lines.
+  assert_grep "yolo=off" "$home/state/yolo-reason-c1.meta" \
     "the task record does not carry the posture the dispatch was given"
-  assert_grep "^yolo_downgrade_reason=the captain withheld this one PR by name$" \
+  assert_grep "yolo_downgrade_reason=the captain withheld this one PR by name" \
     "$home/state/yolo-reason-c1.meta" \
     "the reason is not on the task record, so a later reader is left to guess"
 

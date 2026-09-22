@@ -3250,6 +3250,37 @@ test_an_apart_reason_is_recorded_in_the_record_and_the_backlog() {
   pass "a dispatch apart records its reason on the task and on the item"
 }
 
+# The same durability rule for the other recorded deviation: a task that ships
+# with less merge authority than its project's standing posture records WHY, and
+# the reason has to outlive the task record that cleanup removes, or a later
+# reader is left with the wrong story - on 2026-09-22 that story was that a
+# guard had withheld two green PRs, when what had happened is that the dispatch
+# recorded a weaker posture than the registry granted.
+test_a_yolo_downgrade_reason_is_recorded_in_the_record_and_the_backlog() {
+  local case_dir id out rc=0 body
+  id=yolo-down-h9
+  case_dir=$(make_home yolo-down "$id")
+  printf -- '- project [no-mistakes +yolo] - fixture (added 2026-09-16)\n' \
+    > "$(home_of "$case_dir")/data/projects.md"
+  add_item "$case_dir" "$id"
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dispatch below the standing merge authority was accepted with no reason: $out"
+  assert_contains "$out" "standing merge authority" "the refusal did not name the authority it would have revoked"
+
+  rc=0
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
+    --yolo-downgrade-reason "the captain withheld this one PR by name") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a recorded reason did not clear the refusal: $out"
+  assert_grep "yolo_downgrade_reason=the captain withheld this one PR by name" \
+    "$(home_of "$case_dir")/state/$id.meta" "the reason is not on the task record"
+  body=$(FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" body "$id")
+  assert_contains "$body" \
+    "Shipped below the project's standing merge authority: the captain withheld this one PR by name" \
+    "the reason is not on the item, so it would vanish with the record at cleanup"
+  pass "a dispatch below the standing merge authority records its reason on the task and on the item"
+}
+
 test_a_unit_cannot_launch_without_its_planned_members() {
   local case_dir unit out rc=0
   unit=guard-plan-h4
@@ -3726,6 +3757,7 @@ test_a_chunk_dispatches_and_closes_through_delivers
 test_enforce_refuses_a_lone_dispatch_beside_a_ready_sibling
 test_enforce_refuses_a_second_worker_beside_a_live_sibling
 test_an_apart_reason_is_recorded_in_the_record_and_the_backlog
+test_a_yolo_downgrade_reason_is_recorded_in_the_record_and_the_backlog
 test_a_unit_cannot_launch_without_its_planned_members
 test_warn_reports_and_proceeds
 test_grouping_is_inert_when_the_posture_is_absent

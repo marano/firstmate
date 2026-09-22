@@ -30,12 +30,12 @@
 #   authority would revoke that grant in a record nobody re-reads. It is
 #   REFUSED, before an endpoint or local copy exists. Pass --yolo on, or, when
 #   the downgrade is deliberate, --yolo-downgrade-reason "<one line>", which is
-#   recorded as yolo_downgrade_reason= so a later reader is told why. A relaunch
+#   recorded as yolo_downgrade_reason= on the task record and appended to the
+#   backlog item, which outlives it, so a later reader is told why. A relaunch
 #   carries the recorded posture forward rather than choosing one, so it prints
 #   that reason (or its absence) as a notice and continues.
-#   --yolo-downgrade-reason records, on the task, why a ship dispatch carries
-#   less merge authority than its project's standing posture. First dispatch
-#   only, one line, ship spawns only, and refused unless --yolo is off.
+#   That reason is one line, first dispatch only, ship spawns only, and refused
+#   unless --yolo is off.
 #   --delivers names the other backlog items this ship task delivers in the same
 #   job - a grouped dispatch, where <task-id> is the dispatch unit. It is recorded
 #   as delivers= in the unit's task record and every member moves In flight in
@@ -4564,12 +4564,18 @@ fi
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
   fm_backlog_members_start "$DATA" "${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}" || return 1
-  # The recorded reason goes on the item too, before the row moves. The record
+  # A recorded reason goes on the item too, before the row moves. The record
   # carries it while the worker lives; the item carries it afterwards, which is
-  # what lets a fleet review weeks later still see why this work went alone.
+  # what lets a fleet review weeks later still see why this work went alone, or
+  # shipped with less merge authority than its project's standing posture
+  # (AGENTS.md section 7 asks for that one line on the item note).
   # Appending is idempotent, so the commit's own retry never doubles the line.
   if [ "$APART_REASON_SET" -eq 1 ] \
     && ! fm_backlog_body_append_line "$DATA" "$ID" "Dispatched apart: $APART_REASON"; then
+    return 1
+  fi
+  if [ "$YOLO_DOWNGRADE_REASON_SET" -eq 1 ] \
+    && ! fm_backlog_body_append_line "$DATA" "$ID" "Shipped below the project's standing merge authority: $YOLO_DOWNGRADE_REASON"; then
     return 1
   fi
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
