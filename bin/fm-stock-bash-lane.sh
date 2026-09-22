@@ -41,10 +41,12 @@
 #      name although that file is cost-excluded.
 #
 # It never installs anything: `jq` and `tasks-axi` must already be on PATH, as
-# must the repository-pinned linters the lint suites need. CI installs them in
-# the step before this one, from this script's own `--required-tools` answer, so
-# the job downloads only what this lane's selection actually invokes. docs/verification/stock-bash-lane.md records the
-# measurements behind the lane's selection and what it still cannot cover.
+# must the repository-pinned linters the lint suites need.
+# CI installs them in the step before this one, from this script's own
+# `--required-tools` answer, so the job downloads only what this lane's
+# selection actually invokes.
+# docs/verification/stock-bash-lane.md records the measurements behind the
+# lane's selection and what it still cannot cover.
 #
 # Environment:
 #   FM_STOCK_BASH   the stock Bash to pin (default /bin/bash)
