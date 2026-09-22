@@ -842,7 +842,7 @@ is_proven_isolated_script() {
 # secondmate lifecycle, bootstrap, the live-harness-optin family, GUI-backend,
 # and other unproven work stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
-list_portable_serial() {
+list_portable_serial_scan() {  # [<inventory-file>]
   local s base fam
   while IFS= read -r s; do
     [ -n "$s" ] || continue
@@ -855,7 +855,31 @@ list_portable_serial() {
       continue
     fi
     printf '%s\n' "$s"
-  done < <(all_repo_tests)
+  done < <(if [ -n "${1:-}" ]; then cat "$1"; else all_repo_tests; fi)
+}
+
+# The portable serial lane. Every call rescans tests/*.test.sh, which is correct
+# for a one-shot selection but NOT for a caller that must compare several
+# derivations of the lane against each other: the directory is shared, and a
+# test may legitimately materialise a real tests/*.test.sh of its own for the
+# duration of one case (tests/fm-lint.test.sh does, because the lint gate under
+# test has to see a real changed repository file). A rescan that straddles that
+# file answers a different question than the one before it.
+#
+# SERIAL_LANE_SNAPSHOT pins one scan for the caller that needs all its
+# derivations to agree - run_coverage_guard, which builds the whole-lane listing
+# and all five shard listings and then checks them against one another. Without
+# the pin the guard could observe 179 scripts for four shards and 180 for the
+# fifth, pack that one differently, and report the resulting disagreement as
+# shards sharing scripts: a red with no defect behind it, seen 3 times out of 3
+# under a concurrent local run. An absent or empty snapshot file falls back to a
+# live scan, so a stale pin can never make the lane silently empty.
+list_portable_serial() {
+  if [ -n "${SERIAL_LANE_SNAPSHOT:-}" ] && [ -s "$SERIAL_LANE_SNAPSHOT" ]; then
+    cat "$SERIAL_LANE_SNAPSHOT"
+    return 0
+  fi
+  list_portable_serial_scan
 }
 
 # Test scripts kept OUT of the stock-bash lane, each with the reason it cannot
@@ -1437,23 +1461,49 @@ run_coverage_guard() {
 
   # Serial (whole lane and each CI shard) + Herdr lane listings without
   # disturbing a caller's selection.
+  #
+  # ONE SCAN, ONE PACKING, SLICED FIVE WAYS. Everything below is compared
+  # against everything else - the whole lane against the union of the shards,
+  # each shard against the others - so all of it has to describe the same
+  # inventory. The lane is therefore pinned to $tmp/all, the inventory this
+  # guard has already been reasoning about, and the greedy packing is computed
+  # once and sliced by shard index rather than recomputed per shard.
+  #
+  # Rescanning per shard is what made this guard red with no defect behind it:
+  # tests/*.test.sh is a shared directory and a test may legitimately create a
+  # real test file there for the length of one case, so two scans seconds apart
+  # can disagree. An instrumented run caught four shards packing 179 scripts and
+  # one packing 180, which reshuffled that shard alone and was then reported as
+  # shards sharing scripts. Slicing one packing also drops roughly 900 command
+  # substitutions per run to about 180, since the weight lookup is one per
+  # script per packing.
   saved_scripts=("${SCRIPTS[@]+"${SCRIPTS[@]}"}")
+  list_portable_serial_scan "$tmp/all" >"$tmp/serial_snapshot"
+  if [ ! -s "$tmp/serial_snapshot" ]; then
+    log "coverage guard: the portable serial lane scanned empty"
+    SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+    rm -rf "$tmp"
+    return 1
+  fi
+  SERIAL_LANE_SNAPSHOT="$tmp/serial_snapshot"
   SCRIPTS=()
   select_lane portable-serial
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/serial"
+  portable_serial_assignments >"$tmp/serial_assignments"
   : >"$tmp/serial_shards_raw"
   shard=1
   while [ "$shard" -le "$PORTABLE_SERIAL_SHARDS" ]; do
-    SCRIPTS=()
-    select_lane "portable-serial-${shard}of${PORTABLE_SERIAL_SHARDS}"
-    if [ "${#SCRIPTS[@]}" -eq 0 ]; then
+    awk -F '\t' -v want="$shard" '$1 == want { print $2 }' \
+      "$tmp/serial_assignments" >"$tmp/serial_shard_$shard"
+    if [ ! -s "$tmp/serial_shard_$shard" ]; then
       log "coverage guard: portable serial shard $shard of $PORTABLE_SERIAL_SHARDS is empty"
+      SERIAL_LANE_SNAPSHOT=
       SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
       rm -rf "$tmp"
       return 1
     fi
-    printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" >>"$tmp/serial_shards_raw"
-    shard_ms=$(printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | portable_serial_lane_weight)
+    cat "$tmp/serial_shard_$shard" >>"$tmp/serial_shards_raw"
+    shard_ms=$(portable_serial_lane_weight <"$tmp/serial_shard_$shard")
     if [ "$shard_ms" -gt "$serial_max_ms" ]; then
       serial_max_ms=$shard_ms
       serial_max_shard=$shard
@@ -1464,6 +1514,11 @@ run_coverage_guard() {
   select_family real-herdr-gated
   printf '%s\n' "${SCRIPTS[@]+"${SCRIPTS[@]}"}" | LC_ALL=C sort -u >"$tmp/herdr"
   SCRIPTS=("${saved_scripts[@]+"${saved_scripts[@]}"}")
+  # Every derivation that had to agree with the others has been taken; later
+  # checks may scan freely. The pin is released rather than left set, so nothing
+  # downstream reads a lane pinned to a directory this function is about to
+  # remove (an absent snapshot would fall back to a live scan regardless).
+  SERIAL_LANE_SNAPSHOT=
 
   # Every serial script runs in exactly one CI shard: no duplicate work across
   # runners, and no script silently left out of the required lane.
