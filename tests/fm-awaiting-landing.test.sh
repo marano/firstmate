@@ -324,8 +324,13 @@ test_a_pr_head_left_behind_by_the_branch_is_landing_blocked() {
   pass "a branch holding work its PR does not is landing-blocked"
 }
 
-# The PR holds commits this copy does not.
-test_a_pr_head_ahead_of_the_branch_is_landing_blocked() {
+# The PR holds commits this copy does not, and NOTHING vouches for them.
+# Narrowed deliberately: an ahead head is landing-blocked only while no
+# validation receipt names it. A head the pipeline validated is the ordinary
+# end state of a no-mistakes ship and is proven quiet in
+# test_a_validated_ahead_head_is_awaiting_landing below; every other ahead head
+# (direct-PR work, a copy that dropped commits nothing validated) stays blocked.
+test_an_unvalidated_pr_head_ahead_of_the_branch_is_landing_blocked() {
   local dir ahead
   dir=$(make_git_task ahead)
   wt_commit "$dir/wt" "the base work" > /dev/null
@@ -339,7 +344,70 @@ test_a_pr_head_ahead_of_the_branch_is_landing_blocked() {
   assert_detail_mentions "a PR ahead of the local copy" \
     "does not contain" "$dir" ahead
 
-  pass "a PR holding commits the local copy does not is landing-blocked"
+  pass "a PR holding commits the local copy does not, with no receipt vouching for them, is landing-blocked"
+}
+
+
+receipt_for() {  # <dir> <id> <pr-number> <head>
+  fm_validation_receipt_write "$1/state" "$2" github github.com o/r "$3" "$4" "fm/$2" 01RUNRUNRUNRUNRUNRUNRUNRUN \
+    || fail "could not write the fixture validation receipt"
+}
+
+# THE reported case. The pipeline pushed its own fix commits, so the PR head is a
+# descendant of the worker's branch head; the receipt is the pipeline vouching
+# for that head. Quiet, with the stop marker present, and the evidence names it.
+test_a_validated_ahead_head_is_awaiting_landing() {
+  local dir base pipeline
+  dir=$(make_git_task validated-ahead)
+  base=$(wt_commit "$dir/wt" "the worker's commit")
+  pipeline=$(wt_commit "$dir/wt" "no-mistakes(review): a pipeline fix commit")
+  git -C "$dir/wt" reset --hard -q "$base"
+
+  status_line "$dir" validated-ahead 'done: PR https://github.com/o/r/pull/30 checks green run=r-30'
+  task_meta "$dir" validated-ahead "pr=https://github.com/o/r/pull/30" "pr_head=$pipeline"
+  stop_agent "$dir" validated-ahead
+  receipt_for "$dir" validated-ahead 30 "$pipeline"
+
+  assert_class "a validated PR ahead of the local copy" awaiting-landing "$dir" validated-ahead
+  assert_quiet "a validated PR ahead of the local copy" "$dir" validated-ahead
+  assert_target "a validated PR ahead of the local copy" validated "$dir" validated-ahead
+  assert_detail_mentions "a validated PR ahead of the local copy" "validated by pipeline run" "$dir" validated-ahead
+
+  # A receipt that names some OTHER head, or another PR, vouches for nothing here.
+  receipt_for "$dir" validated-ahead 30 "$base"
+  assert_class "a receipt naming another head" landing-blocked "$dir" validated-ahead
+  receipt_for "$dir" validated-ahead 31 "$pipeline"
+  assert_class "a receipt for another PR" landing-blocked "$dir" validated-ahead
+
+  pass "a PR head the pipeline validated, ahead of the local copy, is awaiting landing and never blocked"
+}
+
+# A receipt for the recorded head must not rescue the two shapes landing-blocked
+# exists for: unpushed local work (behind) and rewritten history (unrelated).
+test_a_receipt_never_rescues_a_behind_or_unrelated_head() {
+  local dir pushed abandoned
+  dir=$(make_git_task receipt-behind)
+  pushed=$(wt_commit "$dir/wt" "the pushed work")
+  wt_commit "$dir/wt" "a later commit that was never pushed" > /dev/null
+  status_line "$dir" receipt-behind 'done: PR https://github.com/o/r/pull/32 checks green run=r-32'
+  task_meta "$dir" receipt-behind "pr=https://github.com/o/r/pull/32" "pr_head=$pushed"
+  stop_agent "$dir" receipt-behind
+  receipt_for "$dir" receipt-behind 32 "$pushed"
+  assert_class "a validated head the branch advanced past" landing-blocked "$dir" receipt-behind
+  assert_watched "a validated head the branch advanced past" "$dir" receipt-behind
+
+  dir=$(make_git_task receipt-unrelated)
+  abandoned=$(wt_commit "$dir/wt" "the work as first written")
+  git -C "$dir/wt" reset --hard -q HEAD~1
+  wt_commit "$dir/wt" "the work as rewritten" > /dev/null
+  status_line "$dir" receipt-unrelated 'done: PR https://github.com/o/r/pull/33 checks green run=r-33'
+  task_meta "$dir" receipt-unrelated "pr=https://github.com/o/r/pull/33" "pr_head=$abandoned"
+  stop_agent "$dir" receipt-unrelated
+  receipt_for "$dir" receipt-unrelated 33 "$abandoned"
+  assert_class "a validated head rewritten out of history" landing-blocked "$dir" receipt-unrelated
+  assert_watched "a validated head rewritten out of history" "$dir" receipt-unrelated
+
+  pass "a validation receipt never rescues an unpushed-work or rewritten-history head"
 }
 
 # The check can only move a task OUT of quiet, never into it. bin/fm-pr-check.sh
@@ -552,6 +620,54 @@ test_mutant_recorded_pr_is_sufficient_is_red() {
   pass "MUTANT recorded-pr-is-sufficient is red: a PR holding the wrong commit would read as ready to land"
 }
 
+# MUTANT: an ahead head is quiet with NO receipt. The dropped-commits fixture
+# (nothing validated it) must go quiet under it, so the receipt requirement is
+# proven load-bearing rather than assumed.
+test_mutant_ahead_without_receipt_is_red() {
+  local dir ahead got
+  dir=$(make_git_task mutant-ahead)
+  wt_commit "$dir/wt" "the base work" > /dev/null
+  ahead=$(wt_commit "$dir/wt" "a commit the local copy later dropped")
+  git -C "$dir/wt" reset --hard -q HEAD~1
+  status_line "$dir" mutant-ahead 'done: PR https://github.com/o/r/pull/34 checks green run=r-34'
+  task_meta "$dir" mutant-ahead "pr=https://github.com/o/r/pull/34" "pr_head=$ahead"
+  stop_agent "$dir" mutant-ahead
+
+  assert_class "the real library" landing-blocked "$dir" mutant-ahead
+  # shellcheck disable=SC2016
+  got=$(mutant_answer ahead-without-receipt \
+    'if [ "$shape" = ahead ] && _fm_awaiting_landing_head_validated "$state" "$id" "$pr" "$pr_head"; then' \
+    'if [ "$shape" = ahead ]; then' "$dir" mutant-ahead class)
+  [ "$got" = awaiting-landing ] \
+    || fail "mutant ahead-without-receipt was not red: it answered '$got' for an unvouched ahead head"
+
+  pass "MUTANT ahead-without-receipt is red: dropped, unvalidated commits would read as ready to land"
+}
+
+# MUTANT: any recorded divergence is quiet once a receipt exists, ignoring shape.
+# The unrelated (rewritten-history) fixture must stay blocked in the real library
+# and go quiet under the mutant.
+test_mutant_receipt_ignores_shape_is_red() {
+  local dir abandoned got
+  dir=$(make_git_task mutant-shape)
+  abandoned=$(wt_commit "$dir/wt" "the work as first written")
+  git -C "$dir/wt" reset --hard -q HEAD~1
+  wt_commit "$dir/wt" "the work as rewritten" > /dev/null
+  status_line "$dir" mutant-shape 'done: PR https://github.com/o/r/pull/35 checks green run=r-35'
+  task_meta "$dir" mutant-shape "pr=https://github.com/o/r/pull/35" "pr_head=$abandoned"
+  stop_agent "$dir" mutant-shape
+  receipt_for "$dir" mutant-shape 35 "$abandoned"
+
+  assert_class "the real library" landing-blocked "$dir" mutant-shape
+  # shellcheck disable=SC2016
+  got=$(mutant_answer receipt-ignores-shape \
+    'if [ "$shape" = ahead ] && _fm_awaiting' 'if _fm_awaiting' "$dir" mutant-shape class)
+  [ "$got" = awaiting-landing ] \
+    || fail "mutant receipt-ignores-shape was not red: it answered '$got' for a rewritten-history head"
+
+  pass "MUTANT receipt-ignores-shape is red: a validated but rewritten head would read as ready to land"
+}
+
 test_finished_work_whose_agent_is_still_alive_is_awaiting_landing
 test_a_deliberately_stopped_agent_on_finished_work_is_awaiting_landing
 test_a_stopped_agent_with_a_recorded_pr_is_awaiting_landing
@@ -562,7 +678,9 @@ test_the_last_status_event_decides
 test_a_correlated_done_line_is_read_through
 test_a_pr_head_rewritten_out_of_history_is_landing_blocked
 test_a_pr_head_left_behind_by_the_branch_is_landing_blocked
-test_a_pr_head_ahead_of_the_branch_is_landing_blocked
+test_an_unvalidated_pr_head_ahead_of_the_branch_is_landing_blocked
+test_a_validated_ahead_head_is_awaiting_landing
+test_a_receipt_never_rescues_a_behind_or_unrelated_head
 test_an_unverifiable_landing_target_stays_awaiting_landing
 test_absent_records_read_as_none
 test_every_entry_point_is_safe_under_set_eu
@@ -570,3 +688,5 @@ test_mutant_stop_marker_alone_is_red
 test_mutant_any_terminal_verb_is_red
 test_mutant_unconditional_suppression_is_red
 test_mutant_recorded_pr_is_sufficient_is_red
+test_mutant_ahead_without_receipt_is_red
+test_mutant_receipt_ignores_shape_is_red

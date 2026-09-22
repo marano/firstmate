@@ -1626,6 +1626,19 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# The evidence trail for a stale wake that FIRES. triage_log has always recorded
+# only what the watcher absorbs, so a surfaced wake left no line and the log read
+# as if nothing had happened; that gap cost a full investigation on 2026-09-21,
+# when a task whose landing was blocked by a healthy validated PR head alarmed
+# with a bare "stale: <window>" and no trace of why. This names the landing
+# class the owner answered, which is the fact that decided the alarm.
+triage_log_surfaced_stale() {  # <window> <path>
+  local win=$1 how=$2 task
+  task=$(window_to_task "$win" "$STATE")
+  fm_awaiting_landing_read "$task" "$STATE"
+  triage_log "surfaced stale ($how; landing=${FM_AWAITING_LANDING_CLASS:-none}${FM_AWAITING_LANDING_DETAIL:+ - $FM_AWAITING_LANDING_DETAIL}): $win"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1683,6 +1696,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
+    triage_log_surfaced_stale "$win" "non-terminal"
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -2708,6 +2722,7 @@ EOF
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
+              triage_log_surfaced_stale "$w" "terminal status"
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"

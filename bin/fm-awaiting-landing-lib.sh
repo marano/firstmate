@@ -57,7 +57,14 @@
 #      been rewritten during an aborted validation run and never pushed - so the
 #      PR looked healthy while containing the WRONG work, and the armed merge
 #      poll would have reported it landed. "A pr= is recorded" is therefore NOT
-#      sufficient for landing-ready.
+#      sufficient for landing-ready. The one exception is a PR head that is
+#      AHEAD of the branch (the branch is an ancestor of it) AND that the
+#      pipeline's durable validation receipt names: that is the ordinary end
+#      state of every validated ship, because the pipeline pushes its own fix
+#      commits and the local branch is never advanced to them. It reads
+#      awaiting-landing with target=validated. An ahead head with no matching
+#      receipt, a `behind` head (unpushed local work) and an unrelated head
+#      (rewritten history) all stay landing-blocked.
 #
 # The target check can only ever move a task OUT of quiet, never into it.
 # Absence of verification is not evidence of a problem: bin/fm-pr-check.sh
@@ -98,6 +105,8 @@ _FM_AWAITING_LANDING_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_AWAITING_LANDING_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$_FM_AWAITING_LANDING_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-validation-receipt-lib.sh
+. "$_FM_AWAITING_LANDING_DIR/fm-validation-receipt-lib.sh"
 unset _FM_AWAITING_LANDING_DIR
 
 # The evidence every read publishes. A caller that only wants the class may use
@@ -141,6 +150,16 @@ _fm_awaiting_landing_divergence() {  # <worktree> <recorded-head> <branch-head>
   else
     printf 'unrelated'
   fi
+}
+
+# 0 when the durable validation receipt for THIS task's recorded PR names exactly
+# <pr-head> as a head the pipeline validated. Local file read only.
+_fm_awaiting_landing_head_validated() {  # <state> <id> <pr-url> <pr-head>
+  local state=$1 id=$2 url=$3 head=$4
+  fm_pr_url_parse "$url" || return 1
+  fm_validation_receipt_read "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+  [ "$FM_VALIDATION_RECEIPT_HEAD" = "$head" ]
 }
 
 # THE derivation. Sets every FM_AWAITING_LANDING_* global above and returns 0.
@@ -218,6 +237,19 @@ fm_awaiting_landing_read() {  # <id> <state-dir>
     return 0
   fi
   shape=$(_fm_awaiting_landing_divergence "$worktree" "$pr_head" "$branch_head")
+  # An `ahead` PR is the ordinary end state of a validated ship: the pipeline
+  # pushes its own fix commits and the worker's local branch is never
+  # fast-forwarded to them, so the PR holds everything the branch has plus the
+  # pipeline's work. That is safe to land ONLY when the pipeline itself vouches
+  # for the PR head, which the durable receipt records (a pure file read, no
+  # forge or daemon). Without a matching receipt - direct-PR work, or a local
+  # copy that dropped commits nothing validated - `ahead` stays blocked.
+  if [ "$shape" = ahead ] && _fm_awaiting_landing_head_validated "$state" "$id" "$pr" "$pr_head"; then
+    FM_AWAITING_LANDING_TARGET="validated"
+    FM_AWAITING_LANDING_CLASS="awaiting-landing"
+    FM_AWAITING_LANDING_DETAIL="awaiting landing: work reported done, $pr holds ${pr_head:0:7}, validated by pipeline run $FM_VALIDATION_RECEIPT_RUN and containing this branch's head ${branch_head:0:7}"
+    return 0
+  fi
   FM_AWAITING_LANDING_TARGET="diverged"
   FM_AWAITING_LANDING_CLASS="landing-blocked"
   case "$shape" in
