@@ -158,7 +158,7 @@ github_retry_one() {  # <path> <branch> <url> <number>
   fi
   enc=$(url_encode_path_segment "$branch")
   if ! protected=$(gh api "repos/$path/branches/$enc" --jq '.protected' 2>/dev/null); then
-    if ! gh api "repos/$path/branches/$enc" >/dev/null 2>&1; then
+    if fm_github_branch_confirmed_gone "$path" "$enc"; then
       printf 'already gone: %s (%s)\n' "$branch" "$url"
       return 0
     fi
@@ -186,7 +186,7 @@ github_retry_one() {  # <path> <branch> <url> <number>
     printf 'branch deleted: %s (%s)\n' "$branch" "$url"
     return 0
   fi
-  if ! gh api "repos/$path/branches/$enc" >/dev/null 2>&1; then
+  if fm_github_branch_confirmed_gone "$path" "$enc"; then
     printf 'already gone: %s (%s)\n' "$branch" "$url"
     return 0
   fi
@@ -222,8 +222,7 @@ gitlab_retry_one() {  # <host> <path> <branch> <url> <number>
     printf 'not swept: %s lives in a forked project; left in place\n' "$branch" >&2
     return 2
   fi
-  if ! GITLAB_HOST="$host" glab api \
-    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
+  if fm_gitlab_branch_confirmed_gone "$host" "$project_enc" "$branch_enc"; then
     printf 'already gone: %s (%s)\n' "$branch" "$url"
     return 0
   fi
@@ -261,8 +260,7 @@ gitlab_retry_one() {  # <host> <path> <branch> <url> <number>
     printf 'branch deleted: %s (%s)\n' "$branch" "$url"
     return 0
   fi
-  if ! GITLAB_HOST="$host" glab api \
-    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
+  if fm_gitlab_branch_confirmed_gone "$host" "$project_enc" "$branch_enc"; then
     printf 'already gone: %s (%s)\n' "$branch" "$url"
     return 0
   fi

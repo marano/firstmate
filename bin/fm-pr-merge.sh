@@ -1242,7 +1242,7 @@ github_delete_merged_branch() {
   protected_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" --jq '.protected' 2>/dev/null) \
     || protected_status=$?
   if [ "$protected_status" -ne 0 ]; then
-    if ! gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" >/dev/null 2>&1; then
+    if fm_github_branch_confirmed_gone "$PR_OWNER/$PR_REPO" "$enc"; then
       printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
       return 0
     fi
@@ -1274,8 +1274,10 @@ github_delete_merged_branch() {
   # above sit in. So this DELETE can arrive at a ref the forge has already
   # removed and fail with 422 "Reference does not exist". Re-read the branch
   # before calling that a failure: the branch is gone, which is the outcome
-  # this step wanted, and there is nothing left to record or retry.
-  if ! gh api "repos/$PR_OWNER/$PR_REPO/branches/$enc" >/dev/null 2>&1; then
+  # this step wanted, and there is nothing left to record or retry. Only a
+  # confirmed 404 on that re-read counts as gone; a transient read failure
+  # falls through to the durable record instead of evaporating.
+  if fm_github_branch_confirmed_gone "$PR_OWNER/$PR_REPO" "$enc"; then
     printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
     return 0
   fi
@@ -1337,9 +1339,10 @@ gitlab_delete_merged_branch() {
   fi
   # Same race as the GitHub path: a project that removes the source branch on
   # merge can win it, and a delete that failed because the branch is already
-  # gone reached the outcome this step wanted.
-  if ! GITLAB_HOST="$FM_PR_HOST" glab api \
-    "projects/$project_enc/repository/branches/$branch_enc" >/dev/null 2>&1; then
+  # gone reached the outcome this step wanted. Only a confirmed 404 on the
+  # re-read counts as gone; a transient read failure falls through to the
+  # durable record instead of evaporating.
+  if fm_gitlab_branch_confirmed_gone "$FM_PR_HOST" "$project_enc" "$branch_enc"; then
     printf 'branch already gone: %s (%s)\n' "$branch" "$URL"
     return 0
   fi

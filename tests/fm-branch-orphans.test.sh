@@ -40,11 +40,20 @@ case " $* " in
     printf '0\n'
     ;;
   *"/git/refs/heads/"*)
+    : > "$FM_TEST_DELETE_ATTEMPTED"
     [ ! -f "$FM_TEST_DELETE_FAILS" ] || exit 1
     : > "$FM_TEST_DELETED"
     ;;
   *"/branches/"*)
     if [ -f "$FM_TEST_BRANCH_MISSING" ]; then
+      echo 'gh: Not Found (HTTP 404)' >&2
+      exit 1
+    fi
+    if [ -f "${FM_TEST_BRANCH_READ_FAILS:-/dev/null}" ] \
+      && [ -f "${FM_TEST_DELETE_ATTEMPTED:-/dev/null}" ]; then
+      # Only the post-delete re-read fails transiently, so the earlier
+      # protection read still succeeds and the DELETE is actually attempted.
+      echo 'gh: unexpected end of JSON input' >&2
       exit 1
     fi
     printf 'false\n'
@@ -65,7 +74,9 @@ run_orphans() {  # <case-dir> <args...>
   FM_TEST_PR_JSON="$case_dir/pr.json" \
   FM_TEST_DELETE_FAILS="$case_dir/delete-fails" \
   FM_TEST_DELETED="$case_dir/deleted" \
+  FM_TEST_DELETE_ATTEMPTED="$case_dir/delete-attempted" \
   FM_TEST_BRANCH_MISSING="$case_dir/branch-missing" \
+  FM_TEST_BRANCH_READ_FAILS="$case_dir/branch-read-fails" \
   PATH="$case_dir/fakebin:$PATH" \
     "$ORPHANS" "$@"
 }
@@ -252,6 +263,29 @@ test_sweep_keeps_the_record_when_the_delete_fails() {
   pass "a branch the sweep cannot delete keeps its record and reports a failure"
 }
 
+# A transient failure on the post-delete re-read (a 5xx, a rate limit, a
+# network blip) is not a 404 and must not be read as proof the branch is gone:
+# that would clear the record for a branch that is still on the remote, the
+# exact leak this sweep exists to close.
+test_sweep_keeps_the_record_when_the_gone_check_fails_transiently() {
+  local case_dir rc=0
+  case_dir=$(make_case sweep-gone-check-transient)
+  add_gh_mock "$case_dir"
+  seed_record "$case_dir" fm/flaky https://github.com/example/repo/pull/5
+  merged_pr_json "$case_dir" fm/flaky
+  : > "$case_dir/delete-fails"
+  : > "$case_dir/branch-read-fails"
+
+  run_orphans "$case_dir" retry > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+
+  expect_code 1 "$rc" "sweep-gone-check-transient: a failed sweep should report non-zero"
+  assert_no_grep 'already gone' "$case_dir/out" \
+    "sweep-gone-check-transient: a transient read failure was reported as the branch being gone"
+  assert_grep 'fm/flaky' "$case_dir/state/branch-orphans" \
+    "sweep-gone-check-transient: a transient read failure dropped the durable record"
+  pass "a transient failure on the gone-check is not read as the branch being gone"
+}
+
 # --dry-run exists so an operator can see the verdict before anything
 # irreversible happens, so it must reach a delete verdict and still not delete.
 test_dry_run_reports_the_verdict_without_deleting() {
@@ -305,5 +339,6 @@ test_sweep_refuses_a_record_whose_pr_now_has_another_head
 test_sweep_deletes_a_still_merged_branch_and_clears_its_record
 test_sweep_clears_the_record_of_a_branch_already_gone
 test_sweep_keeps_the_record_when_the_delete_fails
+test_sweep_keeps_the_record_when_the_gone_check_fails_transiently
 test_dry_run_reports_the_verdict_without_deleting
 test_a_repository_filter_leaves_other_repositories_alone
