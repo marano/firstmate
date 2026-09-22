@@ -722,7 +722,9 @@ pass "a nested invocation under an owner that exported no hold variables runs st
 # Mutant: replace the fm_build_lock_self_locking_command branch with `if false`
 # - the stand-down and per-unit assertions go red.
 # Mutant: make fm_build_lock_self_locking_command return 0 unconditionally
-# - the unrecognised-name assertion goes red.
+# - the unrecognised-name assertion goes red (that mutant stands down for
+# everything, so it also reds the mutual-exclusion case far above; the
+# unrecognised-name run was confirmed to exit 0 instead of 2 on its own).
 
 SELF_BIN="$TMP_ROOT/self-locking-bin"
 mkdir -p "$SELF_BIN"

@@ -31,14 +31,62 @@ That is a hole in the mutual exclusion itself, not a tuning problem.
 The lock is advisory, so any participant that tires of waiting can step out of the line.
 Every fairness or wait-time figure taken while a participant was bypassing it is suspect, including the table above, which cannot see work run outside the lock.
 
-## Recommendation
+## What those two steps became
 
-Bound how long a holder keeps the lock, and never kill a build: a wrongly killed build is worse than a slow one.
-Try the cheapest steps first, and build nothing further until they have been tried.
+Both cheap steps were taken.
+`bin/fm-test-run.sh` moved its hold from the whole run to one hold per serial script and one per concurrent phase, and `bin/fm-build-lock.sh` grew the ceiling lines that reach a task's status file through `FM_TASK_STATUS`.
+Acquisition also became arrival-ordered, so a waiter's wait is bounded by the waiters ahead of it, and the lock became an N-slot semaphore with N=1 as the default.
 
-1. Make the wrap rule precise: one `mutex` invocation per build or test run, never one per unit inside a run, and never one around a loop of separate runs such as a baseline plus mutants.
-   Arrival order then lets a queued pipeline step run between two mutant runs instead of waiting out the whole loop.
-2. Make a long hold visible to the supervisor, not only to the holder: today the ceiling warning goes to the holder's own stderr, which in every long hold above was a backgrounded task nobody read.
+## The residual is the wrap rule, not the lock algorithm
 
-One four-hour window is a sample, not a season.
-A pipeline hold long enough to explain the queueing, or a window with no long holds, would have changed this conclusion; neither was observed.
+Measured 2026-09-22 on a 10-core, 16 GB Apple M-series machine, ShellCheck-clean tree at `bin/fm-build-lock.sh` with a slot count of 2.
+
+Per-script hold lengths are the per-script durations in `portable_serial_weight_hints` (179 portable-serial scripts, each the slowest of several green CI runs):
+
+| Statistic | Per-script hold |
+| --- | ---: |
+| median | 9.9 s |
+| p90 | 85.1 s |
+| p99 | 312.2 s |
+| longest | 709.9 s (`tests/fm-watch-triage.test.sh`) |
+| whole lane | 6,382 s |
+
+So a correctly scoped hold is bounded by one script, and the whole lane is 9x the longest script in it.
+
+A sampler reading `fm-build-lock.sh --status` every 2 seconds for 450 samples caught both shapes in one window on this machine.
+A run wrapped as `mutex ./bin/fm-test-run.sh tests/fm-awaiting-landing.test.sh tests/fm-watch-triage.test.sh` was observed holding one slot for 834 s as a single hold, while a correctly scoped `./tests/fm-awaiting-landing.test.sh` hold in the same window reached 8 s.
+Every sample of that window read `1 of 2 build slots held, 0 waiting`: nothing was starved, because the second slot absorbed it.
+
+## A second slot masked the starvation and did not remove it
+
+A competing waiter was timed against a synthetic runner taking one hold per unit, six units of three seconds, in a private lock root, with the waiter arriving four seconds in.
+
+| Slots | Runner shape | Waiter waited |
+| ---: | --- | ---: |
+| 1 | per-unit holds | 3.49 s |
+| 1 | one wrapped hold | 15.22 s |
+| 2 | one wrapped hold | 0.80 s |
+| 2 | two wrapped holds | 15.38 s |
+| 2 | two per-unit runners | 3.51 s |
+
+One wrapped run at two slots is the benign case, and it is the case that was observed live.
+Two of them refill both slots and the wait returns to the whole-run length, and a count of 1 remains the default on any machine that has not raised it.
+So the extra slot hid this rather than fixing it.
+
+## Standing down for a self-locking runner, measured
+
+With the same synthetic runner at a count of 1, wrapped identically, the only difference being whether `bin/fm-build-lock.sh` recognises the program as one that takes the lock itself:
+
+| Wrapped command | Waiter waited |
+| --- | ---: |
+| unrecognised name | 16.76 s |
+| recognised name (stands down) | 3.99 s |
+
+That is the difference between waiting out the whole run and waiting out one unit.
+`tests/fm-build-lock.test.sh` pins the behavior, and `bin/fm-build-lock.sh`'s header owns the rule and which programs it names.
+
+## What is still unbounded
+
+One hold remains long by itself: `tests/fm-watch-triage.test.sh` is a single script of 238 cases, 709.9 s on CI and over 13 minutes measured locally, so it is one legitimate hold and no wrap rule reduces it.
+It is 11% of the portable-serial lane's total time and 2.3x the next longest script.
+Splitting it into units the runner can yield between is the remaining step, and it changes a test file rather than the lock.
