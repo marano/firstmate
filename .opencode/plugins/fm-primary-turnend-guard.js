@@ -22,6 +22,12 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A guard that exits before reading the payload makes this write fail with
+    // EPIPE. That is the child's answer, already carried by its exit code, not
+    // this helper's failure - and an unhandled stream error would take the whole
+    // plugin host down with it. bin/fm-turnend-guard.sh exits early on a usage
+    // error before it reads stdin, so the path is reachable in production.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }

@@ -125,7 +125,8 @@ The Herdr job is skipped unless the repository variable `FM_CI_RUN_HERDR` is `tr
 The aggregate job's "Prove exclusions" step runs `bin/fm-test-run.sh --check-exclusions` on every run, reading the recorded timings rather than any text.
 It names each excluded script that executed (`FM_EXCLUSION_EXECUTED`) and each other script that did not (`FM_EXCLUSION_DROPPED`), and writes the excluded list to the job summary.
 An explicit `--family` or script run, such as the Herdr job, neither proves nor breaks it.
-Excluding a test is a cost and flakiness decision, not a verdict on it: two of the excluded Pi tests were red at the time (cards `fm-pi-watch-shard-interference` and the `fm-calm-pi-extension` red on main), and excluding them hides those reds rather than fixing them.
+Excluding a test is a cost and flakiness decision, not a verdict on it: one of the excluded Pi tests is still red (the `fm-calm-pi-extension` red on main), and excluding it hides that red rather than fixing it.
+The `fm-pi-watch-shard-interference` red that `tests/fm-pi-watch-extension.test.sh` carried was answered rather than hidden, and its regression lives in the unexcluded `tests/fm-turnend-guard.test.sh`.
 
 ## Pinned linter installs
 

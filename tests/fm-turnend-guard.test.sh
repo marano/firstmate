@@ -1056,6 +1056,72 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_opencode_plugin_survives_a_guard_that_never_reads_its_payload() {
+  local plugin worktree_dir out status detail
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
+  worktree_dir="$TMP_ROOT/opencode-unread-stdin-worktree"
+  mkdir -p "$worktree_dir/bin"
+  git init -q "$worktree_dir"
+  # Both fixtures exit WITHOUT reading stdin, which the plugin's real callees do
+  # too: bin/fm-turnend-guard.sh exits on a usage error before its `cat`, and
+  # bin/fm-operational-input.sh exits on a wrong-arity or unknown command before
+  # it reads a body. The parent's write to a child that is already gone fails
+  # with EPIPE, and an unhandled error on that stream kills the plugin host.
+  #
+  # PAYLOAD_BYTES is what makes this deterministic rather than a timing race.
+  # A payload that fits the OS pipe buffer is absorbed by the kernel before the
+  # child can exit, so the write only fails when the parent happens to be
+  # descheduled - the intermittent shape this case exists to prevent. A payload
+  # larger than the buffer cannot be absorbed, so the write must still be in
+  # flight when the reader disappears, on every run and every platform. 200000
+  # is comfortably above both the 64 KiB Linux and 16 KiB macOS defaults.
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+PAYLOAD_BYTES=200000
+awk -v n="$PAYLOAD_BYTES" 'BEGIN { while (i++ < n) printf "x" }' >&2
+exit 2
+EOF
+  cat > "$worktree_dir/bin/fm-operational-input.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'encoded-without-reading-stdin\n'
+exit 0
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh" "$worktree_dir/bin/fm-operational-input.sh"
+  # Runtime module-format warnings are host noise; this assertion owns plugin output only.
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptBody = request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+if (!promptBody.includes("encoded-without-reading-stdin")) {
+  console.error(`guard did not deliver its prompt: ${promptBody.slice(0, 200)}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  # Carry the reason into the failure: a bare "expected exit 0, got 1" here
+  # names a node frame rather than the unhandled stream error that caused it.
+  detail=$(printf '%s\n' "$out" | grep -m1 -E '^[A-Za-z]*Error' || true)
+  expect_code 0 "$status" "OpenCode plugin must survive a guard child that exits without reading its stdin${detail:+ - $detail}"
+  [ -z "$out" ] || fail "OpenCode unread-stdin test printed output: $out"
+  pass ".opencode primary plugin: a child that ignores its stdin payload does not kill the plugin host"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -2398,6 +2464,7 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_plugin_survives_a_guard_that_never_reads_its_payload
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

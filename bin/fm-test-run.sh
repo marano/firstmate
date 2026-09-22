@@ -2541,7 +2541,7 @@ list_default_exclusions() {
   cat <<EOF
 family:secondmate${t}this home has never registered a secondmate. NOT because they pass: tests/fm-remote-secondmate-trace-context.test.sh gave an unattributed red on 2026-09-21 (card fm-remote-clone-source-object-red, still open); excluding it hides that red, it does not answer it
 family:real-herdr-gated${t}this home runs tmux, not Herdr; CI's Herdr job is switched off unless FM_CI_RUN_HERDR is true
-tests/fm-pi-watch-extension.test.sh${t}Pi is not used here. KNOWN STANDING RED (card fm-pi-watch-shard-interference); its failing case is an OpenCode watch-plugin race, not Pi code - excluded, not fixed
+tests/fm-pi-watch-extension.test.sh${t}Pi is not used here. Its OpenCode external-healthy case was intermittently red until the OpenCode plugins stopped dying on an unhandled EPIPE writing to a child that had already exited; tests/fm-turnend-guard.test.sh owns that regression and is not excluded, so this exclusion now hides no red
 tests/fm-calm-pi-extension.test.sh${t}Pi is not used here. Reddened main at f902a5ff ("Pi did not restore the persisted session after restart") - excluded, not fixed
 tests/fm-pi-branch-extension.test.sh${t}Pi is not used here
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh${t}Pi is not used here
