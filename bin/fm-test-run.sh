@@ -242,6 +242,7 @@ cd "$ROOT" || exit 1
 
 MODE=
 LIST_ONLY=0
+LIST_REQUIRED_TOOLS=0
 LIST_SCHEDULED=0
 LIST_FAMILIES=0
 LIST_CONCURRENT_SAFE_FAMILIES=0
@@ -280,6 +281,20 @@ PER_SCRIPT_TIMEOUT_GIVEN=0
 # because their job caps are their hang tripwire. The macOS stock-bash lane
 # passes its own bound in bin/fm-stock-bash-lane.sh.
 DEFAULT_PER_SCRIPT_TIMEOUT_SECS=1800
+
+# Whether a script that skipped a case for a missing pinned tool reds the run.
+# On by default wherever CI sets CI=true, because there the tools are installed
+# from script_required_tools below and a marker therefore means the table and
+# the installed set disagree - the rot this whole mechanism exists to catch. Off
+# by default locally, where a contributor with no pinned linter installed must
+# still get the ordinary suite result rather than a red for a tool they never
+# asked for. FM_TEST_REQUIRE_DECLARED_TOOLS=1 or 0 forces either way.
+REQUIRE_DECLARED_TOOLS=0
+case "${FM_TEST_REQUIRE_DECLARED_TOOLS:-}" in
+  1) REQUIRE_DECLARED_TOOLS=1 ;;
+  0) ;;
+  '') [ "${CI:-}" != true ] || REQUIRE_DECLARED_TOOLS=1 ;;
+esac
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -948,6 +963,64 @@ list_stock_bash() {
   done < <(all_repo_tests)
 }
 
+# Pinned external linters a test needs in order to exercise its subject, one
+# "<script><TAB><tool>" line per requirement (a script needing two tools gets
+# two lines). Lane membership above is what DERIVES each CI job's install set
+# from this table, so no workflow file carries a per-job tool matrix of its own.
+# Origin: a release-download outage on 2026-09-21 reddened six jobs across two
+# main runs, and five of the six were lanes that never invoke the tool whose
+# download failed. A hand-maintained matrix in ci.yml was rejected as the fix
+# because a hand-maintained static table is what had already rotted into four
+# of those same six reds.
+#
+# The table cannot rot silently in either direction, because both directions are
+# proven from what a run actually did rather than from this text:
+#   - a script listed here whose tool the lane did not install skips its
+#     tool-dependent cases, prints tests/lib.sh's FM_TEST_TOOL_MISSING marker,
+#     and reds the run (require_declared_tools below);
+#   - a script NOT listed here that needs a tool prints the same marker and reds
+#     the same way, naming itself as missing from this table.
+# --check-coverage additionally refuses an entry naming a test that does not
+# exist or a tool bin/fm-install-pinned-tools.sh does not know how to install.
+script_required_tools() {
+  local t=$'\t'
+  cat <<EOF
+tests/fm-arm-pretool-check.test.sh${t}shellcheck
+tests/fm-cd-pretool-check.test.sh${t}shellcheck
+tests/fm-lint-workflows.test.sh${t}actionlint
+tests/fm-lint.test.sh${t}shellcheck
+EOF
+}
+
+# The tools <script> requires, one per line, or nothing.
+required_tools_for_script() {  # <script>
+  local want=$1
+  script_required_tools | awk -F '\t' -v want="$want" '$1 == want { print $2 }'
+}
+
+# The tools a whole selection requires, sorted and deduplicated, one per line.
+# This is what a CI job installs: the union over the scripts its lane selects.
+required_tools_for_selection() {  # <script>...
+  local s
+  for s in "$@"; do
+    required_tools_for_script "$s"
+  done | LC_ALL=C sort -u
+}
+
+# Tool names bin/fm-install-pinned-tools.sh knows how to install. That script is
+# the single owner of the tool-to-installer mapping; this only validates names
+# against it, so a typo here is refused instead of silently requiring nothing.
+installable_pinned_tools() {
+  "$ROOT/bin/fm-install-pinned-tools.sh" --list
+}
+
+# Tools the scripts of a run reported missing, as "<script><TAB><tool>" lines.
+# tests/lib.sh's fm_tool_skip prints the marker this reads.
+tool_markers_in() {  # <output-file>
+  sed -n 's/^FM_TEST_TOOL_MISSING \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$1" 2>/dev/null \
+    | LC_ALL=C sort -u
+}
+
 # Measured portable-serial script durations in milliseconds, from the CI timing
 # artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
 # slowest of several green runs, so the balance holds on a slow runner rather
@@ -1543,7 +1616,22 @@ run_coverage_guard() {
     esac
   done < <(list_default_exclusions)
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_max_ms=%s serial_shard_budget_ms=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s\n' \
+  # The pinned-tool table is what every CI job's install set is derived from, so
+  # an entry naming a test that no longer exists installs a tool for nobody, and
+  # one naming a tool with no installer would silently require nothing at all.
+  local tool_script tool_name installable tool_rows
+  installable=$(installable_pinned_tools) \
+    || { log "coverage guard: bin/fm-install-pinned-tools.sh --list failed"; rm -rf "$tmp"; return 1; }
+  while IFS=$'\t' read -r tool_script tool_name; do
+    [ -n "$tool_script" ] || continue
+    grep -qxF "$tool_script" "$tmp/all" \
+      || { log "coverage guard: script_required_tools names a test that does not exist: $tool_script"; rm -rf "$tmp"; return 1; }
+    printf '%s\n' "$installable" | grep -qxF "$tool_name" \
+      || { log "coverage guard: script_required_tools names a tool bin/fm-install-pinned-tools.sh cannot install: $tool_name"; rm -rf "$tmp"; return 1; }
+  done < <(script_required_tools)
+  tool_rows=$(script_required_tools | grep -c . || true)
+
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_max_ms=%s serial_shard_budget_ms=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s required_tools=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$parallel_max_ms" \
@@ -1556,7 +1644,8 @@ run_coverage_guard() {
     "$unhinted" \
     "$(wc -l <"$tmp/herdr" | tr -d ' ')" \
     "$(wc -l <"$tmp/stock_bash" | tr -d ' ')" \
-    "$(list_stock_bash_exclusions | grep -c . || true)"
+    "$(list_stock_bash_exclusions | grep -c . || true)" \
+    "$tool_rows"
   rm -rf "$tmp"
   return 0
 }
@@ -2614,6 +2703,10 @@ while [ "$#" -gt 0 ]; do
       LIST_ONLY=1
       shift
       ;;
+    --list-required-tools)
+      LIST_REQUIRED_TOOLS=1
+      shift
+      ;;
     --list-scheduled)
       LIST_SCHEDULED=1
       shift
@@ -2813,7 +2906,8 @@ esac
 # already exited above, and --list/--list-scheduled print their selection and
 # exit below. An unset MODE still falls through to the usage error, so a caller
 # who named no selection mode is told that rather than this.
-if [ -n "${MODE:-}" ] && [ "$LIST_ONLY" -eq 0 ] && [ "$LIST_SCHEDULED" -eq 0 ]; then
+if [ -n "${MODE:-}" ] && [ "$LIST_ONLY" -eq 0 ] && [ "$LIST_SCHEDULED" -eq 0 ] \
+  && [ "$LIST_REQUIRED_TOOLS" -eq 0 ]; then
   refuse_primary_checkout_for_task
 fi
 
@@ -2871,6 +2965,10 @@ if [ "${#EXCLUDE_SCRIPTS[@]}" -gt 0 ]; then
 fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
+fi
+if [ "$LIST_REQUIRED_TOOLS" -eq 1 ]; then
+  required_tools_for_selection "${SCRIPTS[@]+"${SCRIPTS[@]}"}"
+  exit 0
 fi
 if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   if [ "$LIST_SCHEDULED" -eq 1 ]; then
@@ -3182,6 +3280,23 @@ record_script_result() {
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
     rc=1
+  fi
+
+  # A missing pinned tool is silent coverage loss: the case passes as a skip and
+  # the run stays green. Where the tools are supposed to be installed, red it and
+  # say which side is wrong, so neither this lane's install set nor
+  # script_required_tools can drift away from what the tests actually need.
+  if [ "$REQUIRE_DECLARED_TOOLS" -eq 1 ]; then
+    local missing_tool
+    while IFS= read -r missing_tool; do
+      [ -n "$missing_tool" ] || continue
+      if required_tools_for_script "$script" | LC_ALL=C grep -q -x -F "$missing_tool"; then
+        log "pinned tool missing in $script: $missing_tool is required by script_required_tools but was not on PATH for this lane"
+      else
+        log "pinned tool missing in $script: $missing_tool is needed but script_required_tools does not list it, so no lane installs it"
+      fi
+      rc=1
+    done < <(tool_markers_in "$out")
   fi
 
   gate_skip=false

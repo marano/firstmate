@@ -364,7 +364,7 @@ SH
 
 test_fast_mode_catches_a_real_lint_defect() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): fast lint-defect regression check"
+    fm_tool_skip shellcheck "fast lint-defect regression check" "$REQUIRED"
     return
   fi
   local tmp bad out rc
@@ -741,7 +741,7 @@ test_fast_mode_on_a_local_branch_keeps_source_following() {
 # anything narrows that gate's rule set.
 test_changed_mode_raises_what_ci_raises_on_a_changed_root() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode forward closure"
+    fm_tool_skip shellcheck "changed-mode forward closure" "$REQUIRED"
     return
   fi
   local tmp fakebin diff_file fixture lib out rc local_codes ci_codes
@@ -798,6 +798,60 @@ SH
 # fm_lint_codes_in <shellcheck-output>: the sorted, unique SC codes it reported.
 fm_lint_codes_in() {
   printf '%s\n' "$1" | sed -n 's/.*\(SC[0-9][0-9]*\).*/\1/p' | LC_ALL=C sort -u | tr '\n' ' '
+}
+
+# One ShellCheck process per root. Passing the whole canonical set in a
+# single invocation still follows in-set sources and is not the no-x posture.
+fm_lint_nox_one_root() {
+  local index=$1 path=$2 outdir=$3
+  shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
+}
+
+test_local_exclusion_list_covers_every_no_external_sources_code() {
+  if ! pinned_ready; then
+    fm_tool_skip shellcheck "local exclusion completeness" "$REQUIRED"
+    return
+  fi
+  local tmp files_file out unexpected code path found i batch
+  local -a files
+  tmp=$(fm_test_tmproot fm-lint-nox-complete)
+  files_file="$tmp/files"
+  CI=true "$LINT" --list-files > "$files_file"
+  [ -s "$files_file" ] || fail "CI --list-files returned no canonical lint roots"
+  files=()
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    files+=("$path")
+  done < "$files_file"
+  [ "${#files[@]}" -gt 0 ] || fail "CI --list-files returned no readable lint roots"
+  mkdir -p "$tmp/gcc"
+  i=0
+  batch=0
+  for path in "${files[@]}"; do
+    i=$((i + 1))
+    fm_lint_nox_one_root "$i" "$path" "$tmp/gcc" &
+    batch=$((batch + 1))
+    if [ "$batch" -eq 4 ]; then
+      wait
+      batch=0
+    fi
+  done
+  wait
+  found=$(find "$tmp/gcc" -type f | wc -l | tr -d '[:space:]')
+  [ "$found" = "${#files[@]}" ] \
+    || fail "completeness sweep linted $found roots, expected ${#files[@]}"
+  out=$(cat "$tmp/gcc"/* 2>/dev/null || true)
+  unexpected=
+  while IFS= read -r code; do
+    [ -n "$code" ] || continue
+    case "$code" in
+      SC1091|SC2034|SC2153|SC2329) ;;
+      *) unexpected="${unexpected}${unexpected:+ }$code" ;;
+    esac
+  done < <(printf '%s\n' "$out" | sed -n 's/.*\[\(SC[0-9][0-9]*\)\].*/\1/p' | LC_ALL=C sort -u)
+  [ -z "$unexpected" ] \
+    || fail "no-external-sources pass emitted codes outside the local exclusion list: $unexpected"
+  pass "local exclusion list covers every no-external-sources ShellCheck code"
 }
 
 test_pins_an_explicit_version() {
@@ -1023,7 +1077,7 @@ SH
 
 test_catches_a_real_lint_defect() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): lint-defect regression check"
+    fm_tool_skip shellcheck "lint-defect regression check" "$REQUIRED"
     return
   fi
   # A script with a genuine ShellCheck finding must make the one owner exit
@@ -1128,7 +1182,7 @@ test_rejects_direct_beads_cli_in_explicit_core_path() {
 
 test_ignores_ambient_shellcheck_opts() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): ambient options regression check"
+    fm_tool_skip shellcheck "ambient options regression check" "$REQUIRED"
     return
   fi
   local tmp bad out rc
@@ -1152,7 +1206,7 @@ SH
 
 test_clean_fixture_passes() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): clean fixture check"
+    fm_tool_skip shellcheck "clean fixture check" "$REQUIRED"
     return
   fi
   local tmp good rc
@@ -1174,7 +1228,7 @@ SH
 
 test_jobs_are_deterministic_and_complete() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): deterministic bounded jobs check"
+    fm_tool_skip shellcheck "deterministic bounded jobs check" "$REQUIRED"
     return
   fi
   local tmp good bad_a bad_b out_clean_1 out_clean_2 out_fail_1 out_fail_2 out_fail_2b
@@ -1328,7 +1382,7 @@ SH
 
 test_seeded_module_boundary_parity() {
   if ! pinned_ready; then
-    pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
+    fm_tool_skip shellcheck "seeded source-boundary parity check" "$REQUIRED"
     return
   fi
   local tmp rel adapter dispatcher dep owner test_root out rc
