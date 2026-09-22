@@ -296,18 +296,55 @@ SH
   printf '%s\n' "$dir"
 }
 
+# wait_for_exit <pid> [limit-ticks]: wait up to <limit> 0.1s ticks for <pid> to
+# exit and return its exit status, or terminate it and return 124 when the
+# budget runs out. It also records HOW the wait ended, for watcher_exit_detail:
+# WAIT_FOR_EXIT_TIMED_OUT (1 only when the budget ran out), WAIT_FOR_EXIT_STATUS
+# (the process's own exit status) and WAIT_FOR_EXIT_SECS (wall-clock seconds the
+# wait took), since 124 alone cannot say which of the two happened.
+WAIT_FOR_EXIT_TIMED_OUT=0
+WAIT_FOR_EXIT_STATUS=
+WAIT_FOR_EXIT_SECS=
 wait_for_exit() {
-  local pid=$1 limit=${2:-50} i=0
+  local pid=$1 limit=${2:-50} i=0 started=$SECONDS
+  WAIT_FOR_EXIT_TIMED_OUT=0
+  WAIT_FOR_EXIT_STATUS=
+  WAIT_FOR_EXIT_SECS=
   while [ "$i" -lt "$limit" ]; do
     if ! is_live_non_zombie "$pid"; then
       wait "$pid"
-      return "$?"
+      WAIT_FOR_EXIT_STATUS=$?
+      WAIT_FOR_EXIT_SECS=$((SECONDS - started))
+      return "$WAIT_FOR_EXIT_STATUS"
     fi
     sleep 0.1
     i=$((i + 1))
   done
+  WAIT_FOR_EXIT_TIMED_OUT=1
+  WAIT_FOR_EXIT_SECS=$((SECONDS - started))
   term_and_reap "$pid"
   return 124
+}
+
+# watcher_exit_detail <stderr-file>: why the last wait_for_exit did not end in a
+# clean exit - its budget ran out, or the process exited non-zero or on a signal -
+# with the process's own stderr, so a red names its cause instead of leaving a
+# timeout and a crash indistinguishable.
+watcher_exit_detail() {
+  local err=$1 detail
+  if [ "$WAIT_FOR_EXIT_TIMED_OUT" -eq 1 ]; then
+    detail="timed out: still running when its wait budget ran out after ${WAIT_FOR_EXIT_SECS}s, then terminated"
+  elif [ -n "$WAIT_FOR_EXIT_STATUS" ] && [ "$WAIT_FOR_EXIT_STATUS" -gt 128 ]; then
+    detail="killed by signal $((WAIT_FOR_EXIT_STATUS - 128)) (exit status $WAIT_FOR_EXIT_STATUS) after ${WAIT_FOR_EXIT_SECS}s"
+  else
+    detail="exited with status ${WAIT_FOR_EXIT_STATUS:-unknown} after ${WAIT_FOR_EXIT_SECS:-?}s"
+  fi
+  if [ -s "$err" ]; then
+    detail="$detail; watcher stderr: $(tr '\n' ' ' < "$err")"
+  else
+    detail="$detail; watcher stderr was empty"
+  fi
+  printf '%s' "$detail"
 }
 
 # term_until_exit <pid>: stop a process this shell started with SIGTERM and

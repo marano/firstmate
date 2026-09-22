@@ -1428,12 +1428,17 @@ test_turn_ended_oversized_churn_bound_surfaced() {
   pass "an oversized pane-churn bound surfaces the turn-end"
 }
 
+# The watcher's stderr is kept in the case dir, and a failed wait names its cause
+# (timed out, exited non-zero, or killed) with that stderr. Its one red, on
+# 2026-09-22, said only "did not surface", with the stderr discarded, so nothing
+# could tell a watcher that was too slow from one that crashed, and forced load
+# never reproduced it.
 test_turn_ended_invalid_churn_deadline_surfaced() {
-  local variant value dir state fakebin out drain_out capture_file window key marker pid
+  local variant value dir state fakebin out err drain_out capture_file window key marker pid
   for variant in empty leading-zero nonnumeric future overflow; do
     dir=$(make_case "turn-ended-invalid-churn-deadline-$variant")
     state="$dir/state"; fakebin="$dir/fakebin"
-    out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+    out="$dir/watch.out"; err="$dir/watch.err"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
     window="test:fm-codexdeadline"
     : > "$state/codexdeadline.turn-ended"
     printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexdeadline.meta"
@@ -1454,11 +1459,12 @@ test_turn_ended_invalid_churn_deadline_surfaced() {
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
     pid=$!
-    wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with a $variant churn deadline"
+    wait_for_exit "$pid" 100 \
+      || fail "watcher did not surface a turn-end with a $variant churn deadline: $(watcher_exit_detail "$err")"
     grep -F "signal: $state/codexdeadline.turn-ended" "$out" >/dev/null \
-      || fail "watcher terminated before printing the $variant-deadline turn-end"
+      || fail "watcher terminated before printing the $variant-deadline turn-end: $(watcher_exit_detail "$err")"
     FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
       || fail "drain after the $variant churn deadline failed"
     grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexdeadline.turn-ended" >/dev/null \
