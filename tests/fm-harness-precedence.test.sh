@@ -128,6 +128,7 @@ with_blind_ancestry() {  # <fakebin> [VAR=VAL ...]
 # the very process being named, and the probe then answers 'ps'.
 reported_comm() {  # <executable>
   local out
+  # shellcheck disable=SC2016 # $$ and $r must expand in the named process, not here.
   out=$("$1" -c 'r=$(ps -o comm= -p $$); printf "%s" "$r"' 2>/dev/null) || return 0
   printf '%s\n' "${out##*/}"
 }
@@ -136,28 +137,29 @@ reported_comm() {  # <executable>
 # ancestry walk sees as <name>, which is the whole evidence layer these cases
 # drive.
 #
-# The mechanism is chosen per platform and PROVEN here rather than assumed.
-# Copying the system bash is what CI has always exercised, and it is what this
-# tries first, but macOS binds a platform binary's code signature to its system
-# path: the copy is SIGKILLed the instant it execs, so every ancestry case
-# resolved '' on a Mac while passing on the Linux runner. A symlink keeps the
-# signed system path while exec still names the process after the link. If
-# neither names a process on this platform the suite says so and stops, because
-# a fixture that cannot name a process would make every ancestry case below
-# vacuous.
+# A symlink is tried first because it names the process after the link while the
+# program executed stays the system bash at its own path. Copying that binary
+# instead - what this used to do unconditionally - made every ancestry case
+# resolve '' on macOS, which binds a platform binary's code signature to its
+# system path and SIGKILLs the copy the instant it execs; the Linux runner
+# passed the same commit. The copy remains the fallback for a platform that
+# reports a symlinked process under the target's name instead of the link's.
+# Whichever mechanism is used is PROVEN here against ps, the source
+# fm-harness.sh itself reads, because a fixture that cannot name a process would
+# make every ancestry case below vacuous rather than red.
 named_bin() {  # <dir> <name>
   local dir=$1 name=$2 real candidate
   real=$(command -v bash) || fail "these cases need bash to stand in for a harness process"
   mkdir -p "$dir"
   candidate="$dir/$name"
   rm -f "$candidate"
-  cp "$real" "$candidate" 2>/dev/null || :
+  ln -s "$real" "$candidate" 2>/dev/null || :
   if [ "$(reported_comm "$candidate")" != "$name" ]; then
     rm -f "$candidate"
-    ln -s "$real" "$candidate" \
-      || fail "could not build a process named $name: neither a copy nor a symlink of $real"
+    cp "$real" "$candidate" \
+      || fail "could not build a process named $name: neither a symlink nor a copy of $real"
     [ "$(reported_comm "$candidate")" = "$name" ] \
-      || fail "this platform reports neither a copy nor a symlink of $real as '$name', so no ancestry case here can prove anything"
+      || fail "this platform reports neither a symlink nor a copy of $real as '$name', so no ancestry case here can prove anything"
   fi
   printf '%s\n' "$candidate"
 }
