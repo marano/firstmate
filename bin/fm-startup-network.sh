@@ -43,7 +43,9 @@
 #     it, so it takes the same acquisition lease a new session must hold before
 #     replacing a dead owner, re-checks the captured owner under that lease, and
 #     holds it through the bounded mutating run. A takeover stays read-only until
-#     that run settles, so old and new owners can never sweep concurrently.
+#     that run settles, so old and new owners can never sweep concurrently. The
+#     wait for that lease is itself bounded, and a refused lease downgrades to
+#     the read-only probe with a NETWORK_CHECKS: line naming what was skipped.
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
 #          Launch the detached worker and return immediately. Single-flight: a
@@ -103,10 +105,17 @@
 #   .startup-network.lock     serializes publication, harvest acknowledgement,
 #                             and the wake decision.
 #
-# The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
-# aggregate deadline covering both the inactive-outcome scan and network sweeps.
-# Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
-# silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
+# BOUNDS. FM_STARTUP_NETWORK_TIMEOUT (default 120s) is one aggregate deadline
+# covering the inactive-outcome scan and the network sweeps, and hitting it is
+# reported as an actionable NETWORK_CHECKS: line rather than as silence. It
+# bounds what fm_run_timed runs and NOTHING ELSE, which for a long time was the
+# only deadline here - so the lease wait before the sweeps, the publication lock
+# around them, and the delivery wait after them were unbounded in a process that
+# is detached from its session by design. The worker therefore carries two
+# deadlines of its own, documented at arm_deadlines: it stops when the session
+# that asked for the work is gone and the sweeps have not started, and it stops
+# unconditionally at lifetime_budget. bin/fm-timeout-lib.sh remains the single
+# owner of bounded execution, and bin/fm-wake-lib.sh of bounded lock acquisition.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,6 +181,24 @@ delivery_budget() {
   local budget=${FM_SESSION_START_TIMEOUT:-120}
   case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
   printf '%s' "$budget"
+}
+
+# The lease this stage waits on is taken by bin/fm-lock.sh for every session-lock
+# acquisition in this home, and released by its holder's own bounded work, so one
+# stage budget is the longest a legitimate holder can keep it.
+lease_budget() { stage_budget; }
+
+# THE BOUND THIS STAGE DID NOT HAVE, covering the whole worker process rather
+# than one step inside it. FM_STARTUP_NETWORK_TIMEOUT bounds what fm_run_timed
+# runs and nothing else, so the lease wait before the sweeps, the publication
+# lock around them, and the delivery wait after them were all outside every
+# deadline this script had. Its three intervals, each at its own worst case: the
+# lease, the sweeps, the delivery wait, plus one further stage budget of grace
+# for publication and the steps between them. Generous on purpose - a bound that
+# can cut legitimate work would be worse than the orphan it replaces, and the
+# session deadline below is what ends an ordinary abandoned worker promptly.
+lifetime_budget() {
+  printf '%s' "$(( $(stage_budget) * 3 + $(delivery_budget) ))"
 }
 
 # Is a `running` record a stage that is genuinely still in flight? Two
@@ -295,6 +322,121 @@ EOF
 
 # --- run ---------------------------------------------------------------------
 
+# WHY A WORKER NEEDS ITS OWN DEADLINES. This stage detaches its worker three
+# ways on purpose - its own process group, stdio on /dev/null, nohup - so that a
+# truncated digest cannot take it down with it. Every one of those also removes
+# something that would otherwise have stopped it, and the launching session is
+# reparented away the moment it exits, so nothing upstream is left to notice the
+# worker at all. Nothing in the original design then gave it a reason to STOP:
+# its only deadline covered the sweeps, while the lease it waits for first is a
+# lock any other process in this home can hold. A worker that met a held lease
+# waited on it through fm_lock_acquire_wait, which retries every 100ms forever.
+# Measured consequence: one worker survived 4 days 20 hours carrying the
+# --lock-pid and --generation of a session that had been gone for days, spinning
+# that retry at roughly a sixth of a core on a contended ten-core machine, while
+# `ps` reported it `S` throughout - a process that sleeps 100ms per iteration is
+# sleeping in almost every sample, so the snapshot that called it idle was
+# reading the sleep, not the load.
+#
+# Two deadlines, because they answer different questions:
+#   - SESSION: the session that asked for this work is gone and the sweeps have
+#     not started, so nothing is waiting for this result and no one is left
+#     whose authority it would run under. This is the one that ends an ordinary
+#     abandoned worker, within a second of the session going away.
+#   - LIFETIME: a hard cap on the process however healthy it believes itself to
+#     be, so a blocking step nobody has thought of still cannot become days.
+#     It is sized so it does not land mid-sweep: the lease wait and the sweeps
+#     are bounded at one stage budget each and lifetime_budget is three of them
+#     plus a delivery budget, so the sweeps finish with a stage budget and a
+#     delivery budget to spare. The one step ahead of them still unbounded is
+#     the publication lock, which only this stage's own critical sections take
+#     and only for the length of a status read or write. That margin matters
+#     because the sweeps run under fm_run_timed in a process group of their own,
+#     which a signal aimed at this worker's group would not reach.
+# Once the sweeps HAVE started they are already bounded by fm_run_timed and are
+# left to finish, which preserves exactly the property lock_unchanged documents
+# below: the sweeps are idempotent, and finishing work no one else has claimed
+# beats abandoning it half-done. The session deadline therefore governs only the
+# blocking steps BEFORE the run - which is precisely where the orphan hung.
+WATCHDOG_PID=
+# Script scope, not cmd_run's: the EXIT trap below fires after that frame is
+# gone, and under `set -u` a local read there is an error rather than a no-op.
+SWEEP_MARKER=
+
+# A pid that is not a pid is not a dead session. `kill -0 ""` fails exactly like
+# `kill -0 <dead pid>`, so without this check a manual run with no recorded lock
+# owner would read its own missing session as a session that had just died.
+session_pid_valid() {  # <pid>
+  case "${1:-}" in ''|*[!0-9]*|0) return 1 ;; esac
+  return 0
+}
+
+session_alive() {  # <pid>
+  session_pid_valid "${1:-}" || return 1
+  kill -0 "$1" 2>/dev/null
+}
+
+# Arm both deadlines in one watchdog. <sweep-marker> is a file this worker fills
+# when the bounded sweeps begin; an empty or missing marker means the session
+# deadline still applies. A marker that could not be created disables the
+# session deadline rather than enabling it, because failing toward the hard cap
+# can only end a worker late, while failing the other way could end one mid-sweep.
+arm_deadlines() {  # <session-pid> <sweep-marker>
+  local session_pid=$1 marker=$2 target=$$ pgid deadline monitor_was_on=0
+  deadline=$(( $(now) + $(lifetime_budget) ))
+  # No identifiable session means no session deadline - only the lifetime cap.
+  # A session pid that is identifiable but already dead is a real dead session
+  # and is left in place, so that deadline fires on the watchdog's first pass.
+  session_pid_valid "$session_pid" || session_pid=
+  # Signal the whole group only when this worker LEADS it, which is true for the
+  # detached worker cmd_start launches under monitor mode and false for a manual
+  # foreground run - where the group is the operator's shell, and signalling it
+  # would kill the terminal that asked for the run.
+  pgid=$(ps -o pgid= -p "$target" 2>/dev/null | tr -d ' ')
+  [ "$pgid" = "$target" ] || pgid=
+  # The watchdog takes its OWN process group, so terminating the worker's group
+  # cannot take the watchdog down before it escalates to KILL.
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  (
+    set +m
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      # The watchdog can never outlive the worker it guards: a fix for orphaned
+      # processes that leaves its own timer running would be the same defect.
+      kill -0 "$target" 2>/dev/null || exit 0
+      if [ -n "$session_pid" ] && [ -n "$marker" ] && [ ! -s "$marker" ] \
+        && ! session_alive "$session_pid"; then
+        break
+      fi
+      sleep 1
+    done
+    kill -0 "$target" 2>/dev/null || exit 0
+    if [ -n "$pgid" ]; then
+      kill -TERM -- "-$target" 2>/dev/null || kill -TERM "$target" 2>/dev/null || true
+      sleep 2
+      kill -KILL -- "-$target" 2>/dev/null || true
+    else
+      kill -TERM "$target" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$target" 2>/dev/null || true
+    fi
+  ) &
+  WATCHDOG_PID=$!
+  # Monitor mode is what gives the watchdog its own process group, and it also
+  # makes bash announce the job when disarm_deadlines terminates it - a
+  # "Terminated: 15" plus the whole subshell body, on the stderr of every manual
+  # run. Dropping it from the job table keeps the process group and loses the
+  # announcement; the pid stays perfectly killable.
+  disown "$WATCHDOG_PID" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+}
+
+disarm_deadlines() {
+  case "${WATCHDOG_PID:-}" in ''|*[!0-9]*) return 0 ;; esac
+  kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=
+}
+
 # Re-verify mutation authority immediately before the mutating sweeps: "my
 # session held the lock a moment ago" is not enough for a worker that outlives
 # the command which launched it.
@@ -314,6 +456,29 @@ lock_unchanged() {  # <expected-pid>
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
   [ "$current" = "$expected" ]
+}
+
+# Take the acquisition lease under a bound, IN THIS PROCESS. Neither library
+# helper fits here. fm_lock_acquire_wait is unbounded, which is what produced the
+# orphan. fm_lock_acquire_wait_bounded reaches its bound by running a handoff
+# helper under fm_run_timed, and fm_run_timed gives that helper its own process
+# group so a bound can reap the whole thing - which means a worker killed by its
+# OWN deadline leaves that helper behind, spinning the same 100ms retry with its
+# parent reparented to init. Verified by watching it happen: killing the worker's
+# group left `bash -c ... _fm_lock_acquire_wait_handoff` at ppid 1. Polling
+# fm-wake-lib.sh's own try primitive keeps every child this wait creates inside
+# the worker's process group, where the deadline can reach it, and one second
+# between attempts is the right cadence for a lock whose holder is doing its own
+# bounded work - a tenth of a second buys nothing and is most of what the orphan
+# was burning.
+lease_acquire() {
+  local deadline
+  deadline=$(( $(now) + $(lease_budget) ))
+  while ! fm_lock_try_acquire "$STATE/.lock.acquire"; do
+    [ "$(now)" -lt "$deadline" ] || return 1
+    sleep 1
+  done
+  return 0
 }
 
 # Bootstrap owns the meaning of its output protocol: silence is success,
@@ -420,11 +585,24 @@ EOF
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 lease_refused=0 internal=0 lease_held=0 timings stage_started session_pid
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
   phases=probe
+  # Armed before the first blocking step rather than around the sweeps, because
+  # every step from here on can block and the first of them is a lock.
+  SWEEP_MARKER=$(mktemp "${TMPDIR:-/tmp}/fm-startup-network-sweeping.XXXXXX" 2>/dev/null) || SWEEP_MARKER=
+  trap 'disarm_deadlines; [ -z "$SWEEP_MARKER" ] || rm -f "$SWEEP_MARKER" 2>/dev/null' EXIT
+  # The session deadline belongs to the DETACHED worker alone. A manual
+  # foreground `run` is attached to the terminal that asked for it, has no
+  # session to outlive, and does not even keep this lock_pid - it re-reads the
+  # lock below. A generation is what cmd_start hands the worker it detaches, so
+  # its presence is exactly the question "does this process outlive its
+  # launcher?". Both paths still take the lifetime cap.
+  session_pid=
+  [ -z "$generation" ] || session_pid=$lock_pid
+  arm_deadlines "$session_pid" "$SWEEP_MARKER"
   if [ -n "$generation" ]; then
     fm_lock_acquire_wait "$PUBLISH_LOCK"
     if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
@@ -477,14 +655,28 @@ EOF
   stage_started=$(fm_timing_now_ms)
   rc=0
   if [ "$sweep_locked" -eq 1 ]; then
-    fm_lock_acquire_wait "$STATE/.lock.acquire"
-    lease_held=1
-    if ! lock_unchanged "$lock_pid"; then
+    # Bounded, because this is the wait that produced the orphan: the lease is
+    # held by whichever process is acquiring this home's session lock, and an
+    # unbounded wait on it is a wait on another process's whole lifetime. A
+    # refusal downgrades to the read-only probe and says so, which is the same
+    # answer a changed lock gets and is always better than an invisible spin.
+    if lease_acquire; then
+      lease_held=1
+      if ! lock_unchanged "$lock_pid"; then
+        sweep_locked=0
+        phases=probe
+        downgraded=1
+      fi
+    else
       sweep_locked=0
       phases=probe
-      downgraded=1
+      lease_refused=1
     fi
   fi
+  # From here the sweeps own their own deadline, so the session deadline stands
+  # down and only the lifetime cap remains. Recorded as content rather than mere
+  # existence because mktemp created this file already.
+  [ -z "$SWEEP_MARKER" ] || printf 'sweeping\n' > "$SWEEP_MARKER" 2>/dev/null || true
   # One aggregate deadline covers both deferred operations. The inactive scan
   # retains its own tighter per-scan bound inside this outer bound. Findings
   # need no report translation: the scan writes its ordinary durable
@@ -511,6 +703,10 @@ EOF
   if [ "$downgraded" -eq 1 ]; then
     printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
+  if [ "$lease_refused" -eq 1 ]; then
+    printf 'NETWORK_CHECKS: another process still held this home'"'"'s lock-acquisition lease after %ss, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; rerun %s/bin/fm-startup-network.sh run --locked 1 once it is free\n' \
+      "$(lease_budget)" "$FM_ROOT" >> "$out"
+  fi
   case "$rc" in
     0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;
     124)
@@ -526,6 +722,7 @@ EOF
   esac
   rm -f "$out" 2>/dev/null || true
   [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
+  disarm_deadlines
   return 0
 }
 
