@@ -57,6 +57,10 @@ A sampler reading `fm-build-lock.sh --status` every 2 seconds for 450 samples ca
 A run wrapped as `mutex ./bin/fm-test-run.sh tests/fm-awaiting-landing.test.sh tests/fm-watch-triage.test.sh` was observed holding one slot for 834 s as a single hold, while a correctly scoped `./tests/fm-awaiting-landing.test.sh` hold in the same window reached 8 s.
 Every sample of that window read `1 of 2 build slots held, 0 waiting`: nothing was starved, because the second slot absorbed it.
 
+The two shapes are told apart in `--status` by what follows `running:`.
+A per-script hold prints the runner's own label, `bin/fm-test-run.sh <one script>`, and moves to the next script as the run proceeds.
+A wrapped whole-run hold prints the caller's rendered command instead, so it keeps a `./` prefix or several script paths and does not change for the length of the run.
+
 ## A second slot masked the starvation and did not remove it
 
 A competing waiter was timed against a synthetic runner taking one hold per unit, six units of three seconds, in a private lock root, with the waiter arriving four seconds in.
