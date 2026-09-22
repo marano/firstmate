@@ -1322,6 +1322,29 @@ clear_write_tracking() {  # <window-key>
 # costs a late notice, while guessing one would hold a real wedge off the ladder
 # indefinitely. An adapter earns this detector by earning an idle verdict, not by
 # adding a special case here.
+#
+# THE RUN, NOT ONE HOLD. A holder record is one slot hold, and one run can take
+# many: bin/fm-test-run.sh takes the lock once per script, and a worker's own
+# `for ...; do mutex ...; done` does the same under the one-mutex-per-run rule.
+# Between two holds - and for as long as the next one queues behind other lanes
+# for a slot - such a run holds nothing, so reading one holder's disappearance as
+# "the run finished" reported live per-script runs as finished on two lanes
+# within an hour of this detector shipping. Each sighting therefore also records
+# the RUN that took the hold: the holder's ancestors inside the holder's own
+# process group (task_shell_run_record), and the run is over only once none of
+# them is alive under the identity it was recorded with. A per-script runner, a
+# worker's loop shell and a harness's per-command wrapper all sit in that group,
+# and all end when the run ends, so the genuine finished run still surfaces at
+# once. Ancestors, not the whole group: a stray background job left in the group
+# is not the run, and must not hold a finished result off the supervisor.
+# The group is trusted only when it is NOT its terminal's foreground group. A
+# harness that runs commands inside its own agent's process group puts the agent
+# itself among those ancestors, alive for as long as the lane is, and in a pane
+# that group is the terminal's foreground one; recording nothing there keeps the
+# single-hold reading below rather than holding a finished run forever. An agent
+# that runs its commands in its own group with no controlling terminal at all is
+# the case this cannot tell apart: its finished run is held on the long
+# FM_PAUSE_RESURFACE_SECS recheck instead of surfacing at once.
 
 # The machine's build slots, read ONCE per poll and shared by every window of
 # that poll (crew_task_shell_running's snapshot argument owns why). Empty means
@@ -1351,7 +1374,54 @@ task_shell_holders_read() {
 clear_task_shell_tracking() {  # <window-key>
   local key=$1
   rm -f "$STATE/.taskshell-since-$key" "$STATE/.taskshell-resurfaced-$key" \
-    "$STATE/.taskshell-holder-$key"
+    "$STATE/.taskshell-holder-$key" "$STATE/.taskshell-run-$key"
+}
+
+# Record the run behind <holder-detail> (crew_task_shell_running's
+# `pid <pid>, ...`) in <run-file>: a `holder<TAB><pid>` line, then one
+# `<pid><TAB><identity>` line per ancestor of the holder inside the holder's own
+# process group, nearest first. Walked only when the holder changes, so a run
+# that keeps one hold costs this nothing after its first sighting. Records no
+# ancestors when that group is its terminal's foreground group (see THE RUN, NOT
+# ONE HOLD above), or when any read fails, and the single-hold reading applies.
+task_shell_run_record() {  # <run-file> <holder-detail>
+  local file=$1 detail=$2 hpid pgid tpgid chain p identity tmp
+  hpid=${detail#pid }
+  hpid=${hpid%%,*}
+  case "$hpid" in ''|*[!0-9]*) rm -f "$file"; return 0 ;; esac
+  [ "$(sed -n '1p' "$file" 2>/dev/null)" = "holder"$'\t'"$hpid" ] && return 0
+  tmp="$file.$$.tmp"
+  printf 'holder\t%s\n' "$hpid" > "$tmp" || { rm -f "$tmp"; return 0; }
+  read -r pgid tpgid <<EOF
+$(ps -o pgid= -o tpgid= -p "$hpid" 2>/dev/null)
+EOF
+  case "$pgid" in ''|*[!0-9]*|0|1) pgid= ;; esac
+  if [ -n "$pgid" ] && [ "$pgid" != "$tpgid" ]; then
+    chain=$(ps -Ao pid=,ppid=,pgid= 2>/dev/null | awk -v start="$hpid" -v group="$pgid" '
+      { parent[$1] = $2; grp[$1] = $3 }
+      END {
+        p = parent[start]; n = 0
+        while (p != "" && p + 0 > 1 && grp[p] == group && n < 64) { print p; p = parent[p]; n++ }
+      }')
+    for p in $chain; do
+      identity=$(fm_pid_identity "$p" 2>/dev/null) || break
+      printf '%s\t%s\n' "$p" "$identity" >> "$tmp"
+    done
+  fi
+  mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+# 0 while any process recorded in <run-file> is still alive under the identity it
+# was recorded with, so a reused pid never keeps a finished run open.
+task_shell_run_alive() {  # <run-file>
+  local file=$1 pid identity
+  [ -f "$file" ] || return 1
+  while IFS=$'\t' read -r pid identity; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$identity" ] || continue
+    [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$identity" ] && return 0
+  done < "$file"
+  return 1
 }
 
 # The three-way decision above. 0 when this window was fully handled and the
@@ -1380,6 +1450,7 @@ task_shell_triage() {  # <window> <task> <busy-state> -> 0 if handled
     # instead of granting the lane another full threshold of quiet first.
     [ -e "$STATE/.taskshell-since-$key" ] || date +%s > "$STATE/.taskshell-since-$key"
     printf '%s' "$holder" > "$STATE/.taskshell-holder-$key"
+    task_shell_run_record "$STATE/.taskshell-run-$key" "$holder"
     age=$(age_of "$STATE/.taskshell-since-$key")
     resurface_absorbed "$win" "$STATE/.taskshell-resurfaced-$key" "$age" \
       "stale: $win (the worker's turn ended ${age}s ago while a run of its own is still going - $holder; held off the wedge ladder, not wedged, and not to be relaunched while that run is live; confirm the run is real progress)"
@@ -1387,6 +1458,16 @@ task_shell_triage() {  # <window> <task> <busy-state> -> 0 if handled
     return 0
   fi
   prev=$(cat "$STATE/.taskshell-holder-$key" 2>/dev/null || true)
+  if [ -n "$prev" ] && task_shell_run_alive "$STATE/.taskshell-run-$key"; then
+    # The hold is gone but the run that took it is not: a per-script runner or a
+    # worker's loop between two holds, or queued for its next slot. Still the
+    # same hold as above, on the same chain and cadence; nothing has finished.
+    age=$(age_of "$STATE/.taskshell-since-$key")
+    resurface_absorbed "$win" "$STATE/.taskshell-resurfaced-$key" "$age" \
+      "stale: $win (the worker's turn ended ${age}s ago while a run of its own is still going - between build-slot holds, last $prev; held off the wedge ladder, not wedged, and not to be relaunched while that run is live; confirm the run is real progress)"
+    triage_log "absorbed stale (turn ended with a task-owned run between build-slot holds, ${age}s): $win"
+    return 0
+  fi
   if [ -n "$prev" ]; then
     # It was running while the turn was over, and now it is not. This is the
     # defect itself, caught at the only moment it can be acted on cheaply: the
