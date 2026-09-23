@@ -150,6 +150,24 @@ fm_nm_branch_sync_state() {  # <toon-output>
   fm_nm_strip_quotes "$s"
 }
 
+# branch_sync.next_action.code from captured `axi status` TOON $1: the `code:`
+# scalar inside the `next_action:` block nested under the top-level
+# `branch_sync:` block, each block bounded by its own indentation so no other
+# sub-block's key can answer. Empty when either block or the key is absent.
+fm_nm_branch_sync_next_code() {  # <toon-output>
+  local s
+  s=$(printf '%s\n' "$1" | awk '
+    function indent(line) { match(line, /[^ \t]/); return RSTART }
+    /^[[:space:]]*$/ { next }
+    insync && indent($0) <= sind { insync = 0; innext = 0 }
+    innext && indent($0) <= nind { innext = 0 }
+    /^[[:space:]]*branch_sync:[[:space:]]*$/ { insync = 1; sind = indent($0); next }
+    insync && !innext && /^[[:space:]]+next_action:[[:space:]]*$/ { innext = 1; nind = indent($0); next }
+    innext && /^[[:space:]]+code:/ { sub(/^[[:space:]]+code:[[:space:]]*/, ""); print; exit }
+  ')
+  fm_nm_strip_quotes "$s"
+}
+
 # 0 if the run in captured `axi status` TOON $1 is still in flight: no
 # terminal outcome and no terminal status.
 fm_nm_run_is_active() {  # <toon-output>
@@ -166,9 +184,10 @@ fm_nm_run_is_active() {  # <toon-output>
 # head equality must not be required - the pipeline's lane head is routinely
 # not a git object in the task worktree (rebase and fix commits that were
 # never pushed back), so the head rule rejects exactly the run that is most
-# current. The exemption never applies to a terminal run: a terminal run has
-# released the branch, and binding one by branch name alone is the historical
-# reused-branch misattribution the head rule exists to prevent.
+# current. The exemption never applies to a terminal run: binding one by
+# branch name alone is the historical reused-branch misattribution the head
+# rule exists to prevent. A terminal run can still hold custody, though, and
+# bin/fm-crew-state.sh reports that fact separately from attribution.
 fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
   fm_nm_run_is_active "$1"

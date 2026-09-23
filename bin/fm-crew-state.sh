@@ -83,6 +83,13 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#   4b. Branch custody, orthogonal to 2-4: when the same `axi status` answer
+#      names this crew's branch with branch_sync.state=pipeline_owned, every
+#      line after that read carries a trailing custody segment naming the
+#      owning run, its status, and next_action.code - most importantly when
+#      that run is terminal, since a failed run can still hold the branch.
+#      No extra call, and silence whenever custody is not pipeline_owned or
+#      the answer is absent (pipeline_custody_note owns the rule).
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. The one exception is an agent firstmate
@@ -138,11 +145,15 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+# Pipeline branch custody segment (pipeline_custody_note below); every emit
+# after the one `axi status` read carries it, whatever state the line reports.
+CUSTODY_NOTE=""
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -n "$CUSTODY_NOTE" ] && line="$line${SEP}$CUSTODY_NOTE"
   printf '%s\n' "$line"
   exit 0
 }
@@ -642,6 +653,33 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# Pipeline branch custody from the SAME `axi status` answer, independent of
+# run attribution: while branch_sync.state=pipeline_owned the pipeline refuses
+# any local rebase, commit, or fresh run on this branch until custody returns,
+# and that stays true after the owning run went terminal. A failed or
+# cancelled run reads as "over, nothing holding the branch", and a finished
+# lane whose PR shows conflicts invites exactly the rebase the pipeline will
+# refuse, so the terminal case is named as custody never returned. The owning
+# run need not be the one attributed above - it can be a later failed run
+# whose head this copy never fetched, so the line otherwise falls through to
+# the status log. Prints nothing unless the branch is pipeline-owned, so no
+# pipeline, no run on this branch, or an unreadable answer stays silent.
+pipeline_custody_note() {
+  local run_id word code note
+  [ "$(fm_nm_branch_sync_state "$RUN_OUT")" = pipeline_owned ] || return 0
+  run_id=$(strip_quotes "$(nm_field id)")
+  code=$(fm_nm_branch_sync_next_code "$RUN_OUT")
+  if fm_nm_run_is_active "$RUN_OUT"; then
+    word=$(strip_quotes "$(nm_field status)")
+    note="pipeline owns branch: run${run_id:+ $run_id}${word:+ $word}"
+  else
+    word=$(strip_quotes "$(nm_field outcome)")
+    [ -n "$word" ] || word=$(strip_quotes "$(nm_field status)")
+    note="pipeline still owns branch: run${run_id:+ $run_id} ${word:-ended} without returning custody"
+  fi
+  printf '%s%s' "$note" "${code:+ (next_action: $code)}"
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail (including a
@@ -697,6 +735,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
       fi
     fi
+    [ "$run_branch" = "$CREW_BRANCH" ] && CUSTODY_NOTE=$(pipeline_custody_note)
   fi
 fi
 
