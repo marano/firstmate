@@ -37,12 +37,93 @@ unset FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
 # Ceiling lines go only where a case points them.
 unset FM_TASK_STATUS
 
-# Count the lock's own artifacts in a root. Zero means the lock was never taken
-# or was fully released, including the owner directory the lockdir mutex links.
-lock_artifacts() {  # <root>
-  local n
-  n=$(find "$1" -maxdepth 1 -name 'fm-build-lock*' 2>/dev/null | wc -l)
-  printf '%s\n' "$((n))"
+# Name every lock artifact left in a root, one line each, with its owner and
+# what it holds. Empty means the lock was never taken or was fully released,
+# including the owner directory the lockdir mutex links. A count said only HOW
+# MANY were left ("expected 0, got 1") and a bare name only WHICH, so a red on
+# CI taught nothing about who left it or whether they were still running; this
+# says all three, from the failing run's own log.
+#
+# The optional second argument leaves out the waiting line's own stranded owner
+# directories; the slot cases below say why that one name, and only it, is.
+lock_residue() {  # <root> [ignore-queue-lock-owners]
+  local lockroot=$1 ignore=${2:-} entry name
+  for entry in "$lockroot"/fm-build-lock*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name=${entry##*/}
+    if [ -n "$ignore" ]; then
+      case "$name" in
+        fm-build-lock.queue.lock.owner.*) continue ;;
+      esac
+    fi
+    printf '%s: %s\n' "$name" "$(residue_describe "$entry")"
+  done
+}
+
+# Whose an artifact is, judged from ps rather than from a signal's exit status.
+residue_owner() {  # <pid-or-empty>
+  local pid=$1 cmd
+  case "$pid" in
+    ''|*[!0-9]*) printf 'no owner recorded'; return 0 ;;
+  esac
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null | head -1)
+  if [ -n "$cmd" ]; then
+    printf 'owned by pid %s, still running: %s' "$pid" "$cmd"
+  else
+    printf 'owned by pid %s, which is gone' "$pid"
+  fi
+}
+
+# One artifact: a lock link and the owner it points at, a directory and every
+# entry in it (a waiting-line ticket names its waiter), or a record file and the
+# pid on its first line.
+residue_describe() {  # <path>
+  local path=$1 target pid inner iname parts='' part
+  if [ -L "$path" ]; then
+    target=$(readlink "$path" 2>/dev/null || true)
+    if [ -d "$path" ]; then
+      pid=$(cat "$path/pid" 2>/dev/null || true)
+      printf 'link to %s, %s' "${target##*/}" "$(residue_owner "$pid")"
+    else
+      printf 'dangling link to %s' "${target##*/}"
+    fi
+    return 0
+  fi
+  if [ -d "$path" ]; then
+    for inner in "$path"/* "$path"/.[!.]*; do
+      [ -e "$inner" ] || [ -L "$inner" ] || continue
+      iname=${inner##*/}
+      if [ -L "$inner" ]; then
+        target=$(readlink "$inner" 2>/dev/null || true)
+        part="$iname -> ${target##*/}"
+      else
+        case "$iname" in
+          t.*) part="$iname $(residue_owner "$(cat "$inner" 2>/dev/null || true)")" ;;
+          tmp.*) part="$iname $(residue_owner "${iname#tmp.}")" ;;
+          *) part="$iname=$(head -1 "$inner" 2>/dev/null || true)" ;;
+        esac
+      fi
+      parts="${parts:+$parts; }$part"
+    done
+    pid=$(cat "$path/pid" 2>/dev/null || true)
+    if [ -n "$pid" ]; then
+      printf 'directory %s, holding [%s]' "$(residue_owner "$pid")" "$parts"
+    else
+      printf 'directory holding [%s]' "${parts:-nothing}"
+    fi
+    return 0
+  fi
+  pid=$(head -1 "$path" 2>/dev/null || true)
+  printf 'file %s' "$(residue_owner "$pid")"
+}
+
+# The residue assertion every case uses. On failure it names each leftover
+# artifact on its own line, so the log of the failing run is the diagnosis.
+assert_no_lock_residue() {  # <root> <message> [ignore-queue-lock-owners]
+  local residue
+  residue=$(lock_residue "$1" "${3:-}")
+  [ -z "$residue" ] \
+    || fail "$2; left behind in the lock root:"$'\n'"$(printf '%s\n' "$residue" | sed 's/^/  /')"
 }
 
 # Wait until <path> exists, bounded by iterations rather than a wall-clock
@@ -90,7 +171,7 @@ await_grep() {  # <pattern> <file> [max-iterations]
 # suite's closing "no lock behind" assertion cover the queue too.
 settle_queue() {
   "$SCRIPT" true >/dev/null 2>&1 || fail "the lock was unusable after the preceding case"
-  assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" \
+  assert_no_lock_residue "$LOCK_ROOT" \
     "the waiting line was left behind after the preceding case"
 }
 
@@ -136,7 +217,7 @@ case "$RECORDED" in
   'A in|A out|B in|B out|'|'B in|B out|A in|A out|') : ;;
   *) fail "concurrent invocations overlapped: $RECORDED" ;;
 esac
-assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "the lock must be fully released afterwards"
+assert_no_lock_residue "$LOCK_ROOT" "the lock must be fully released afterwards"
 pass "two concurrent invocations never overlap, and the lock is left clean"
 
 # --- the wait is observable -------------------------------------------------
@@ -192,7 +273,7 @@ await_pid_exit "$WAITER" || fail "the next waiter never acquired after the holde
 wait "$WAITER" 2>/dev/null || true
 assert_equals 'acquired-after-kill' "$(cat "$WAITER_OUT" 2>/dev/null || true)" \
   "the next waiter must acquire after the wrapped command was SIGKILLed"
-assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "a SIGKILLed command must still leave the lock released"
+assert_no_lock_residue "$LOCK_ROOT" "a SIGKILLed command must still leave the lock released"
 pass "the lock is released when the wrapped command is SIGKILLed, and the next waiter gets in"
 
 # --- stale-holder recovery --------------------------------------------------
@@ -209,7 +290,7 @@ sleep 0.3
 kill -9 "$STALE_WRAPPER" 2>/dev/null || true
 wait "$STALE_WRAPPER" 2>/dev/null || true
 pkill -P "$STALE_WRAPPER" 2>/dev/null || true
-[ "$(lock_artifacts "$LOCK_ROOT")" -gt 0 ] || fail "the SIGKILLed wrapper should have left a lock record behind"
+[ -n "$(lock_residue "$LOCK_ROOT")" ] || fail "the SIGKILLed wrapper should have left a lock record behind"
 
 RECLAIM_OUT="$TMP_ROOT/reclaimed.out"
 ( "$SCRIPT" printf 'reclaimed\n' > "$RECLAIM_OUT" 2>/dev/null ) &
@@ -218,8 +299,59 @@ await_pid_exit "$RECLAIMER" || fail "a lock left by a dead holder blocked the ne
 wait "$RECLAIMER" 2>/dev/null || true
 assert_equals 'reclaimed' "$(cat "$RECLAIM_OUT" 2>/dev/null || true)" \
   "a lock whose holder died must be reclaimed"
-assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "reclaiming must leave the lock clean"
+assert_no_lock_residue "$LOCK_ROOT" "reclaiming must leave the lock clean"
 pass "a lock left by a dead holder is reclaimed instead of blocking forever"
+
+# --- a residue red names each artifact and its owner ------------------------
+# The release assertions used to report a count ("expected 0, got 1") or a bare
+# name ('fm-build-lock.queue '), and each recurrence on CI's stock-Bash lane
+# cost a cycle while teaching nothing about who had left what. So the assertion
+# itself is under test here: residue is staged with the real script - a live
+# holder, and a waiter SIGKILLed in line so its ticket outlives it - and the
+# failure message must name every artifact, which pid owns it, and whether that
+# pid is still running.
+# Mutants: have lock_residue print a count again; drop the owner from
+# residue_owner's line; drop the per-ticket owner from residue_describe's
+# directory listing. Each leaves an assertion below red.
+
+NAMED_MARK="$TMP_ROOT/named-holding"
+NAMED_RELEASE="$TMP_ROOT/named-release"
+NAMED_ERR="$TMP_ROOT/named-waiter.err"
+: > "$NAMED_ERR"
+"$SCRIPT" sh -c "touch '$NAMED_MARK'; while [ ! -e '$NAMED_RELEASE' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
+NAMED_HOLDER=$!
+await_path "$NAMED_MARK" || fail "the named-residue holder never took the lock"
+"$SCRIPT" true >/dev/null 2>"$NAMED_ERR" &
+NAMED_WAITER=$!
+await_grep 'waiting for the machine-wide build lock' "$NAMED_ERR" \
+  || fail "the named-residue waiter never got into line"
+kill -9 "$NAMED_WAITER" 2>/dev/null || true
+wait "$NAMED_WAITER" 2>/dev/null || true
+
+NAMED_MSG=$( (assert_no_lock_residue "$LOCK_ROOT" "staged residue") 2>&1 )
+case "$NAMED_MSG" in
+  'not ok - staged residue; left behind in the lock root:'*) : ;;
+  *) fail "a residue red must lead with its own message: $NAMED_MSG" ;;
+esac
+assert_contains "$NAMED_MSG" "  fm-build-lock: link to fm-build-lock.owner." \
+  "a residue red must name the lock link and the owner directory it points at"
+assert_contains "$NAMED_MSG" "owned by pid $NAMED_HOLDER, still running: " \
+  "a residue red must name a live owner's pid and say it is still running"
+assert_contains "$NAMED_MSG" "named-holding" \
+  "a residue red must say what a live owner is running"
+assert_contains "$NAMED_MSG" "  fm-build-lock.info: file owned by pid $NAMED_HOLDER" \
+  "a residue red must name the holder record and its owner"
+assert_contains "$NAMED_MSG" "  fm-build-lock.queue: directory holding [" \
+  "a residue red must name the waiting line"
+assert_contains "$NAMED_MSG" "owned by pid $NAMED_WAITER, which is gone" \
+  "a residue red must name the dead waiter whose ticket is still in line"
+assert_contains "$NAMED_MSG" "next=" "a residue red must list what else the waiting line holds"
+
+touch "$NAMED_RELEASE"
+wait "$NAMED_HOLDER" 2>/dev/null || true
+settle_queue
+pass "a residue red names every leftover artifact, its owner, and whether that owner still runs"
 
 # --- arrival order: a barger cannot overtake an earlier waiter ---------------
 # The starvation this guards against is not hypothetical: a worker that wrapped
@@ -525,7 +657,7 @@ expect_code 2 $? "without a CI marker the same run must reach the lock and refus
 
 env "${CI_MARKER_UNSET_ARGS[@]}" CI=false FM_BUILD_LOCK_DIR="$CI_ROOT_OK" "$SCRIPT" sh -c 'exit 4'
 expect_code 4 $? "CI=false must not be read as CI"
-assert_equals 0 "$(lock_artifacts "$CI_ROOT_OK")" "CI=false must take and fully release the lock"
+assert_no_lock_residue "$CI_ROOT_OK" "CI=false must take and fully release the lock"
 
 # Standing down must not merely skip the acquire, it must not queue either. The
 # holder here outlives the CI run by a wide margin, so a run that queued would
@@ -614,7 +746,7 @@ case "$SHARED_RECORDED" in
   'one in|one out|two in|two out|'|'two in|two out|one in|one out|') : ;;
   *) fail "workers with different TMPDIR values overlapped: $SHARED_RECORDED" ;;
 esac
-assert_equals 0 "$(lock_artifacts "$SHARED_ROOT")" "the shared root must be left clean"
+assert_no_lock_residue "$SHARED_ROOT" "the shared root must be left clean"
 pass "workers with different TMPDIR values still exclude each other"
 
 # --- the mutex entry point --------------------------------------------------
@@ -776,7 +908,7 @@ chmod +x "$SELF_BIN/fm-test-run.sh"
 grep -q 'running: unit-1' "$TMP_ROOT/unit-status.out" \
   || fail "through the stand-down the live hold must be the runner's own per-unit hold, not an outer whole-run hold"
 settle_queue
-assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" \
+assert_no_lock_residue "$LOCK_ROOT" \
   "the per-unit holds taken through a stand-down must all be released"
 pass "a command that takes the lock itself is run straight through, leaving its per-unit holds live"
 
@@ -906,7 +1038,7 @@ pass "--help states one invocation per run, never one around a loop of runs"
 # A private root per case. With FM_BUILD_LOCK_DIR set the machine-level settings
 # live in that same root, which is the whole test seam: one root has exactly one
 # count by construction, and no case can leak a count into another. The settings
-# names deliberately do not start with `fm-build-lock`, so lock_artifacts above
+# names deliberately do not start with `fm-build-lock`, so lock_residue above
 # keeps meaning "lock residue" in these roots too.
 slot_root() {  # <name> [<count>]
   local lockroot="$TMP_ROOT/root-$1"
@@ -921,14 +1053,12 @@ slot_root() {  # <name> [<count>]
 settle_root() {  # <root>
   FM_BUILD_LOCK_DIR="$1" "$SCRIPT" true >/dev/null 2>&1 \
     || fail "the slots were unusable after the preceding case"
-  assert_equals '' "$(slot_residue "$1")" \
-    "the preceding case left build-lock residue behind"
+  assert_no_lock_residue "$1" "the preceding case left build-lock residue behind" \
+    ignore-queue-lock-owners
 }
 
-# Residue this change owns: slot links, their owner directories, their holder
-# records and their steal guards, listed by name so a failure says what is left.
-#
-# The waiting line's own lock is excluded, and only it. Under contention the
+# Why the slot cases pass ignore-queue-lock-owners to the residue assertion:
+# the waiting line's own lock is excluded, and only it. Under contention the
 # lockdir primitive can strand an owner directory for that lock: one arrival's
 # `ln -s` follows another's live symlink into its owner directory, and if the
 # holder releases before the loser cleans up, the stray link is left inside an
@@ -937,11 +1067,6 @@ settle_root() {  # <root>
 # script too, about one run in six - and it is reported separately. Excluding
 # one name rather than dropping the assertion is the point: residue of any
 # other kind still reds here.
-slot_residue() {  # <root>
-  find "$1" -maxdepth 1 -name 'fm-build-lock*' \
-    ! -name 'fm-build-lock.queue.lock.owner.*' 2>/dev/null \
-    | sed "s#^$1/##" | sort | tr '\n' ' '
-}
 
 # Start a fixture that takes a slot and holds it until its release marker
 # appears, recording its pid in <pid-var>. Never started through a command
@@ -1025,8 +1150,8 @@ for n in 2 3; do
     || fail "$GAUGE_MAX invocations held a slot at once under a count of $n"
   assert_equals "$n" "$GAUGE_MAX" \
     "a count of $n never actually ran $n invocations together"
-  assert_equals '' "$(slot_residue "$GAUGE_ROOT")" \
-    "a count of $n left build-lock residue behind"
+  assert_no_lock_residue "$GAUGE_ROOT" "a count of $n left build-lock residue behind" \
+    ignore-queue-lock-owners
 done
 pass "a count of N runs exactly N invocations at once, never more, and leaves nothing behind"
 
@@ -1141,7 +1266,7 @@ pass "a dead holder's slot is reclaimed while a live holder keeps its own, and n
 n1_transcript() {  # <root>
   local lockroot=$1
   local w="$lockroot/work"
-  local e h waiter
+  local e h waiter residue
   mkdir -p "$w"
   e='[0-9][0-9]*[hms]\([0-9][0-9]*[ms]\)\{0,1\}'
   norm() {
@@ -1220,7 +1345,8 @@ n1_transcript() {  # <root>
   echo "== free again =="
   FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" --status 2>&1 | norm
   echo "== residue =="
-  lock_artifacts "$lockroot"
+  residue=$(lock_residue "$lockroot")
+  printf '%s\n' "${residue:-none}"
 }
 
 read -r -d '' N1_GOLDEN <<'GOLDEN' || true
@@ -1246,7 +1372,7 @@ note: holding the machine-wide build lock for AGE with 1 waiting, past the 3s ce
 == free again ==
 free
 == residue ==
-0
+none
 GOLDEN
 
 N1_ABSENT_ROOT=$(slot_root n1-absent)
@@ -1401,14 +1527,15 @@ kill -9 "$RESIDUE_B" 2>/dev/null || true
 wait "$RESIDUE_B" 2>/dev/null || true
 pkill -P "$RESIDUE_B" 2>/dev/null || true
 release_slot "$RESIDUE_A" residue-a
-[ "$(lock_artifacts "$RESIDUE_ROOT")" -gt 0 ] \
+[ -n "$(lock_residue "$RESIDUE_ROOT")" ] \
   || fail "the SIGKILLed high-slot holder should have left a slot record behind"
 # One ordinary run on an otherwise idle machine, which takes slot 1 and never
 # reaches slot 2 on its own.
 FM_BUILD_LOCK_DIR="$RESIDUE_ROOT" "$SCRIPT" true >/dev/null 2>&1 \
   || fail "the slots were unusable after a high slot was left by a dead holder"
-assert_equals '' "$(slot_residue "$RESIDUE_ROOT")" \
-  "a slot left by a dead high holder was still in the lock root after an idle-machine run"
+assert_no_lock_residue "$RESIDUE_ROOT" \
+  "a slot left by a dead high holder was still in the lock root after an idle-machine run" \
+  ignore-queue-lock-owners
 pass "a slot left by a killed high holder is retired by the next acquisition, not left behind"
 
 # --- a nested invocation inside a HIGH slot runs straight through -----------
@@ -1620,7 +1747,7 @@ CI_SETTINGS_OUT=$(env -u FM_BUILD_LOCK_CI CI=true FM_BUILD_LOCK_DIR="$CI_SETTING
 assert_equals 'stood-down' "$CI_SETTINGS_OUT" "the command must still run on CI"
 assert_equals '' "$(cat "$CI_SETTINGS_ERR")" \
   "on CI no setting is read, so a malformed one must say nothing"
-assert_equals 0 "$(lock_artifacts "$CI_SETTINGS_ROOT")" "on CI nothing may be created in the lock root"
+assert_no_lock_residue "$CI_SETTINGS_ROOT" "on CI nothing may be created in the lock root"
 pass "on CI the slot count and the whole-machine patterns are never read and nothing is created"
 
 # --- a whole-machine run never runs beside anything -------------------------
@@ -1885,5 +2012,5 @@ assert_equals '' "$(FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --holders)" \
 settle_root "$LOCK_ROOT"
 pass "--holders reports live holders as parseable pid/elapsed/cwd/command lines and never a dead one"
 
-assert_equals 0 "$(lock_artifacts "$LOCK_ROOT")" "the suite must leave no lock behind"
+assert_no_lock_residue "$LOCK_ROOT" "the suite must leave no lock behind"
 pass "fm-build-lock behaves"
