@@ -21,9 +21,11 @@
 # This library WRITES NOTHING and reaches no forge, no no-mistakes daemon, and
 # no pane. That purity is the contract that lets the watcher call it on every
 # poll for every window, unlike crew_absorb_class in bin/fm-classify-lib.sh.
-# The one subprocess it may run is a local `git rev-parse` in the task's own
-# recorded worktree, and only for a task that already has both a done outcome
-# and a recorded forge head - never on the hot path of an ordinary working task.
+# Its only subprocesses are local git reads in the task's own recorded worktree:
+# the branch head, and the ancestry and patch-equivalence checks when that head
+# differs from the recorded forge head. They run only for a task that already
+# has both a done outcome and a recorded forge head - never on the hot path of
+# an ordinary working task.
 #
 # THE THREE CLASSES
 #   awaiting-landing  finished, held by firstmate, nothing says it cannot land.
@@ -63,14 +65,19 @@
 #      been rewritten during an aborted validation run and never pushed - so the
 #      PR looked healthy while containing the WRONG work, and the armed merge
 #      poll would have reported it landed. "A pr= is recorded" is therefore NOT
-#      sufficient for landing-ready. The one exception is a PR head that is
-#      AHEAD of the branch (the branch is an ancestor of it) AND that the
-#      pipeline's durable validation receipt names: that is the ordinary end
-#      state of every validated ship, because the pipeline pushes its own fix
-#      commits and the local branch is never advanced to them. It reads
-#      awaiting-landing with target=validated. An ahead head with no matching
-#      receipt, a `behind` head (unpushed local work) and an unrelated head
-#      (rewritten history) all stay landing-blocked.
+#      sufficient for landing-ready. The exceptions are the two ordinary end
+#      states of a validated ship, because the pipeline pushes its own commits
+#      and the local branch is never advanced to them, and each needs the
+#      pipeline's durable validation receipt to name the PR head: a head AHEAD
+#      of the branch (the branch is an ancestor of it), and a head the
+#      pipeline's rebase step replayed onto a newer base, unrelated by ancestry
+#      but carrying every branch commit as a patch-equivalent commit.
+#      2026-09-23: two stopped workers whose validated PRs sat green and open
+#      alarmed as landing-blocked because the base branch had moved while they
+#      validated. Both read awaiting-landing with target=validated. A head with
+#      no matching receipt, a `behind` head (unpushed local work), and an
+#      unrelated head that lacks or alters any branch commit (rewritten
+#      history) all stay landing-blocked.
 #
 # The target check can only ever move a task OUT of quiet, never into it.
 # Absence of verification is not evidence of a problem: bin/fm-pr-check.sh
@@ -156,6 +163,23 @@ _fm_awaiting_landing_divergence() {  # <worktree> <recorded-head> <branch-head>
   else
     printf 'unrelated'
   fi
+}
+
+# 0 when <pr-head> carries every commit of <branch-head> it does not contain as a
+# patch-equivalent commit: the proof that a head the pipeline rebased onto a newer
+# base is still this branch's work. A merge on the branch fails it, because patch
+# equivalence cannot see what a merge commit itself resolved, and so does any
+# read git cannot complete, such as a head whose objects this copy never fetched.
+_fm_awaiting_landing_carries_branch() {  # <worktree> <pr-head> <branch-head>
+  local wt=$1 pr_head=$2 branch=$3 merges cherry
+  merges=$(git -C "$wt" rev-list --merges --max-count=1 "$pr_head..$branch" 2>/dev/null) || return 1
+  [ -z "$merges" ] || return 1
+  cherry=$(git -C "$wt" cherry "$pr_head" "$branch" 2>/dev/null) || return 1
+  [ -n "$cherry" ] || return 1
+  case $'\n'"$cherry" in
+    *$'\n+'*) return 1 ;;
+  esac
+  return 0
 }
 
 # 0 when the durable validation receipt for THIS task's recorded PR names exactly
@@ -254,6 +278,18 @@ fm_awaiting_landing_read() {  # <id> <state-dir>
     FM_AWAITING_LANDING_TARGET="validated"
     FM_AWAITING_LANDING_CLASS="awaiting-landing"
     FM_AWAITING_LANDING_DETAIL="awaiting landing: work reported done, $pr holds ${pr_head:0:7}, validated by pipeline run $FM_VALIDATION_RECEIPT_RUN and containing this branch's head ${branch_head:0:7}"
+    return 0
+  fi
+  # An `unrelated` PR is the same end state whenever the base branch moved while
+  # the ship validated: the pipeline's rebase step replays the branch onto the
+  # new base, so the PR holds this branch's commits as new, patch-equivalent
+  # ones. The receipt vouches for the head, and the patch check proves it still
+  # carries every commit of this branch; either one missing stays blocked.
+  if [ "$shape" = unrelated ] && _fm_awaiting_landing_head_validated "$state" "$id" "$pr" "$pr_head" \
+    && _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head"; then
+    FM_AWAITING_LANDING_TARGET="validated"
+    FM_AWAITING_LANDING_CLASS="awaiting-landing"
+    FM_AWAITING_LANDING_DETAIL="awaiting landing: work reported done, $pr holds ${pr_head:0:7}, validated by pipeline run $FM_VALIDATION_RECEIPT_RUN and carrying this branch's commits up to ${branch_head:0:7} rebased onto a newer base"
     return 0
   fi
   FM_AWAITING_LANDING_TARGET="diverged"
