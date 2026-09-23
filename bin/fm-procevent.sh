@@ -886,26 +886,38 @@ cmd_start() {
       fm_procevent_source_lock_release "$id"
       die "cannot prepare the source launch boundary: $id"
     }
+    # Both launch files are read back only through descriptors opened here,
+    # while the registry is still the one this runner pinned, and are unlinked
+    # as soon as the helper is under way. The source runs after that, and a
+    # registry directory swapped while it runs must not decide what this runner
+    # reads back; the capture helper itself is already descriptor-bound.
+    exec 4<"$REG/$launch_ready" || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source launch boundary: $id"
+    }
+    exec 5<"$launch_reply" || {
+      exec 4<&-
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source launch boundary: $id"
+    }
     perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
       "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" \
-      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
+      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" 4<&- 5<&- &
     launch_pid=$!
-    while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    # Bash tests /dev/fd/N against its own open descriptor N.
+    while [ ! -s /dev/fd/4 ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    rm -f -- "$REG/$launch_ready" "$launch_reply"
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
-    wait "$launch_pid" || {
-      rm -f -- "$REG/$launch_ready" "$launch_reply"
-      die "cannot safely stage the extension result"
-    }
-    [ -s "$REG/$launch_ready" ] || {
-      rm -f -- "$REG/$launch_ready" "$launch_reply"
-      die "cannot establish the source launch boundary: $id"
-    }
-    IFS= read -r capture_state < "$launch_reply" || capture_state=
-    rm -f -- "$REG/$launch_ready" "$launch_reply"
+    wait "$launch_pid" || die "cannot safely stage the extension result"
+    [ -s /dev/fd/4 ] || die "cannot establish the source launch boundary: $id"
+    IFS= read -r capture_state <&5 || capture_state=
+    exec 4<&- 5<&-
     IFS=$'\t' read -r capture_state durable rc truncated reservation_terminal reservation_silent <<EOF
 $capture_state
 EOF
