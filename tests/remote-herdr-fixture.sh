@@ -22,9 +22,14 @@
 #   install_remote_herdr_fixture <remote-root> <state-file> <log-file> \
 #     <send-fail-flag> <socket-path>
 #
-# Every invocation is appended verbatim to <log-file>, so a test reads back what
-# the remote pane received. Creating <send-fail-flag> makes every pane write
+# Every invocation is appended verbatim to <log-file>, except a `pane
+# send-text` launch literal, which is resolved through fm_fake_sourced_launch
+# first (see tests/fixtures.sh) so the log keeps reading as the command the
+# agent was started with. Creating <send-fail-flag> makes every pane write
 # fail, which is how a test simulates an endpoint that cannot be reached.
+
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
@@ -38,11 +43,14 @@ SEND_FAIL='$send_fail'
 SOCKET='$socket'
 SH
   cat >> "$script" <<'SH'
-printf '%s\n' "$*" >> "$LOG"
-jq_state() { jq "$@" "$STATE"; }
-save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 ws=""; label=""; cwd=""; pane=""
 args=("$@")
+if [ "${1:-}" = pane ] && [ "${2:-}" = send-text ] && [ "${#args[@]}" -ge 4 ]; then
+  args[3]=$(fm_fake_sourced_launch "${args[3]}")
+fi
+printf '%s\n' "${args[*]}" >> "$LOG"
+jq_state() { jq "$@" "$STATE"; }
+save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
@@ -117,6 +125,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$script"
   chmod +x "$script"
   reset_remote_herdr_fixture "$state"
 }
