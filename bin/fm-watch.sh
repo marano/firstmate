@@ -1597,7 +1597,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(declared_wait_age "$statusf" "$now")
   last=$(status_declared_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task")
   if status_is_captain_held "$last" && afk_record_present; then
     triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
     return 0
@@ -1711,7 +1711,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # decoration overrides the daemon's own pause verdict for the pane: the
       # ladder then climbs on every re-arm, escalating a crew that declared the
       # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
+      # The one-shot is keyed on the DECLARATION (stale_wait_declaration),
       # never on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
       # daemon, which relaunches the watcher after each handled wake, would be
@@ -1727,7 +1727,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
       clear_task_shell_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(status_declared_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1907,12 +1907,16 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
+# The identity a declared wait's re-surface throttle is bound to: the worker's
+# declaration itself, which bin/fm-classify-lib.sh's status_declared_identity
+# owns. A new declaration - a replacement wait, a fresh delivery, a blocker -
+# changes it and so starts its own window instead of inheriting the silence of
+# the one before it, while the lines that declare nothing (a resolution, a note,
+# the build lock's own queue wait, and only that) leave the window alone. Bound
+# to the whole log's signature until 2026-09-23, every one of those lines
+# re-surfaced a wait already surfaced inside its cadence.
 stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'declared:%s' "$(status_declared_identity "$STATE/$1.status")"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity

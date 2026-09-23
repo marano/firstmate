@@ -113,7 +113,7 @@ stock-bash
 --per-script-timeout-secs
 1000
 --require-ok-count
-tests/fm-fleet-snapshot-view.test.sh=21
+tests/fm-fleet-snapshot-view.test.sh=22
 --require-ok-count
 tests/fm-bearings-snapshot.test.sh=60
 --json

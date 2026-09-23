@@ -596,6 +596,125 @@ branch_with_evil_merge() {  # <worktree>
   git -C "$wt" rev-parse HEAD
 }
 
+# The pipeline's gate: a bare repository on this machine that the task's copy
+# names as its `no-mistakes` remote. The pipeline commits in the gate and pushes
+# to the forge from there, so what it makes is in the gate's store and not in the
+# task's copy until something fetches it.
+make_gate() {  # <dir>
+  git clone --quiet --bare "$1/repo" "$1/gate.git" || fail "could not create the fixture gate"
+  git -C "$1/repo" remote add no-mistakes "$1/gate.git"
+}
+
+# The pipeline's own end state, made where the pipeline makes it: the branch is
+# pushed to the gate, and in a worktree of the gate it is either replayed onto a
+# moved base (rebased) or given a pipeline fix commit (ahead). The task's copy is
+# left without the result. Prints the PR head.
+gate_pipeline() {  # <dir> <shape: rebased|ahead>
+  local dir=$1 shape=$2 branch gate_wt
+  branch=$(git -C "$dir/wt" symbolic-ref --short HEAD)
+  git -C "$dir/wt" push -q no-mistakes "$branch" 2>/dev/null || fail "could not push the branch to the fixture gate"
+  gate_wt="$dir/gate-wt"
+  git -C "$dir/gate.git" worktree add -q "$gate_wt" "$branch" 2>/dev/null || fail "could not open a worktree of the fixture gate"
+  if [ "$shape" = rebased ]; then
+    pipeline_rebase "$gate_wt" clean
+  else
+    wt_commit "$gate_wt" "no-mistakes(review): a pipeline fix commit"
+  fi
+}
+
+# The measured shape is a PR head the task's copy does not hold. A fixture that
+# leaked the commit into the copy would prove the older same-repository cases
+# over again instead.
+assert_copy_lacks() {  # <worktree> <sha>
+  if git -C "$1" cat-file -e "$2^{commit}" 2>/dev/null; then
+    fail "the gate fixture put the pipeline's commit in the task's copy, so this is not the measured shape"
+  fi
+}
+
+# THE 2026-09-23 10:37 false alarm, in the shape it was measured. A stopped
+# worker's PR head was a pipeline rebase of its branch head, and the durable
+# receipt named it, yet the task alarmed as rewritten history: the pipeline made
+# that head in its gate, and the task's copy fetched it only an hour and a
+# quarter later, so every ancestry and patch read of it failed. The ahead end
+# state is made in the gate too and failed the same way.
+test_a_validated_head_only_the_gate_holds_is_awaiting_landing() {
+  local dir pr_head
+  dir=$(make_git_task gate-rebased)
+  wt_commit "$dir/wt" "the worker's first commit" > /dev/null
+  wt_commit "$dir/wt" "the worker's second commit" > /dev/null
+  make_gate "$dir"
+  pr_head=$(gate_pipeline "$dir" rebased)
+  assert_copy_lacks "$dir/wt" "$pr_head"
+  status_line "$dir" gate-rebased 'done: PR https://github.com/o/r/pull/45 checks green run=r-45'
+  task_meta "$dir" gate-rebased "pr=https://github.com/o/r/pull/45" "pr_head=$pr_head"
+  stop_agent "$dir" gate-rebased
+  receipt_for "$dir" gate-rebased 45 "$pr_head"
+
+  assert_class "a validated rebase only the gate holds" awaiting-landing "$dir" gate-rebased
+  assert_quiet "a validated rebase only the gate holds" "$dir" gate-rebased
+  assert_target "a validated rebase only the gate holds" validated "$dir" gate-rebased
+  assert_detail_mentions "a validated rebase only the gate holds" "rebased onto a newer base" "$dir" gate-rebased
+  assert_copy_lacks "$dir/wt" "$pr_head"
+
+  dir=$(make_git_task gate-ahead)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  make_gate "$dir"
+  pr_head=$(gate_pipeline "$dir" ahead)
+  assert_copy_lacks "$dir/wt" "$pr_head"
+  status_line "$dir" gate-ahead 'done: PR https://github.com/o/r/pull/46 checks green run=r-46'
+  task_meta "$dir" gate-ahead "pr=https://github.com/o/r/pull/46" "pr_head=$pr_head"
+  stop_agent "$dir" gate-ahead
+  receipt_for "$dir" gate-ahead 46 "$pr_head"
+  assert_class "a validated ahead head only the gate holds" awaiting-landing "$dir" gate-ahead
+  assert_target "a validated ahead head only the gate holds" validated "$dir" gate-ahead
+
+  pass "a validated PR head that only the pipeline's gate holds is awaiting landing, rebased or ahead"
+}
+
+# Reading through the gate's store must not rescue anything the exceptions
+# refuse, and a head no store on this machine holds is surfaced for what is
+# actually known about it rather than as rewritten history.
+test_a_head_only_the_gate_holds_is_still_held_to_the_branch_work() {
+  local dir pr_head detail
+  # The branch gained a commit after the pipeline took it: never pushed.
+  dir=$(make_git_task gate-then-advanced)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  make_gate "$dir"
+  pr_head=$(gate_pipeline "$dir" rebased)
+  wt_commit "$dir/wt" "a later commit that was never pushed" > /dev/null
+  assert_copy_lacks "$dir/wt" "$pr_head"
+  status_line "$dir" gate-then-advanced 'done: PR https://github.com/o/r/pull/47 checks green run=r-47'
+  task_meta "$dir" gate-then-advanced "pr=https://github.com/o/r/pull/47" "pr_head=$pr_head"
+  stop_agent "$dir" gate-then-advanced
+  receipt_for "$dir" gate-then-advanced 47 "$pr_head"
+  assert_class "a gate-held rebase the branch then advanced past" landing-blocked "$dir" gate-then-advanced
+  assert_target "a gate-held rebase the branch then advanced past" diverged "$dir" gate-then-advanced
+
+  # Nothing vouches for a gate-held head without a receipt naming it.
+  dir=$(make_git_task gate-unvouched)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  make_gate "$dir"
+  pr_head=$(gate_pipeline "$dir" rebased)
+  status_line "$dir" gate-unvouched 'done: PR https://github.com/o/r/pull/48 checks green run=r-48'
+  task_meta "$dir" gate-unvouched "pr=https://github.com/o/r/pull/48" "pr_head=$pr_head"
+  stop_agent "$dir" gate-unvouched
+  assert_class "a gate-held rebase nothing validated" landing-blocked "$dir" gate-unvouched
+
+  # No store on this machine holds the head: nothing can be read about it, so
+  # it is neither quiet nor reported as a rewrite.
+  receipt_for "$dir" gate-unvouched 48 "$pr_head"
+  git -C "$dir/repo" remote remove no-mistakes
+  assert_class "a validated head nothing here holds" landing-blocked "$dir" gate-unvouched
+  assert_target "a validated head nothing here holds" unreadable "$dir" gate-unvouched
+  assert_detail_mentions "a validated head nothing here holds" "cannot be read" "$dir" gate-unvouched
+  detail=$(fm_awaiting_landing_detail gate-unvouched "$dir/state")
+  case "$detail" in
+    *rewritten*) fail "a head nothing here holds was reported as rewritten history: $detail" ;;
+  esac
+
+  pass "a head only the gate holds is still held to this branch's work, and one nothing here holds says so"
+}
+
 # The check can only move a task OUT of quiet, never into it. bin/fm-pr-check.sh
 # records pr_head only when the forge CLI supplies it - a GitLab task records
 # none BY DESIGN - so an unverifiable target is not evidence of a problem and
@@ -921,7 +1040,7 @@ test_mutant_rebase_without_patch_proof_is_red() {
   assert_class "the real library" landing-blocked "$dir" mutant-rebase-changed
   # shellcheck disable=SC2016
   got=$(mutant_answer rebase-without-patch-proof \
-    '&& _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head"; then' '; then' \
+    '&& _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head" "$stores"; then' '; then' \
     "$dir" mutant-rebase-changed class)
   [ "$got" = awaiting-landing ] \
     || fail "mutant rebase-without-patch-proof was not red: it answered '$got' for a rebase that changed the work"
@@ -973,6 +1092,32 @@ test_mutant_patch_proof_admits_merges_is_red() {
   pass "MUTANT patch-proof-admits-merges is red: a change made only in a merge could be dropped unseen"
 }
 
+# MUTANT: no borrowed stores - the library as it shipped before this change.
+# A validated rebase that only the pipeline's gate holds reads landing-blocked
+# again, the verdict that raised the 2026-09-23 10:37 stale wake.
+test_mutant_no_borrowed_stores_is_red() {
+  local dir pr_head got
+  dir=$(make_git_task mutant-gate)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  make_gate "$dir"
+  pr_head=$(gate_pipeline "$dir" rebased)
+  assert_copy_lacks "$dir/wt" "$pr_head"
+  status_line "$dir" mutant-gate 'done: PR https://github.com/o/r/pull/49 checks green run=r-49'
+  task_meta "$dir" mutant-gate "pr=https://github.com/o/r/pull/49" "pr_head=$pr_head"
+  stop_agent "$dir" mutant-gate
+  receipt_for "$dir" mutant-gate 49 "$pr_head"
+
+  assert_class "the real library" awaiting-landing "$dir" mutant-gate
+  # shellcheck disable=SC2016
+  got=$(mutant_answer no-borrowed-stores \
+    'stores=$(_fm_awaiting_landing_remote_stores "$worktree")' 'stores=' \
+    "$dir" mutant-gate class)
+  [ "$got" = landing-blocked ] \
+    || fail "mutant no-borrowed-stores was not red: it answered '$got' for a validated head only the gate holds"
+
+  pass "MUTANT no-borrowed-stores is red: a stopped worker's validated PR the gate rebased would alarm again"
+}
+
 test_finished_work_whose_agent_is_still_alive_is_awaiting_landing
 test_a_deliberately_stopped_agent_on_finished_work_is_awaiting_landing
 test_a_stopped_agent_with_a_recorded_pr_is_awaiting_landing
@@ -989,6 +1134,8 @@ test_a_validated_ahead_head_is_awaiting_landing
 test_a_receipt_never_rescues_a_behind_or_unrelated_head
 test_a_validated_rebased_head_is_awaiting_landing
 test_a_receipt_never_rescues_a_rebased_head_missing_the_branch_work
+test_a_validated_head_only_the_gate_holds_is_awaiting_landing
+test_a_head_only_the_gate_holds_is_still_held_to_the_branch_work
 test_an_unverifiable_landing_target_stays_awaiting_landing
 test_absent_records_read_as_none
 test_every_entry_point_is_safe_under_set_eu
@@ -1003,3 +1150,4 @@ test_mutant_no_rebase_exception_is_red
 test_mutant_rebase_without_patch_proof_is_red
 test_mutant_rebase_without_receipt_is_red
 test_mutant_patch_proof_admits_merges_is_red
+test_mutant_no_borrowed_stores_is_red

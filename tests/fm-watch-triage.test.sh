@@ -3654,6 +3654,119 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
 
+# The build lock writes into the worker's own status log: a keyed wait of its
+# own while it queues, that wait's resolution once it gets in, and a note when a
+# hold passes its ceiling. None of them is the worker declaring anything, yet the
+# re-surface throttle was bound to the whole log's signature, so each append read
+# as a NEW declaration and re-surfaced a wait already surfaced inside its cadence.
+# The window now belongs to the worker's standing declaration, so the lock's lines
+# appended after it - its open wait included - neither restart the window nor
+# end it, for a live agent and for one confirmed stopped alike.
+#
+# Mutants that must turn this red:
+#   - bind the throttle to the whole log's signature again (current main): the
+#     first lock append re-surfaces the live wait, and the stopped one at once.
+#   - let an open keyed wait start its own window: the live wait re-surfaces
+#     while the lock queues, and again once its resolution reverts to the wait.
+BUILD_LOCK_WAIT_LINE='paused [key=build-lock-4242-1700000000]: waiting 10m00s for the machine-wide build lock to run bin/fm-test-run.sh [in /wt] - held by pid 999 for 12m00s running: x'
+BUILD_LOCK_RESOLVED_LINE='resolved [key=build-lock-4242-1700000000]: acquired the machine-wide build lock after 10m28s'
+BUILD_LOCK_NOTE_LINE='note: holding the machine-wide build lock for 20m00s with 1 waiting, past the 1200s ceiling; not being killed: bin/fm-test-run.sh [in /wt]'
+
+test_build_lock_lines_after_a_declared_wait_do_not_restart_its_window() {
+  local dir state fakebin out capture_file statusf window key sig throttle wakes line round
+  dir=$(make_case lock-after-live-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'paused: stock-Bash lane under way in the foreground, pid 4242, ~20 min\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.paused-resurfaced-$key"
+  printf 'lane running, footer 1' > "$capture_file"
+  printf '%s' "$(hash_text 'lane running, footer 1')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "the first sight of a live declared wait did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live wait's first surface"
+  [ -e "$throttle" ] || fail "the first surface recorded no re-surface throttle"
+
+  # The lock queues (its own wait open), gets in, then passes its hold ceiling.
+  round=2
+  for line in "$BUILD_LOCK_WAIT_LINE" "$BUILD_LOCK_RESOLVED_LINE" "$BUILD_LOCK_NOTE_LINE"; do
+    printf '%s\n' "$line" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    printf 'lane running, footer %s' "$round" > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "the build lock's line re-surfaced a live declared wait inside its cadence: $line"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "the build lock's lines re-surfaced a live declared wait $wakes time(s)"
+
+  # Not silence: the window's end still re-surfaces the wait once.
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  printf 'lane running, footer %s' "$round" > "$capture_file"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a live declared wait behind the lock's lines did not re-surface when its window elapsed"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-window re-surface"
+
+  # The same log behind a worker confirmed stopped, whose wait handle_paused_stale
+  # absorbs: it re-surfaces when its window elapses, and the lock's appends
+  # after that do not re-surface it again.
+  dir=$(make_case lock-after-stopped-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: stock-Bash lane under way in the foreground, pid 4242, ~20 min\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle after agent exit\n' > "$capture_file"
+  printf '%s' "$(hash_text 'idle after agent exit')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  stopped_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "a stopped worker's declared wait did not re-surface once its window elapsed"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stopped wait's re-surface"
+  round=1
+  for line in "$BUILD_LOCK_WAIT_LINE" "$BUILD_LOCK_RESOLVED_LINE" "$BUILD_LOCK_NOTE_LINE"; do
+    printf '%s\n' "$line" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+    printf 'idle after agent exit, %s\n' "$round" > "$capture_file"
+    stopped_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "the build lock's line re-surfaced a stopped worker's declared wait inside its cadence: $line"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "the build lock's lines re-surfaced a stopped worker's declared wait $wakes time(s)"
+  pass "the build lock's lines after a declared wait neither restart nor end its re-surface window"
+}
+
+# parked_watch_round for a worker whose agent is confirmed stopped: a bare shell
+# where the harness was, and the stopped verdict, so the pane reaches
+# handle_paused_stale instead of the live first-sight path.
+stopped_wait_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
+  local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  while [ "$cycles" -lt 4 ]; do
+    wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; return 1; }
+    cycles=$((cycles + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
 test_live_paused_until_controls_recheck_time() {
   local dir state fakebin out capture_file statusf window key sig wakes future past
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4621,7 +4734,7 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
 # receipt: a validated ahead head with a dead endpoint raises NO stale wake, while
 # the same task with an unvouched ahead head, or a behind head, STILL does - and the
 # alarm that fires leaves a triage-log line naming the landing class that decided it.
-landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind|rebased> -> key
+landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind|rebased|gate-rebased> -> key
   local case_dir=$1 task_id=$2 num=$3 receipt=$4 shape=$5 base pr_head
   local state_dir="$case_dir/state" win="test:fm-$task_id"
   fm_git_worktree "$case_dir/repo" "$case_dir/wt" "fm/$task_id" >/dev/null 2>&1 \
@@ -4629,6 +4742,8 @@ landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead
   base=$(git -C "$case_dir/wt" rev-parse HEAD)
   if [ "$shape" = rebased ]; then
     pr_head=$(landing_rebased_head "$case_dir/wt" "fm/$task_id") || fail "could not rebase $task_id's branch"
+  elif [ "$shape" = gate-rebased ]; then
+    pr_head=$(landing_gate_rebased_head "$case_dir" "fm/$task_id") || fail "could not rebase $task_id's branch in its gate"
   else
     git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
       commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
@@ -4669,6 +4784,33 @@ landing_rebased_head() {  # <worktree> <branch>
   pr_head=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" checkout -q "$branch" || return 1
   if git -C "$wt" merge-base --is-ancestor "$work" "$pr_head" || git -C "$wt" merge-base --is-ancestor "$pr_head" "$work"; then
+    return 1
+  fi
+  printf '%s' "$pr_head"
+}
+
+# The same rebase, made where the pipeline makes it: in a worktree of its gate, a
+# bare repository on this machine that the worker's copy names as its
+# `no-mistakes` remote. The copy is left without the rebased head, which is the
+# measured shape, and a fixture that leaked the head into the copy fails rather
+# than proving the same-repository case over again. Prints the rebased PR head.
+landing_gate_rebased_head() {  # <case-dir> <branch>
+  local case_dir=$1 branch=$2 wt=$1/wt gate=$1/gate.git gate_wt=$1/gate-wt base work pr_head
+  local -a gate_git_id=(-c user.name='Firstmate Tests' -c user.email='tests@example.invalid')
+  base=$(git -C "$wt" rev-parse HEAD)
+  printf 'the work\n' > "$wt/work.txt"
+  git -C "$wt" add work.txt && git -C "$wt" "${gate_git_id[@]}" commit -qm "the worker's commit" || return 1
+  work=$(git -C "$wt" rev-parse HEAD)
+  git clone --quiet --bare "$case_dir/repo" "$gate" || return 1
+  git -C "$case_dir/repo" remote add no-mistakes "$gate" || return 1
+  git -C "$gate" worktree add -q --detach "$gate_wt" "$base" 2>/dev/null || return 1
+  printf 'the base moved on\n' > "$gate_wt/base.txt"
+  git -C "$gate_wt" add base.txt && git -C "$gate_wt" "${gate_git_id[@]}" commit -qm 'the base branch moved on' || return 1
+  git -C "$gate_wt" "${gate_git_id[@]}" cherry-pick "$work" > /dev/null || return 1
+  git -C "$gate_wt" "${gate_git_id[@]}" commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || return 1
+  pr_head=$(git -C "$gate_wt" rev-parse HEAD)
+  [ "$(git -C "$wt" symbolic-ref --short HEAD)" = "$branch" ] || return 1
+  if git -C "$wt" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
     return 1
   fi
   printf '%s' "$pr_head"
@@ -4756,6 +4898,36 @@ test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms()
   pass "a validated rebased head on a stopped worker raises no stale wake; an unvouched one and a real wedge still do"
 }
 
+# THE 2026-09-23 10:37 false alarm, in the shape it was measured. After the fix
+# above had merged, a stopped worker whose PR head was a validated pipeline
+# rebase of its branch still alarmed "stale (terminal status;
+# landing=landing-blocked - ... the commits were rewritten ...)": the pipeline
+# made that head in its own gate repository and pushed it to the forge from
+# there, and the worker's copy fetched it only later. The same records over a
+# head only the gate holds raise NO stale wake, while the same records without
+# the receipt STILL do.
+test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet() {
+  local dir state fakebin out capture window key pid
+  dir=$(make_case landing-gate-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-gate-ok"
+  key=$(landing_ahead_task "$dir" gate-ok 47 yes gate-rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a stopped worker whose validated PR head only the pipeline's gate holds"
+
+  dir=$(make_case landing-gate-unvouched); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-gate-unvouched"
+  key=$(landing_ahead_task "$dir" gate-unvouched 48 no gate-rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unvouched head only the gate holds never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the unvouched gate-held head printed the wrong wake: $(cat "$out")"
+  grep -F "surfaced stale" "$state/.watch-triage.log" | grep -F "landing=landing-blocked" | grep -F "$window" >/dev/null \
+    || fail "the unvouched gate-held alarm left no triage-log line naming the landing class: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unvouched gate-held leg's watcher stop"
+  pass "a validated PR head only the pipeline's gate holds raises no stale wake on a stopped worker; an unvouched one still does"
+}
+
 # --- a declared wait survives the resolutions logged after it ----------------
 # The stale path asks whether a quiet worker declared a wait, and it read the
 # LAST status line to answer. A `resolved [key=k]` line firstmate appends when it
@@ -4777,7 +4949,11 @@ test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms()
 #   - never fold a captain-held line: both answered-hold cases.
 #   - never fold a note: both note cases.
 #   - never fold a keyed wait: the closed keyed-wait and build-lock cases.
-#   - fold any wait a bare resolution follows: the unkeyed-wait case.
+#   - never end an unkeyed wait on a bare resolution: the ended-wait cases.
+#   - end a wait on a bare resolution an unkeyed decision took: the answered
+#     unkeyed blocker.
+#   - end a wait on a stated [key=default]: the stated-default case.
+#   - end only the latest unkeyed wait: the superseded-wait case.
 test_status_declared_line_classifier() {
   local dir f got
   dir="$TMP_ROOT/status-declared-line"; mkdir -p "$dir"; f="$dir/task.status"
@@ -4833,10 +5009,74 @@ test_status_declared_line_classifier() {
     'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' \
     'resolved [key=build-lock-7-1700000000]: acquired the machine-wide build lock after 10m28s' \
     'note: holding the machine-wide build lock for 20m00s with 0 waiting'
-  declared_is 'paused: waiting on CI' 'an unkeyed wait a bare resolution followed' \
-    'working: rebasing' 'paused: waiting on CI' 'resolved: answered'
+  # A bare resolution is how the worker contract ends an unkeyed wait.
+  declared_is 'working: rebasing' 'an unkeyed wait a bare resolution ended' \
+    'working: rebasing' 'paused: waiting on CI' 'resolved: CI came back green'
+  declared_is '' 'an ended wait with nothing before it' \
+    'paused: waiting on CI' 'note: holding the machine-wide build lock for 20m00s' 'resolved: CI came back green'
+  declared_is 'working: rebasing' 'an ended wait behind the build lock lines' \
+    'working: rebasing' 'paused: waiting on CI' \
+    'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' \
+    'resolved [key=build-lock-7-1700000000]: acquired the machine-wide build lock after 10m28s' \
+    'resolved: CI came back green'
+  declared_is 'working: rebasing' 'a superseded wait ends with the one that replaced it' \
+    'working: rebasing' 'paused: waiting on CI' 'paused: waiting on the re-run' 'resolved: the re-run passed'
+  declared_is 'paused: waiting on CI' 'a stated default resolution answers a decision, not the wait' \
+    'working: rebasing' 'paused: waiting on CI' 'resolved [key=default]: answered: run it'
+  declared_is 'working: rebasing' 'a wait ended after an answered unkeyed blocker' \
+    'working: rebasing' 'paused: waiting on CI' 'blocked: implementation committed abc123' \
+    'resolved: answered: run it' 'resolved: CI came back green'
   unset -f declared_is
-  pass "status_declared_line folds notes, resolutions, and the decisions and keyed waits they closed, and nothing else"
+  pass "status_declared_line folds notes, resolutions, the decisions and keyed waits they closed, and the unkeyed waits a bare resolution ended, and nothing else"
+}
+
+# status_declared_identity, as a pure function over a status log: the identity a
+# declared wait's re-surface window is bound to.
+#
+# Mutants that must turn this red:
+#   - the whole log's signature, or any identity that reads past the declared
+#     line: the build lock's lines change it.
+#   - the declared line's text alone: an identical replacement wait keeps it.
+#   - drop the skip of the build lock's open queue wait: the queued lock
+#     changes it (the build lock's keyed wait case).
+#   - widen the skip back to any open keyed wait: a worker's own replacement
+#     keyed wait, and a keyed pause after a blocked or needs-decision, keep the
+#     earlier identity (the worker's keyed wait cases).
+test_status_declared_identity_classifier() {
+  local dir f base got
+  dir="$TMP_ROOT/status-declared-identity"; mkdir -p "$dir"; f="$dir/task.status"
+  identity_of() {  # <status-line>...
+    printf '%s\n' "$@" > "$f"
+    status_declared_identity "$f"
+  }
+  [ -z "$(status_declared_identity "$dir/missing.status")" ] || fail "a missing log had a declaration identity"
+  [ -z "$(identity_of 'note: a report' 'resolved: nothing open')" ] || fail "a log declaring nothing had an identity"
+  base=$(identity_of 'working: rebasing' 'paused: waiting on CI')
+  [ -n "$base" ] || fail "a declared wait had no identity"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on CI' \
+    'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock')
+  [ "$got" = "$base" ] || fail "the build lock's open queue wait changed the wait's identity: $got, not $base"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on CI' \
+    'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' \
+    'resolved [key=build-lock-7-1700000000]: acquired the machine-wide build lock after 10m28s' \
+    'note: holding the machine-wide build lock for 20m00s with 0 waiting')
+  [ "$got" = "$base" ] || fail "the build lock's resolved wait and note changed the wait's identity: $got, not $base"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on CI' 'working: rebasing' 'paused: waiting on CI')
+  [ "$got" != "$base" ] || fail "an identical replacement wait kept the old wait's identity"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on the re-run')
+  [ "$got" != "$base" ] || fail "a different wait in the same position kept the old wait's identity"
+  got=$(identity_of 'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock')
+  [ -n "$got" ] || fail "a keyed wait with nothing declared beneath it had no identity"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on CI' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a worker's own replacement keyed wait kept the old wait's identity"
+  base=$(identity_of 'blocked: need the schema')
+  got=$(identity_of 'blocked: need the schema' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a keyed pause after a blocked line kept the blocker's identity"
+  base=$(identity_of 'needs-decision: which schema')
+  got=$(identity_of 'needs-decision: which schema' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a keyed pause after a needs-decision line kept the decision's identity"
+  unset -f identity_of
+  pass "status_declared_identity names the declaration, not the lines logged after it"
 }
 
 # A stopped worker whose status log is <status-line>..., stale-ready as
@@ -4907,6 +5147,53 @@ test_a_declared_wait_survives_the_resolutions_logged_after_it() {
   done
   unset FM_FAKE_CREW_STATE
   pass "a stopped worker's declared wait survives a later resolution, while open work with no standing wait still alarms"
+}
+
+# An unkeyed wait the worker itself ended. The worker contract's line for a wait
+# that clears with no reply is a bare `resolved:`, and until 2026-09-23 that line
+# never ended the wait: the stale path went on reading the worker as parked on
+# something it had said was over, absorbing its quiet pane on the long cadence
+# and then rechecking it as that wait. A stopped worker whose log ends in the
+# ended wait is watched as the open work it went back to; the same wait answered
+# by a stated [key=default] resolution, or with an unkeyed blocker between it and
+# the bare resolution, still stands.
+#
+# Mutants that must turn this red:
+#   - never end an unkeyed wait on a bare resolution (current main): the ended
+#     leg stays quiet.
+#   - end a wait on any resolution: both standing legs alarm.
+test_a_bare_resolution_ends_an_unkeyed_wait() {
+  local dir state fakebin out capture window key pid leg
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  for leg in stated-default answered-blocker; do
+    dir=$(make_case "bare-resolution-quiet-$leg"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-bare-$leg"
+    case "$leg" in
+      stated-default)
+        key=$(stopped_declared_task "$dir" "bare-$leg" "$window" "$capture" 'working: rebasing onto main' \
+          'paused: waiting on CI for PR https://example.test/pr/75' 'resolved [key=default]: answered: run it') ;;
+      answered-blocker)
+        key=$(stopped_declared_task "$dir" "bare-$leg" "$window" "$capture" 'working: rebasing onto main' \
+          'paused: waiting on CI for PR https://example.test/pr/76' 'blocked: implementation committed abc123' \
+          'resolved: answered: run it') ;;
+    esac
+    landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+    pid=$!
+    landing_assert_quiet "$state" "$pid" "$out" "$key" 2 \
+      "a stopped worker whose unkeyed wait still stands ($leg)"
+  done
+  dir=$(make_case bare-resolution-ended); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-bare-ended"
+  stopped_declared_task "$dir" bare-ended "$window" "$capture" 'working: rebasing onto main' \
+    'paused: waiting on CI for PR https://example.test/pr/77' 'resolved: CI came back green, back to the fix' >/dev/null
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a stopped worker whose wait it had ended itself was still read as waiting: $(cat "$out")"; }
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a stopped worker whose wait had ended printed the wrong wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare resolution ends an unkeyed wait, while a stated default answer or an answered blocker between them leaves it standing"
 }
 
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
@@ -6755,10 +7042,13 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
 test_awaiting_landing_never_enters_the_wedge_ladder
 test_status_declared_line_classifier
+test_status_declared_identity_classifier
 test_a_declared_wait_survives_the_resolutions_logged_after_it
+test_a_bare_resolution_ends_an_unkeyed_wait
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
+test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
@@ -6776,6 +7066,7 @@ test_live_declared_wait_never_alarms_bare_within_the_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
+test_build_lock_lines_after_a_declared_wait_do_not_restart_its_window
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle

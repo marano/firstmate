@@ -1290,7 +1290,7 @@ fm_build_lock_acquire() {
       if [ "$paused" = 0 ]; then
         paused=1
         FM_BUILD_LOCK_WAIT_START=$start
-        FM_BUILD_LOCK_WAIT_KEY="build-lock-$$-$start"
+        FM_BUILD_LOCK_WAIT_KEY="$FM_BUILD_LOCK_WAIT_KEY_PREFIX$$-$start"
         fm_build_lock_task_status "paused [key=$FM_BUILD_LOCK_WAIT_KEY]: waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN to run $DISPLAY_LINE${ctx:+ - }${ctx}"
       fi
     else
@@ -1562,6 +1562,8 @@ case "$MODE" in
     ;;
 esac
 
+# shellcheck source=bin/fm-build-lock-key-lib.sh
+. "$SCRIPT_DIR/fm-build-lock-key-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 

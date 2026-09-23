@@ -62,7 +62,7 @@ install_runner() {  # <destination-bin-dir-or-path>
     *) dir=$dest; dest="$dir/fm-test-run.sh" ;;
   esac
   cp "$RUNNER" "$dest"
-  cp "$ROOT/bin/fm-build-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/"
+  cp "$ROOT/bin/fm-build-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-build-lock-key-lib.sh" "$dir/"
 }
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"

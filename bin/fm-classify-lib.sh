@@ -61,6 +61,8 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-build-lock-key-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-build-lock-key-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -210,46 +212,112 @@ status_outcome_line() {  # <status-file>
 # a hold-ceiling note, and a keyed queue wait it resolves once the lock is
 # taken. 2026-09-21: its `working: acquired ...` line erased a worker's own
 # `paused:` at the very moment the worker's long run began and its pane went
-# quiet, and the quiet pane was alarmed as a wedge. An UNKEYED `paused:` is not
-# folded by a bare `resolved:`, which closes the default decision, and one line
-# cannot also say it ended a wait that named no key.
+# quiet, and the quiet pane was alarmed as a wedge.
+#
+# An UNKEYED `paused:` is ended by a bare `resolved:` (one that states no key),
+# which is how bin/fm-brief.sh tells a worker to end a wait that clears without a
+# reply. Until 2026-09-23 such a wait read as standing forever, so its worker was
+# rechecked as waiting on something it had already said was over.
+#
+# The rule: a bare resolution answers the default decision if one was opened
+# after the wait, and otherwise ends the wait. Each unkeyed decision, blocker or
+# hold logged after the wait consumes one later bare resolution; the wait ends
+# only on a bare resolution left over. A stated `[key=default]`, which is how
+# firstmate answers an unkeyed decision, never ends a wait. Unkeyed waits are
+# one record, so a later one supersedes every earlier one.
 #
 # Prints that line, or the empty string when the log holds none.
 status_declared_line() {  # <status-file>
-  local f=$1 line key resolve held paused closed=$'\n'
+  _status_declared_scan "$1" line
+}
+
+# The identity of the declaration a stale supervisor's re-surface window belongs
+# to, printed as `<ordinal>:<checksum>` - the declared line's position among the
+# log's non-blank lines and a checksum of its text - or the empty string when
+# the log declares nothing. Lines appended after the declaration that the fold
+# above sets aside leave it unchanged; a new declaration of any kind changes it.
+# One more thing is set aside here and only here: the build lock's own OPEN
+# queue wait (a keyed `paused:` whose key carries FM_BUILD_LOCK_WAIT_KEY_PREFIX)
+# opened on top of an earlier declaration is a wait inside it, not a replacement
+# for it, so it neither starts a new window nor, once resolved, ends the one it
+# was opened in. A worker's own keyed wait is a declaration and changes the
+# identity. With nothing declared beneath it, the lock's wait is the
+# declaration. 2026-09-23: the watcher bound its throttle to the whole log's
+# signature, so each of the lock's lines re-surfaced a wait already surfaced
+# inside its cadence.
+status_declared_identity() {  # <status-file>
+  local rec
+  rec=$(_status_declared_scan "$1" identity)
+  [ -n "$rec" ] || return 0
+  printf '%s:%s' "${rec%%$'\t'*}" "$(printf '%s' "${rec#*$'\t'}" | cksum | tr ' ' .)"
+}
+
+# 0 when <status-line> states a key, before its colon or at the head of its note.
+_status_line_states_key() {  # <status-line>
+  _fm_key_before_colon "$1" || _fm_key_at_note_head "$1" >/dev/null
+}
+
+# The one fold behind status_declared_line and status_declared_identity. <mode>
+# `line` prints the declared line; `identity` prints `<ordinal><TAB><line>` and
+# also passes over the build lock's open queue wait, as status_declared_identity
+# documents.
+_status_declared_scan() {  # <status-file> <line|identity>
+  local f=$1 mode=$2 rec n line key resolve held paused closed=$'\n' bare=0 waits_ended=0 inner=''
   [ -e "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   paused=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-  while IFS= read -r line; do
+  while IFS= read -r rec; do
+    n=${rec%%$'\t'*}
+    line=${rec#*$'\t'}
     case "$(status_line_verb "$line")" in
       "$resolve")
         if key=$(_fm_decision_key "$line") \
           && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
           closed="$closed$key"$'\n'
         fi
+        _status_line_states_key "$line" || bare=$((bare + 1))
         continue
         ;;
       note)
         continue
         ;;
       needs-decision|blocked|"$held")
+        if [ "$bare" -gt 0 ] && ! _status_line_states_key "$line"; then
+          bare=$((bare - 1))
+        fi
         if key=$(_fm_decision_key "$line") \
           && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
           case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
         fi
         ;;
       "$paused")
-        if { _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null; } \
-          && key=$(_fm_decision_key "$line") \
-          && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
-          case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
+        if _status_line_states_key "$line"; then
+          if key=$(_fm_decision_key "$line") \
+            && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+            case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
+            if [ "$mode" = identity ] && [ "${key#"$FM_BUILD_LOCK_WAIT_KEY_PREFIX"}" != "$key" ]; then
+              [ -n "$inner" ] || inner="$n"$'\t'"$line"
+              continue
+            fi
+          fi
+        elif [ "$waits_ended" = 1 ] || [ "$bare" -gt 0 ]; then
+          [ "$waits_ended" = 1 ] || bare=$((bare - 1))
+          waits_ended=1
+          continue
         fi
         ;;
     esac
-    printf '%s' "$line"
+    if [ "$mode" = identity ]; then
+      printf '%s\t%s' "$n" "$line"
+    else
+      printf '%s' "$line"
+    fi
     return 0
-  done < <(awk 'NF { a[++n] = $0 } END { for (i = n; i >= 1; i--) print a[i] }' "$f" 2>/dev/null)
+  done < <(awk 'NF { n++; a[n] = n "\t" $0 } END { for (i = n; i >= 1; i--) print a[i] }' "$f" 2>/dev/null)
+  if [ -n "$inner" ]; then
+    printf '%s' "$inner"
+  fi
   return 0
 }
 
