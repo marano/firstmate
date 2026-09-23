@@ -1414,7 +1414,10 @@ for _ in $(seq 1 400); do
 done
 [ -n "$signal_worker_pid" ] || fail "signal retirement worker never acquired its lifecycle lock"
 kill -TERM "$signal_worker_pid" 2>/dev/null || fail "cannot signal retirement worker"
-kill -CONT "$signal_worker_pid" 2>/dev/null || fail "cannot resume signalled retirement worker"
+# A stopped process's pending fatal TERM can be reaped by the kernel before
+# this CONT runs, racing it: the exit check just below covers both orders, so
+# CONT failing because the process is already gone is not itself a failure.
+kill -CONT "$signal_worker_pid" 2>/dev/null || true
 for _ in $(seq 1 400); do
   kill -0 "$signal_worker_pid" 2>/dev/null || break
   sleep 0.005
