@@ -1,0 +1,6 @@
+== HEAD
+exit=2 :: pkill -f fm-watch :: broad-watcher-kill]
+exit=2 :: while true; do pkill -f fm-watch; done :: broad-watcher-kill]
+exit=0 :: for i in 1; do echo x; done; kill 1; grep fm-watch f :: 
+exit=0 :: bin/fm-send.sh fm-x "add stop backstop; never pkill the fm-watch watcher" :: 
+exit=0 :: echo hi && for i in 1; do :; done; bin/fm-send.sh w "kill fm-watch" :: 

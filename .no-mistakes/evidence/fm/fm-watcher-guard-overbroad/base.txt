@@ -1,0 +1,2 @@
+BASE exit=2 :: for i in 1; do echo x; done; kill 1; grep fm-watch f
+BASE exit=0 :: bin/fm-send.sh fm-x "add stop backstop; never pkill the fm-watch watcher"
