@@ -3,8 +3,8 @@
 # terminal adapter primitives in bin/backends/orca.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 # A claude spawn writes workspace trust into the launching user's own store,
@@ -39,7 +39,12 @@ COUNT_FILE="$RESP/.count"
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 {
   printf 'orca'
-  for a in "$@"; do printf '\x1f%s' "$a"; done
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = --text ]; then a=$(fm_fake_sourced_launch "$a"); fi
+    printf '\x1f%s' "$a"
+    prev=$a
+  done
   printf '\n'
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
@@ -54,6 +59,7 @@ fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fb/orca"
   chmod +x "$fb/orca"
   fm_fake_harness_clis "$fb"
   printf '%s\n' "$fb"

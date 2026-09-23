@@ -8,12 +8,17 @@
 # a long-running system binary named `claude`, which is exactly the process
 # identity the tmux agent-state classifier reads.
 #
-# The defect: a launch command typed into a fresh pane arrived cut short in the
-# middle of its `"$(...fm-operational-in` substitution, the shell sat at a
-# `dquote cmdsubst>` continuation prompt, and the spawn still reported success.
+# The defect: a launch command typed into a fresh pane arrived cut short, the
+# shell sat at a continuation prompt, and the spawn still reported success.
 # The next relaunch typed its own command into that open quote. A tmux shim
-# reproduces the cut on the launch literal only, exactly where the incident's
-# fell, and lets every other byte through to the real server.
+# reproduces a cut on the typed launch line only, leaving its quote open, and
+# lets every other byte through to the real server.
+#
+# The cause: a pane shell running a pre-prompt hook (mise's, after each typed
+# export) is not in its line editor, so typed text waits in the terminal's
+# canonical input, which keeps only its first 1024 bytes on macOS and drops the
+# rest with the Enter behind it. The slow-hook case types through a shell whose
+# every prompt waits on such a hook, with no shim at all.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,6 +37,7 @@ fi
 
 LAB=$(fm_test_tmproot fm-spawn-launch-confirm)
 SOCKET="fm-launch-$$"
+SLOW_HOOK_SECONDS=2
 REAL_TMUX=$(command -v tmux)
 TASK_IDS=()
 
@@ -49,8 +55,8 @@ mkdir -p "$LAB/bin" "$LAB/agent" "$LAB/home"
 ln -s "$SLEEP_BIN" "$LAB/agent/claude"
 
 # Every bare `tmux` call reaches the private server. While the garble counter
-# file holds a positive count, a launch literal loses everything from inside
-# its operational-input substitution onward - the incident's exact cut.
+# file holds a positive count, the typed launch line loses its tail from inside
+# the quoted launch-file path onward, leaving that quote open.
 cat > "$LAB/bin/tmux" <<SH
 #!/usr/bin/env bash
 args=("\$@")
@@ -58,11 +64,11 @@ if [ "\${1:-}" = send-keys ] && [ -s "$LAB/garble" ]; then
   last=\$((\${#args[@]} - 1))
   payload=\${args[\$last]}
   case "\$payload" in
-    *'encode launch-brief'*)
+    ". '"*"/launch.sh'")
       left=\$(cat "$LAB/garble")
       if [ "\$left" -gt 0 ]; then
         printf '%s\n' "\$((left - 1))" > "$LAB/garble"
-        args[\$last]=\${payload%%operational-input*}operational-in
+        args[\$last]=\${payload%launch.sh\'}lau
       fi
       ;;
   esac
@@ -74,10 +80,23 @@ cat > "$LAB/bin/labshell" <<SH
 #!/bin/sh
 exec "$PANE_SHELL" $PANE_SHELL_ARGS
 SH
-# treehouse get opens a subshell in the pool worktree the case names.
+# The same shell, except that every prompt first waits on a slow pre-prompt
+# hook, during which the shell is not reading typed input with its line editor.
+mkdir -p "$LAB/slowzd"
+printf 'precmd() { sleep %s; echo >> "%s"; }\n' "$SLOW_HOOK_SECONDS" "$LAB/hook-runs" > "$LAB/slowzd/.zshrc"
+cat > "$LAB/bin/slowshell" <<SH
+#!/bin/sh
+case "$PANE_SHELL" in
+  *zsh) ZDOTDIR="$LAB/slowzd" exec "$PANE_SHELL" -d -i ;;
+  *) PROMPT_COMMAND="sleep $SLOW_HOOK_SECONDS; echo >> '$LAB/hook-runs'" exec "$PANE_SHELL" $PANE_SHELL_ARGS ;;
+esac
+SH
+# treehouse get opens a subshell in the pool worktree the case names, slow when
+# the case asks for it.
 cat > "$LAB/bin/treehouse" <<SH
 #!/bin/sh
 cd "\$(cat "$LAB/next-wt")" || exit 1
+[ -e "$LAB/slow-next" ] && exec "$LAB/bin/slowshell"
 exec "$LAB/bin/labshell"
 SH
 # The stand-in harness ignores its arguments and runs as a process named claude.
@@ -88,7 +107,7 @@ cat > "$LAB/bin/claude" <<SH
 printf 'task=%s\n' "\${FM_TASK_ID:-}" >> "$LAB/agent-starts"
 exec "$LAB/agent/claude" 600
 SH
-chmod +x "$LAB/bin/tmux" "$LAB/bin/labshell" "$LAB/bin/treehouse" "$LAB/bin/claude"
+chmod +x "$LAB/bin/tmux" "$LAB/bin/labshell" "$LAB/bin/slowshell" "$LAB/bin/treehouse" "$LAB/bin/claude"
 
 PATH="$LAB/bin:$PATH"
 export PATH
@@ -135,7 +154,7 @@ run_fm() {  # <script> <args...>
   FM_ROOT_OVERRIDE='' FM_HOME="$CASE_HOME" HOME="$CASE_HOME/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$CASE_HOME/state" FM_DATA_OVERRIDE="$CASE_HOME/data" \
     FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
-    FM_SPAWN_NO_GUARD=1 FM_SPAWN_LAUNCH_POLLS=20 FM_SPAWN_LAUNCH_POLL_INTERVAL=0.25 \
+    FM_SPAWN_NO_GUARD=1 FM_SPAWN_LAUNCH_POLLS=${CASE_LAUNCH_POLLS:-20} FM_SPAWN_LAUNCH_POLL_INTERVAL=0.25 \
     FM_CONTROL_LAUNCH_WAIT=10 \
     "$ROOT/bin/$script" "$@" 2>&1
 }
@@ -227,6 +246,43 @@ test_relaunch_clears_a_poisoned_prompt() {
   pass "a relaunch clears a continuation prompt before typing its launch"
 }
 
+# The cause, with no shim: every line typed into the pane lands while its shell
+# waits on a slow pre-prompt hook, outside its line editor. The launch must still
+# arrive whole, with every line typed ahead of it in place.
+# Named mutant: type the whole launch command in place of the short line that
+# sources its launch file. The command is cut at the canonical-input limit and
+# its Enter lost, so no agent ever starts and the spawn fails.
+test_spawn_launch_survives_a_slow_prompt_hook() {
+  local id=launch-slowhook-z4 out rc runs launch_bytes
+  new_case slowhook "$id"
+  garble_next 0
+  : > "$LAB/hook-runs"
+  : > "$LAB/slow-next"
+  # Long enough for the hook each typed line triggers to run in turn.
+  out=$(CASE_LAUNCH_POLLS=$((SLOW_HOOK_SECONDS * 4 * 8)) run_fm fm-spawn.sh "$id" "$CASE_PROJ" \
+    --harness claude --mode no-mistakes --yolo off); rc=$?
+  rm -f "$LAB/slow-next"
+  expect_code 0 "$rc" "a spawn into a shell with a slow prompt hook should start its agent"$'\n'"$out"$'\n'"$(pane_tail "$id")"
+  assert_contains "$out" "spawned $id" "the spawn should report success"
+  [ "$(window_state "$id")" = alive ] \
+    || fail "a reported spawn must have a running agent (reads $(window_state "$id"))"$'\n'"$(pane_tail "$id")"
+  assert_grep "task=$id" "$LAB/agent-starts" "the lines typed ahead of the launch must land too"
+  # The case must really exercise the cause: the hook ran for the typed lines,
+  # and the launch command the pane ran, which its launch file holds, is longer
+  # than the platform keeps for one line of canonical input. That holds for
+  # macOS's 1024 bytes; Linux keeps 4096, more than this launch, so there the
+  # case proves only that a launch through a slow hook still starts.
+  runs=$(wc -l < "$LAB/hook-runs" | tr -d ' ')
+  [ "$runs" -ge 3 ] || fail "the pane shell's prompt hook must run for the typed lines (ran $runs times)"
+  launch_bytes=$(wc -c < "/tmp/fm-$id/launch.sh" | tr -d ' ')
+  if [ "$(uname -s)" = Darwin ]; then
+    [ "${launch_bytes:-0}" -gt 1024 ] \
+      || fail "the launch must exceed macOS's 1024-byte canonical-input limit for the case to prove anything (it is ${launch_bytes:-0} bytes)"
+  fi
+  pass "a launch typed while the pane shell runs a slow prompt hook starts the agent"
+}
+
 test_spawn_refuses_to_report_a_launch_that_never_started
 test_spawn_recovers_a_launch_cut_once
 test_relaunch_clears_a_poisoned_prompt
+test_spawn_launch_survives_a_slow_prompt_hook

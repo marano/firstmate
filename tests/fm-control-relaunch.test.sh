@@ -19,8 +19,8 @@
 #      agent exited.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -72,6 +72,7 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      payload=$(fm_fake_sourced_launch "$payload")
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
@@ -124,6 +125,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fb/tmux"
   chmod +x "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash

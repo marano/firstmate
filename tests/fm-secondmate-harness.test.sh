@@ -43,8 +43,8 @@
 #      flags still win.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -692,7 +692,7 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          printf '%s\n' "$(fm_fake_sourced_launch "$a")" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
       done
@@ -702,6 +702,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
   # BASE_PATH deliberately omits the developer's node, which the trust

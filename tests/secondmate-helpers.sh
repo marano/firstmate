@@ -7,8 +7,8 @@
 # init/doctor), so they live here rather than in the generic tests/lib.sh. The
 # generic git/identity/meta primitives come from lib.sh, which this file pulls in.
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW plus every window this stub created whose task is still
@@ -31,9 +31,14 @@ make_fake_tmux() {
 set -u
 case "${1:-}" in
   has-session|new-session|new-window|send-keys|kill-window)
-    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    logged=()
     prev=
     for arg in "$@"; do
+      if [ "$1" = send-keys ] && [ "$prev" = -l ]; then
+        logged+=("$(fm_fake_sourced_launch "$arg")")
+      else
+        logged+=("$arg")
+      fi
       if [ "$1" = new-window ] && [ "$prev" = -n ]; then
         printf '%s\n' "$arg" >> "$FM_FAKE_TMUX_LOG.created"
       elif [ "$1" = kill-window ] && [ "$prev" = -t ] && [ -f "$FM_FAKE_TMUX_LOG.created" ]; then
@@ -42,6 +47,7 @@ case "${1:-}" in
       fi
       prev=$arg
     done
+    printf '%s\n' "${logged[*]}" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
   list-windows)
@@ -99,6 +105,7 @@ EOF
 esac
 exit 1
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u

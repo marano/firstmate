@@ -134,7 +134,7 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          printf '%s\n' "$(fm_fake_sourced_launch "$a")" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
       done
@@ -144,7 +144,36 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
+}
+
+# fm_test_fake_sourced_launch_fn <fake-script>
+# fm-spawn.sh types a launch as a short line sourcing a launch file, which the
+# pane shell evaluates as the command the file holds. Inserts, right after the
+# fake's shebang line, fm_fake_sourced_launch <literal>: it prints the file's
+# command for such a line and the literal unchanged otherwise, so a fake's
+# launch log keeps reading as the command the agent was started with.
+fm_test_fake_sourced_launch_fn() {
+  local script=$1 tmp
+  tmp=$(mktemp "$script.XXXXXX") || return 1
+  {
+    head -n 1 "$script"
+    cat <<'SH'
+fm_fake_sourced_launch() {
+  local f
+  case "$1" in
+    ". '"*"'")
+      f=${1#". '"}
+      f=${f%"'"}
+      if [ -f "$f" ]; then cat "$f"; return 0; fi
+      ;;
+  esac
+  printf '%s' "$1"
+}
+SH
+    tail -n +2 "$script"
+  } > "$tmp" && mv "$tmp" "$script"
 }
 
 # fm_test_fake_tmux_send <fakebin>

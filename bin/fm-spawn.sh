@@ -81,10 +81,17 @@
 #   Before typing anything, a relaunch clears whatever the adopted shell still
 #   holds with Ctrl+C, so a previous launch that never landed - a partial line
 #   or an open quote - cannot swallow the replacement's.
+# Launch file: the launch command is never typed whole. Typed text that
+#   arrives while the pane shell is not in its line editor - still starting, or
+#   running a pre-prompt hook such as mise's after each typed export - is held
+#   by the terminal's canonical input, which keeps only its first 1024 bytes on
+#   macOS and drops the rest along with the Enter behind it. So the command is
+#   written to a private launch.sh in the per-task temp root and the pane is
+#   typed only a short line sourcing it, which evaluates the command in the pane
+#   shell exactly as typing it would.
 # Launch confirmation: a typed launch is never its own proof that an agent
-#   started. A line longer than the terminal's canonical-input limit (1024
-#   bytes on macOS) that arrives before the pane shell's line editor is running
-#   is cut short, which can leave the shell at a continuation prompt with no
+#   started. A launch line can still be cut short or garbled on its way into
+#   the pane, which can leave the shell at a continuation prompt with no
 #   agent at all. On a backend whose agent-state classifier proves a launched
 #   agent from the pane's own processes (bin/fm-backend.sh's
 #   fm_backend_launch_confirmable: tmux) every launch, fresh or relaunch,
@@ -3765,7 +3772,7 @@ spawn_clear_shell_input() {
 }
 
 spawn_type_launch() {
-  spawn_send_literal "$T" "$LAUNCH"
+  spawn_send_literal "$T" "$LAUNCH_LINE"
   sleep 0.3
   spawn_send_key "$T" Enter
 }
@@ -4809,8 +4816,24 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# The header's "Launch file" paragraph owns why only this short line is typed.
+# The temp root must be this user's own real directory, since the pane shell
+# runs whatever launch.sh holds.
+if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ]; then
+  echo "error: per-task temp root $TASK_TMP is not a directory owned by this user; refusing to write a launch file there; inspect window $T" >&2
+  exit 1
+fi
+LAUNCH_FILE="$TASK_TMP/launch.sh"
+if ! LAUNCH_FILE_TMP=$(mktemp "$TASK_TMP/.launch.sh.XXXXXX") ||
+  ! printf '%s\n' "$LAUNCH" >"$LAUNCH_FILE_TMP" ||
+  ! mv -f "$LAUNCH_FILE_TMP" "$LAUNCH_FILE"; then
+  rm -f "${LAUNCH_FILE_TMP:-}" 2>/dev/null || true
+  echo "error: could not write the launch file $LAUNCH_FILE; inspect window $T" >&2
+  exit 1
+fi
+LAUNCH_LINE=". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" "$LAUNCH_LINE"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
