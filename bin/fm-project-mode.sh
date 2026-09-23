@@ -34,7 +34,12 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+#
+# --strict instead prints nothing and exits 3 when the registry or the project is
+# absent, so a caller that must tell "registered without merge authority" apart
+# from "never registered" (bin/fm-merge-hold-lib.sh) does not read the fallback as
+# a registered posture. An unknown mode on a registered project still falls back.
+# Usage: fm-project-mode.sh [--raw] [--strict] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,13 +48,18 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+STRICT=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --raw) RAW=1; shift ;;
+    --strict) STRICT=1; shift ;;
+    *) break ;;
+  esac
+done
+NAME=${1:?usage: fm-project-mode.sh [--raw] [--strict] <project-name>}
 
 if [ ! -f "$REG" ]; then
+  [ "$STRICT" -eq 0 ] || exit 3
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
@@ -72,6 +82,7 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  [ "$STRICT" -eq 0 ] || exit 3
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0

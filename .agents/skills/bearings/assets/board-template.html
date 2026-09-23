@@ -502,6 +502,11 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+      if (item.held_because) {
+        var held = el("div", "bb-ctx");
+        held.appendChild(ctxRow("held because", item.held_because));
+        pad.appendChild(held);
+      }
       if (item.pr_url) {
         var pr = el("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";

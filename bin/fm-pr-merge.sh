@@ -98,7 +98,8 @@
 # meta yolo=on or its id is in that record's merge-grant list; otherwise it is
 # held for the captain return. An unreadable record refuses rather than being
 # skipped. Neither posture releases a captain hold, and the grant lapses when
-# the record is archived.
+# the record is archived. Both hold refusals follow with `held because:` lines
+# naming the reasons bin/fm-merge-hold-lib.sh derives from structured records.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
@@ -183,6 +184,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-branch-orphan-lib.sh"
 # shellcheck source=bin/fm-linear-lib.sh
 . "$SCRIPT_DIR/fm-linear-lib.sh"
+# shellcheck source=bin/fm-merge-hold-lib.sh
+. "$SCRIPT_DIR/fm-merge-hold-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -944,6 +947,26 @@ record_pr_metadata() {
   }
 }
 
+# Name why a refused merge is held, from the task's structured records only
+# (bin/fm-merge-hold-lib.sh owns the reasons and their wording), so a refusal
+# never leaves the captain to guess whether the hold was his own ruling.
+merge_hold_explain() {
+  local reasons
+  if fm_merge_hold_task "$FM_HOME" "$STATE" "$DATA" "$ID"; then
+    reasons=$FM_MERGE_HOLD_REASONS
+  else
+    reasons=
+  fi
+  if [ -z "$reasons" ]; then
+    echo "error: held because: nothing in the task's records explains this hold" >&2
+    return 0
+  fi
+  printf '%s\n' "$reasons" | while IFS='	' read -r _kind text; do
+    [ -n "$text" ] || continue
+    printf 'error: held because: %s\n' "$text" >&2
+  done
+}
+
 require_released_captain_hold() {
   local hold_status=0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -951,6 +974,7 @@ require_released_captain_hold() {
   case "$hold_status" in
     0)
       echo "error: task $ID is still held for the captain; release it before merging" >&2
+      merge_hold_explain
       return 1
       ;;
     1|3) return 0 ;;
@@ -981,6 +1005,7 @@ require_away_merge_grant() {
       ;;
     *)
       echo "error: task $ID is held for the captain return" >&2
+      merge_hold_explain
       ;;
   esac
   return 1

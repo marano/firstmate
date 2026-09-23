@@ -134,7 +134,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-meta-keys-lib.sh`    | Own the task record's key vocabulary and its order-free, no-repeat contract, shared by the record's producers and readers |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, capture the pipeline's validation receipt for the bound head, then atomically arm a static merge poll; refuse to replace a recorded PR whose merge has not been reported unless `--replace` |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, capture the pipeline's validation receipt for the bound head, then atomically arm a static merge poll; refuse to replace a recorded PR whose merge has not been reported unless `--replace`; report why the PR waits for the captain (`fm-merge-hold-lib.sh`) and republish the ready line on every registration |
+| `fm-merge-hold-lib.sh`   | The one owner of why a task's PR waits for the captain instead of merging on standing authority, from structured records only |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub or GitLab URL, refuse an outcome it cannot prove landed or queued, delete the merged pull request's own head branch when safe, recording a failed deletion for later sweep, then retry any branches already recorded for that repository |
 | `fm-main-ci.sh`          | Arm, after a confirmed GitHub merge, a registered watch on the base branch's own CI run for the merge commit, and run it: one wake on red, on no run appearing, or on a run left open past its window, then retire |
 | `fm-branch-orphan-lib.sh` | Own the durable fleet-wide record of a merged head branch `fm-pr-merge.sh` could not delete |
@@ -144,7 +145,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-merge-authority-lib.sh` | Resolve merge authority at the gate, persist it against the accepted canonical PR, and identity-check its later poll consumption |
-| `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
+| `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it, deduplicated by exact content |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, write the ship instructions carrying that mode's definition of done, and supersede the task's brief so a later relaunch cannot revive stale scout delivery text, applying the same grouping guard at the moment a scout becomes a ship worker |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and validate the native-only `ultra` effort |

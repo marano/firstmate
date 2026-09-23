@@ -171,7 +171,7 @@ LANE_SCRIPT_TIMEOUT_SECS=1000
 run_args=(--lane stock-bash
   --per-script-timeout-secs "$LANE_SCRIPT_TIMEOUT_SECS"
   --require-ok-count tests/fm-fleet-snapshot-view.test.sh=21
-  --require-ok-count tests/fm-bearings-snapshot.test.sh=59)
+  --require-ok-count tests/fm-bearings-snapshot.test.sh=60)
 [ -z "$JSON" ] || run_args+=(--json "$JSON")
 "$ROOT/bin/fm-test-run.sh" "${run_args[@]}" || exit 1
 

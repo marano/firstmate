@@ -68,6 +68,11 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     merge_hold is {held, reasons[{kind,text}]} on every ship task with a PR and
+#     null otherwise: why that PR waits for the captain instead of merging on
+#     standing authority, from bin/fm-merge-hold-lib.sh, which owns every reason
+#     and its wording. held is false and reasons empty when nothing on record
+#     holds it.
 #   capacity: what is actually occupying a concurrency slot, and what is free.
 #     The cap on work in progress is a captain preference applied by firstmate's
 #     judgement, not something any script enforces; this object exists so that
@@ -240,6 +245,9 @@ esac
 # shellcheck source=bin/fm-awaiting-landing-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"  # fm_awaiting_landing_read: THE owner of "awaiting landing"
+# shellcheck source=bin/fm-merge-hold-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-merge-hold-lib.sh"  # fm_merge_hold_reasons: THE owner of why a PR is held
 
 usage() {
   cat <<'EOF'
@@ -755,12 +763,44 @@ prefetch_task_current_states() {
   fi
 }
 
+# The active structured backlog holds, by task id, for merge_hold below: a hold
+# counts while its row is open, regardless of whether its hold-until date has
+# passed - the same as hold_bucket, which never treats an expired date as no
+# longer held. Built once from the already-parsed backlog.
+MERGE_HOLD_ACTIVE_HOLDS='{}'
+merge_hold_active_holds() {  # <backlog-json>
+  printf '%s' "$1" | jq -c '
+    [ (.records // [])[]
+      | select(.structured == true and .state != "done"
+               and .hold_reason != null and .hold_kind != null)
+      | {key:.id, value:{kind:.hold_kind, reason:.hold_reason}} ]
+    | from_entries'
+}
+
+# One PR-bearing ship task's merge_hold object: {held, reasons[{kind,text}]}.
+# bin/fm-merge-hold-lib.sh owns every reason and its wording; this only gathers
+# the structured inputs this snapshot already holds.
+snapshot_merge_hold_json() {  # <meta> <id> <yolo> <mode> <project-path>
+  local meta=$1 id=$2 yolo=$3 mode=$4 name=${5%/} downgrade registry hold_kind hold_reason
+  name=${name##*/}
+  downgrade=$(meta_value "$meta" yolo_downgrade_reason)
+  registry=$(fm_merge_hold_registry_yolo "$FM_HOME" "$DATA" "$name")
+  IFS=$'\t' read -r hold_kind hold_reason < <(
+    printf '%s' "$MERGE_HOLD_ACTIVE_HOLDS" | jq -r --arg id "$id" \
+      '(.[$id] // {kind:"",reason:""}) | [.kind, (.reason | gsub("[\t\n]"; " "))] | @tsv'
+  ) || true
+  fm_merge_hold_reasons "$yolo" "$mode" "$downgrade" "$name" "$registry" "${hold_kind:-}" "${hold_reason:-}" \
+    | jq -R -s '[ splits("\n") | select(length > 0)
+                  | (capture("^(?<kind>[^\t]*)\t(?<text>.*)$")?) | select(. != null) ]
+                | {held:(length > 0), reasons:.}'
+}
+
 task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen delivers backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json merge_hold_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -856,6 +896,10 @@ task_json_lines() {
       return 1
     }
     [ -f "$report_path" ] && report_present=1 || report_present=0
+    merge_hold_json=null
+    if [ -n "$pr" ] && [ "$kind" = ship ]; then
+      merge_hold_json=$(snapshot_merge_hold_json "$meta" "$id" "$yolo" "$mode" "$project")
+    fi
     meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
     report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
@@ -908,6 +952,7 @@ task_json_lines() {
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
+      --argjson merge_hold "$merge_hold_json" \
       '{
         id:$id,
         kind:$kind,
@@ -934,6 +979,7 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        merge_hold:$merge_hold,
         landing:{class:$landing_class,
                  target:($landing_target | if . == "" then null else . end),
                  detail:($landing_detail | if . == "" then null else . end)},
@@ -2009,6 +2055,7 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+MERGE_HOLD_ACTIVE_HOLDS=$(merge_hold_active_holds "$BACKLOG_JSON") || MERGE_HOLD_ACTIVE_HOLDS='{}'
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
