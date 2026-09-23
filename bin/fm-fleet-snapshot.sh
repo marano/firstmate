@@ -245,6 +245,9 @@ esac
 # shellcheck source=bin/fm-awaiting-landing-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"  # fm_awaiting_landing_read: THE owner of "awaiting landing"
+# shellcheck source=bin/fm-validation-receipt-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-validation-receipt-lib.sh"  # fm_validation_receipt_path: where the receipt it reads lives
 # shellcheck source=bin/fm-merge-hold-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-merge-hold-lib.sh"  # fm_merge_hold_reasons: THE owner of why a PR is held
@@ -271,7 +274,8 @@ Whether a done child is in that steady state is not decided here: every task
 record carries landing.class from bin/fm-awaiting-landing-lib.sh, the one owner
 of "awaiting landing", and landing_blocked flags only the class that owner
 reports as unable to land - a recorded forge head that is no longer this
-branch's work, which nobody should merge.
+branch's work, or that nothing on this machine holds, which nobody should
+merge.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until,
@@ -648,6 +652,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture report_path report_capture stopped_path stopped_capture
+  local receipt_path receipt_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -661,12 +666,19 @@ prefetch_task_observations() {  # <meta> <id>
   # so the whole derivation runs against one generation-guarded sample.
   stopped_path="$STATE/$id.agent-stopped"
   stopped_capture="$SNAPSHOT_TASK_DIR/$id.agent-stopped"
+  # The validation receipt is the only thing that vouches for a PR head the
+  # pipeline pushed, ahead of or rebased from the branch. Left out of the sample,
+  # every validated ship read as landing-blocked here. The copy keeps the
+  # receipt's own mode, so the owner reads it exactly as it reads the original.
+  receipt_path=$(fm_validation_receipt_path "$STATE" "$id")
+  receipt_capture=$(fm_validation_receipt_path "$SNAPSHOT_TASK_DIR" "$id")
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
     snapshot_mark_optional_present "$stopped_path" "$stopped_capture" || current_rc=1
+    snapshot_capture_optional "$receipt_path" "$receipt_capture" || current_rc=1
   fi
 
   if [ -n "$remote_host" ]; then
@@ -699,7 +711,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture" "$stopped_capture"
+    rm -f -- "$status_capture" "$report_capture" "$stopped_capture" "$receipt_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null

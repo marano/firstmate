@@ -1263,12 +1263,74 @@ EOF
   pass "home-summary reads the awaiting-landing owner: landing-ready is healthy, a diverged landing target is surfaced without making the home unreadable"
 }
 
+# A validated ship ends with the pipeline's own head on its PR, ahead of the
+# worker's branch, and only the durable validation receipt vouches for that
+# head. The snapshot derives landing from its own generation-guarded sample of
+# each task's records, so the receipt must be in that sample: without it every
+# validated ship read as landing-blocked here while the watcher read it as
+# awaiting landing.
+test_snapshot_reads_a_validated_pr_head_through_its_receipt() {
+  local home fakebin json out base pr_head
+  home=$(make_home snapshot-receipt)
+  fakebin=$(make_fakebin "$home")
+  fm_git_worktree "$home/repo" "$home/wt" fm/receipt-ship
+  base=$(git -C "$home/wt" rev-parse HEAD)
+  git -C "$home/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit'
+  pr_head=$(git -C "$home/wt" rev-parse HEAD)
+  git -C "$home/wt" reset --hard -q "$base"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] receipt-ship - Done child behind a validated PR (repo: alpha) (kind: ship) (since 2026-09-23)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/receipt-ship.meta" \
+    "window=firstmate:fm-receipt-ship" \
+    "worktree=$home/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/8" \
+    "pr_head=$pr_head"
+  record_claude_idle "$home/state" receipt-ship
+  printf 'done: PR https://github.com/kunchenguid/firstmate/pull/8 checks green run=r8\n' > "$home/state/receipt-ship.status"
+  : > "$home/state/receipt-ship.agent-stopped"
+  ( . "$ROOT/bin/fm-validation-receipt-lib.sh"
+    fm_validation_receipt_write "$home/state" receipt-ship github github.com kunchenguid/firstmate 8 \
+      "$pr_head" fm/receipt-ship 01RUNRUNRUNRUNRUNRUNRUNRUN ) \
+    || fail "could not write the fixture validation receipt"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "receipt-ship") | .landing)
+    | .class == "awaiting-landing" and .target == "validated"
+  ' >/dev/null || fail "a validated PR head ahead of the branch must read as awaiting landing: $json"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true and .invalidity == {kind:null,ids:[]}
+  ' >/dev/null || fail "a done child behind a validated PR must read as a healthy home: $out"
+
+  # Control: the same records without the receipt are blocked, so the quiet
+  # above came from the receipt the snapshot read.
+  rm -f "$home/state/receipt-ship.validation-receipt"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$json" | jq -e '
+    (.tasks[] | select(.id == "receipt-ship") | .landing.class) == "landing-blocked"
+  ' >/dev/null || fail "an ahead PR head with no receipt must stay landing-blocked: $json"
+  pass "the snapshot reads a validated PR head through its validation receipt, and without one it stays blocked"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_capacity_frees_the_slot_at_done_not_at_landing
 test_capacity_counts_an_unreadable_task_as_occupied
 test_home_summary_excludes_secondmate_from_child_inventory
 test_home_summary_reads_the_awaiting_landing_owner
+test_snapshot_reads_a_validated_pr_head_through_its_receipt
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
