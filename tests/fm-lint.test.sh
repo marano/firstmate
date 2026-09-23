@@ -1180,6 +1180,43 @@ test_rejects_direct_beads_cli_in_explicit_core_path() {
   pass "fm-lint.sh enforces backend purity for explicit core paths"
 }
 
+test_rejects_committed_mutant_marker() {
+  local tmp fakebin log lint_copy marker out rc
+  tmp=$(fm_test_tmproot fm-lint-mutant-marker)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mkdir -p "$tmp/repo/bin" "$tmp/repo/docs"
+  lint_copy="$tmp/repo/bin/fm-lint.sh"
+  cp "$LINT" "$lint_copy"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/repo/bin/fm-lint-workflows.sh"
+  chmod +x "$lint_copy" "$tmp/repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  # Built at runtime so this file never carries the marker itself.
+  marker="MUTANT-DO-NOT-""COMMIT"
+
+  # Docs and Markdown may name the marker, and the lint's own pattern is inert.
+  printf 'Workers tag mutants with %s.\n' "$marker" > "$tmp/repo/docs/notes.txt"
+  printf 'Never land a %s marker.\n' "$marker" > "$tmp/repo/README.md"
+  rc=0
+  out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" "$lint_copy" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "lint flagged docs or its own pattern as a mutant marker"$'\n'"$out"
+
+  for spelling in "$marker" "MUTANT_DO_NOT_""COMMIT" "do-not-""commit"; do
+    printf '// %s\nfoo()\n' "$spelling" > "$tmp/repo/extension.mjs"
+    rc=0
+    out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" "$lint_copy" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "lint accepted a committed mutant marker: $spelling"
+    assert_contains "$out" "mutation-testing marker in a tracked file" \
+      "lint did not name the mutant-marker violation: $spelling"
+    assert_contains "$out" "extension.mjs" "lint did not name the offending file: $spelling"
+  done
+
+  rc=0
+  out=$(cd "$tmp/repo" && PATH="$fakebin:$PATH" "$lint_copy" bin/fm-lint-workflows.sh extension.mjs 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "explicit path bypassed the mutant-marker lint"
+  pass "fm-lint.sh rejects a committed mutation-testing marker"
+}
+
 test_ignores_ambient_shellcheck_opts() {
   if ! pinned_ready; then
     fm_tool_skip shellcheck "ambient options regression check" "$REQUIRED"
@@ -1511,6 +1548,7 @@ test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_rejects_direct_beads_cli_invocations
 test_rejects_direct_beads_cli_in_explicit_core_path
+test_rejects_committed_mutant_marker
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete

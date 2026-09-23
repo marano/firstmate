@@ -254,6 +254,45 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
+# A verification mutant that a worker plants to prove a test reds is marked
+# "do not commit" in the source. Landing one disables real behavior (PR 90's
+# fix round shipped a forceStop with its kill signals commented out), so a
+# tracked file carrying such a marker fails lint. The pattern is a regex whose
+# own source does not spell the marker, so this script never matches itself;
+# Markdown and docs/ may name the marker and are skipped.
+fm_lint_run_mutant_marker() {
+  local -a candidates files
+  local path findings
+  candidates=()
+  if [ "$EXPLICIT_PATHS" -eq 0 ]; then
+    while IFS= read -r -d '' path; do
+      candidates+=("$path")
+    done < <(git ls-files -z 2>/dev/null || true)
+    if [ "${#candidates[@]}" -eq 0 ]; then
+      while IFS= read -r -d '' path; do
+        candidates+=("${path#./}")
+      done < <(find . -path ./.git -prune -o -type f -print0 2>/dev/null)
+    fi
+  else
+    candidates=("${ROOTS[@]}")
+  fi
+  files=()
+  for path in "${candidates[@]}"; do
+    case "$path" in
+      *.md|docs/*|*/docs/*) continue ;;
+    esac
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    files+=("$path")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  findings=$(printf '%s\0' "${files[@]}" \
+    | xargs -0 grep -I -n -i -E 'DO[-_]?NOT[-_]?COMMIT' 2>/dev/null || true)
+  [ -n "$findings" ] || return 0
+  printf 'fm-lint.sh: mutation-testing marker in a tracked file; a verification mutant must never land:\n%s\n' \
+    "$findings" >&2
+  return 1
+}
+
 # Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
 # out of firstmate's core scripts so every configured backend follows the same
 # lifecycle path.
@@ -663,6 +702,7 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
+  fm_lint_run_mutant_marker || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
   exit "$overall_rc"
 fi
@@ -977,6 +1017,12 @@ purity_rc=0
 fm_lint_run_backend_purity || purity_rc=$?
 if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
   overall_rc=$purity_rc
+fi
+
+marker_rc=0
+fm_lint_run_mutant_marker || marker_rc=$?
+if [ "$overall_rc" -eq 0 ] && [ "$marker_rc" -ne 0 ]; then
+  overall_rc=$marker_rc
 fi
 
 if [ "$overall_rc" -eq 0 ]; then
