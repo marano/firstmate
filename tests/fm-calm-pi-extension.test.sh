@@ -2179,8 +2179,12 @@ TS
   start_geometry_pi() {
     local session_arg=$1
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    # Without COLORFGBG, every host takes the path a CI runner takes: a detached
+    # tmux never answers Pi's terminal-background query, so Pi saves no theme
+    # and each /reload waits up to 100ms on that query with keys going to its
+    # reload box, which discards them.
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env -u COLORFGBG FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
   capture_geometry_viewport() {
@@ -2202,13 +2206,17 @@ TS
   wait_for_geometry_transition() {
     local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
     while [ "$attempt" -lt 600 ]; do
-      capture_geometry_viewport "$file" || true
       # The transient row can come and go between two viewport samples, so
       # decide whether it rendered from the recorded terminal stream instead.
+      # Read the recording BEFORE capturing the viewport. A capture taken first
+      # can predate the paint the recording then shows, so the row looks gone
+      # while the reload has only just begun - and until it finishes Pi hands
+      # every key to its reload box, which discards them.
       if [ "$saw_transient" -eq 0 ] \
         && sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' "$reload_stream" 2>/dev/null | grep -Fq "$transient_text"; then
         saw_transient=1
       fi
+      capture_geometry_viewport "$file" || true
       if [ "$saw_transient" -eq 1 ] && ! grep -Fq "$transient_text" "$file" 2>/dev/null \
         && grep -Fq "$final_text" "$file" 2>/dev/null; then
         return 0
@@ -2275,30 +2283,24 @@ TS
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
-  # One press, and a failure that names which of the two causes it was. A second
-  # press here would hide a dropped keypress, which is a defect this case exists
-  # to catch, so instead the pane recording above decides: Pi writes to the pane
-  # whenever it acts on Ctrl+T, so no bytes at all means the key never arrived,
-  # while bytes followed by no row means the expansion itself did not happen.
-  # Measured on this host over 8 runs, Pi first writes to the pane 11-17ms after
-  # the key and the row is up by 17-24ms. The bound is 20s rather than 6s not
-  # because the expansion is ever slow, but so that a runner slow enough to be
-  # the real cause cannot be misreported as one of the two failures below.
-  ct_bytes_before=$(wc -c <"$reload_stream" | tr -d ' ')
-  i=0
-  while [ "$i" -lt 20 ]; do
-    sleep 0.3
-    ct_bytes_now=$(wc -c <"$reload_stream" | tr -d ' ')
-    [ "$ct_bytes_now" -eq "$ct_bytes_before" ] && break
-    ct_bytes_before=$ct_bytes_now
-    i=$((i + 1))
-  done
+  # One press: a second would hide a keypress Pi never acted on, which is a
+  # defect this case exists to catch. The /reload wait above returns only once
+  # the reload box is gone, so the key reaches the restored editor rather than
+  # the box. If the row still does not appear, Pi's own acknowledgement names
+  # the cause: acting on Ctrl+T, it saves the flipped hideThinkingBlock into the
+  # settings this case wrote and prints "Thinking blocks: visible". Either one
+  # means the key was handled; neither means it never reached the toggle. The
+  # row is up within 70ms of the key even with the CPU saturated and Pi held to
+  # a tenth of a core, so the ordinary ~6s wait leaves ample margin.
+  ct_stream_offset=$(wc -c <"$reload_stream" | tr -d ' ')
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
-  if ! wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" 400; then
-    ct_bytes_after=$(wc -c <"$reload_stream" | tr -d ' ')
-    [ "$ct_bytes_after" -gt "$ct_bytes_before" ] \
-      || fail "thinking expansion did not restore Calm-hidden reasoning, and Pi wrote nothing to the pane after the keypress, so the key never reached it"
-    fail "thinking expansion did not restore Calm-hidden reasoning, though Pi did repaint after the keypress"
+  if ! wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE"; then
+    if grep -Eq '"hideThinkingBlock"[[:space:]]*:[[:space:]]*false' "$config/settings.json" 2>/dev/null \
+      || tail -c +"$((ct_stream_offset + 1))" "$reload_stream" | sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' \
+        | grep -Fq 'Thinking blocks: visible'; then
+      fail "thinking expansion did not restore Calm-hidden reasoning, though Pi acknowledged the Ctrl+T toggle"
+    fi
+    fail "thinking expansion did not restore Calm-hidden reasoning, and Pi never acknowledged the Ctrl+T toggle, so the keypress never reached it"
   fi
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
