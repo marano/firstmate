@@ -733,7 +733,10 @@ fm_procevent_claim_state_locked() {
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then
     registration="$FM_PROCEVENT_CLAIM_REG_DIR/$1.source"
     current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
-    [ "$current_identity" = "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] && return 4
+    # The claim outlives a reboot, which can renumber the volume under an
+    # untouched registration (fm_pr_file_identity_same owns why only the inode
+    # binds it).
+    fm_pr_file_identity_same "$current_identity" "$FM_PROCEVENT_CLAIM_REG_IDENTITY" && return 4
   fi
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
