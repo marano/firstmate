@@ -176,11 +176,11 @@ fm_backend_tmux_error_says_absent() {  # <error-text>
 fm_backend_tmux_endpoint_claimants() {  # <target> <worktree>
   local window=${1#*:} worktree=$2 wt_real listing name path path_real found=0
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 2
-  if ! listing=$(LC_ALL=C tmux list-panes -a -F "#{session_name}:#{window_name}"$'\t'"#{pane_current_path}" 2>&1); then
+  if ! listing=$(LC_ALL=C tmux list-panes -a -F "#{session_name}:#{window_name}|#{pane_current_path}" 2>&1); then
     fm_backend_tmux_error_says_absent "$listing" && return 0
     return 2
   fi
-  while IFS=$'\t' read -r name path; do
+  while IFS='|' read -r name path; do
     [ -n "$name" ] || continue
     if [ "${name#*:}" = "$window" ]; then
       printf 'window %s\n' "$name"
