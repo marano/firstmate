@@ -1136,11 +1136,23 @@ classify() {  # <function> <status-line>
   ( . "$ROOT/bin/fm-classify-lib.sh" && "$1" "$2" )
 }
 
+# What the supervisor reads as the worker's current declaration in a status
+# file, through the same classifier.
+declared_line() {  # <status-file>
+  ( . "$ROOT/bin/fm-classify-lib.sh" && status_declared_line "$1" )
+}
+
+# Every line below lands in the WORKER'S status log, beside the worker's own
+# declaration, so each case also asserts that the declaration survives it.
+
 # Holder: one `note:` line naming the command and the queue, never a decision.
 # Mutants: drop the holder's status append (no line); append it with a
-# decision or blocker verb (the line then classifies as captain-relevant).
+# decision or blocker verb (the line then classifies as captain-relevant); stop
+# folding a note in status_declared_line (the note then erases the worker's
+# declared wait).
 HOLD_STATUS="$TMP_ROOT/hold.status"
-: >"$HOLD_STATUS"
+HOLD_WORKER_LINE='paused: running the long suite in the foreground, until 2026-09-21T01:00Z'
+printf '%s\n' "$HOLD_WORKER_LINE" >"$HOLD_STATUS"
 HOLD_MARK="$TMP_ROOT/hold-status-running"
 FM_TASK_STATUS="$HOLD_STATUS" FM_BUILD_LOCK_HOLD_WARN=2 \
   "$SCRIPT" sh -c "touch '$HOLD_MARK'; sleep 5" >/dev/null 2>&1 &
@@ -1152,8 +1164,8 @@ await_path "$HOLD_MARK" || fail "the holder-status fixture never started"
 HOLD_WAITER=$!
 wait "$HOLD_HOLDER" 2>/dev/null || true
 wait "$HOLD_WAITER" 2>/dev/null || true
-assert_equals 1 "$(grep -c '' "$HOLD_STATUS")" "a long hold must append exactly one status line, once per hold"
-HOLD_LINE=$(cat "$HOLD_STATUS")
+assert_equals 2 "$(grep -c '' "$HOLD_STATUS")" "a long hold must append exactly one status line, once per hold"
+HOLD_LINE=$(sed -n 2p "$HOLD_STATUS")
 case "$HOLD_LINE" in
   'note: holding the machine-wide build lock for '*) : ;;
   *) fail "the holder's status line must be an informational note: $HOLD_LINE" ;;
@@ -1165,33 +1177,90 @@ classify status_is_captain_relevant "$HOLD_LINE" \
   && fail "the holder's status line must not wake firstmate as a decision: $HOLD_LINE"
 classify status_line_is_unread_surface "$HOLD_LINE" \
   || fail "the holder's status line must reach firstmate's unread-status surface: $HOLD_LINE"
-pass "a hold past its ceiling appends one informational note to the task status file"
+assert_equals "$HOLD_WORKER_LINE" "$(declared_line "$HOLD_STATUS")" \
+  "the holder's note must leave the worker's own declared wait standing"
+pass "a hold past its ceiling appends one informational note, and the worker's declaration stands"
 
-# Waiter: a declared `paused:` wait naming the holder, then `working:` once in.
+# Waiter: a declared `paused:` wait naming the holder, keyed to this invocation,
+# closed once it gets in by a `resolved` line carrying that key and the measured
+# wait. What the supervisor reads afterwards must be the WORKER'S own last word,
+# whatever it was: a `working:` line here used to erase a worker's `paused:` at
+# the very moment its long run began, and its quiet pane was then alarmed as a
+# wedge. Run once over a worker that declared a wait and once over one that did
+# not, so the lock is shown both to leave a wait standing and to leave none of
+# its own behind.
 # Mutants: drop the waiter's status append; give it any verb but paused (the
-# supervisor then reads the idle waiter as wedged or as a decision).
-WAIT_STATUS="$TMP_ROOT/wait.status"
-: >"$WAIT_STATUS"
-WAIT_MARK="$TMP_ROOT/wait-status-running"
-"$SCRIPT" sh -c "touch '$WAIT_MARK'; sleep 3.5" >/dev/null 2>&1 &
+# supervisor then reads the idle waiter as wedged or as a decision); announce
+# `working:` on acquisition again, or resolve another key (the worker's own
+# declaration is then no longer what is read); stop folding a closed keyed wait
+# in status_declared_line (the lock's finished wait then stands in for the
+# worker's word, and reads the working worker as paused).
+wait_status_case() {  # <name> <worker-line>
+  local name=$1 worker_line=$2 statusf mark holder first second key
+  statusf="$TMP_ROOT/wait-$name.status"
+  mark="$TMP_ROOT/wait-$name-running"
+  printf '%s\n' "$worker_line" >"$statusf"
+  "$SCRIPT" sh -c "touch '$mark'; exec sleep 3.5" >/dev/null 2>&1 &
+  # shellcheck disable=SC2031
+  holder=$!
+  await_path "$mark" || fail "the $name waiter-status fixture never started"
+  FM_TASK_STATUS="$statusf" FM_BUILD_LOCK_WAIT_WARN=1 \
+    "$SCRIPT" printf 'waited-in\n' >/dev/null 2>&1
+  wait "$holder" 2>/dev/null || true
+  first=$(sed -n 2p "$statusf")
+  second=$(sed -n 3p "$statusf")
+  assert_equals 3 "$(grep -c '' "$statusf")" \
+    "a long wait must append exactly a paused line and its resolution ($name)"
+  classify status_is_paused "$first" \
+    || fail "the waiter's first status line must be a declared paused: wait: $first"
+  assert_contains "$first" 'printf' "the waiter's paused line must name what it is waiting to run"
+  assert_contains "$first" 'held by pid ' "the waiter's paused line must name the holder"
+  key=$(printf '%s\n' "$first" | sed -n 's/^paused \[key=\(build-lock-[0-9][0-9]*-[0-9][0-9]*\)\]: .*/\1/p')
+  [ -n "$key" ] || fail "the waiter's paused line must carry this invocation's key: $first"
+  case "$second" in
+    "resolved [key=$key]: acquired the machine-wide build lock after "*) : ;;
+    *) fail "once in, the waiter must resolve its own key with the time it waited: $second" ;;
+  esac
+  assert_equals "$worker_line" "$(declared_line "$statusf")" \
+    "after the lock is taken, the worker's own last word must be its declaration again ($name)"
+}
+wait_status_case declared 'paused: stock-Bash lane under way, ~20 min, until 2026-09-21T01:00Z'
+classify status_is_paused "$(declared_line "$TMP_ROOT/wait-declared.status")" \
+  || fail "a worker that declared a wait must still classify as a declared wait once the lock is taken"
+wait_status_case undeclared 'working: rebasing onto main'
+pass "a wait past its ceiling declares a keyed pause and resolves it, leaving the worker's own declaration standing"
+
+# A waiter that stops waiting without getting in closes its wait as well, so an
+# interrupted build is never read as a worker still waiting on the lock.
+# Mutant: drop the close from fm_build_lock_release_now; the lock's wait then
+# stays the declaration after the waiter is gone.
+QUIT_STATUS="$TMP_ROOT/wait-quit.status"
+QUIT_ERR="$TMP_ROOT/wait-quit.err"
+printf 'working: running the lane\n' >"$QUIT_STATUS"
+: >"$QUIT_ERR"
+"$SCRIPT" sh -c "touch '$TMP_ROOT/wait-quit-held'; while [ ! -e '$TMP_ROOT/wait-quit-release' ]; do sleep 0.05; done" \
+  >/dev/null 2>&1 &
 # shellcheck disable=SC2031
-WAIT_HOLDER=$!
-await_path "$WAIT_MARK" || fail "the waiter-status fixture never started"
-FM_TASK_STATUS="$WAIT_STATUS" FM_BUILD_LOCK_WAIT_WARN=1 \
-  "$SCRIPT" printf 'waited-in\n' >/dev/null 2>&1
-wait "$WAIT_HOLDER" 2>/dev/null || true
-WAIT_FIRST=$(sed -n 1p "$WAIT_STATUS")
-WAIT_SECOND=$(sed -n 2p "$WAIT_STATUS")
-assert_equals 2 "$(grep -c '' "$WAIT_STATUS")" "a long wait must append exactly a paused line and a working line"
-classify status_is_paused "$WAIT_FIRST" \
-  || fail "the waiter's first status line must be a declared paused: wait: $WAIT_FIRST"
-assert_contains "$WAIT_FIRST" 'printf' "the waiter's paused line must name what it is waiting to run"
-assert_contains "$WAIT_FIRST" 'held by pid ' "the waiter's paused line must name the holder"
-case "$WAIT_SECOND" in
-  'working: acquired the machine-wide build lock after '*) : ;;
-  *) fail "the waiter must say working: once it gets in: $WAIT_SECOND" ;;
+QUIT_HOLDER=$!
+await_path "$TMP_ROOT/wait-quit-held" || fail "the interrupted-wait fixture never took the lock"
+FM_TASK_STATUS="$QUIT_STATUS" FM_BUILD_LOCK_WAIT_WARN=1 "$SCRIPT" true >/dev/null 2>"$QUIT_ERR" &
+# shellcheck disable=SC2031
+QUIT_WAITER=$!
+await_grep '^paused \[key=build-lock-' "$QUIT_STATUS" || fail "the interrupted waiter never declared its wait"
+kill -TERM "$QUIT_WAITER" 2>/dev/null || true
+wait "$QUIT_WAITER" 2>/dev/null || true
+QUIT_KEY=$(sed -n 's/^paused \[key=\(build-lock-[0-9][0-9]*-[0-9][0-9]*\)\]: .*/\1/p' "$QUIT_STATUS")
+[ -n "$QUIT_KEY" ] || fail "the interrupted waiter's paused line must carry its key"
+case "$(sed -n 3p "$QUIT_STATUS")" in
+  "resolved [key=$QUIT_KEY]: stopped waiting for the machine-wide build lock after "*" without getting in") : ;;
+  *) fail "an interrupted waiter must resolve its own wait: $(cat "$QUIT_STATUS")" ;;
 esac
-pass "a wait past its ceiling appends a declared pause, then working once the lock is taken"
+assert_equals 'working: running the lane' "$(declared_line "$QUIT_STATUS")" \
+  "an interrupted waiter must leave the worker's own declaration, not its own wait, standing"
+touch "$TMP_ROOT/wait-quit-release"
+wait "$QUIT_HOLDER" 2>/dev/null || true
+settle_queue
+pass "a waiter that stops waiting without getting in resolves its own wait"
 
 # No FM_TASK_STATUS, no line anywhere: a path is never guessed from the task id
 # or the home. Mutant: derive a status path from FM_TASK_ID or FM_HOME when
@@ -1470,7 +1539,9 @@ pass "a dead holder's slot is reclaimed while a live holder keeps its own, and n
 # The whole suite above already runs with no slot-count file. This pins the
 # WORDING as well: the normalised stderr of a waiter and of a holder, the three
 # status-file lines, and --status held and free. The transcript below was
-# captured from the pre-change script and is identical to it.
+# captured from the pre-slots script and is identical to it, except that the
+# waiter's two status-file lines have since become a keyed wait and its
+# resolution (see the waiter's status case above for why).
 # Mutants: use the multi-slot --status format at N=1; rename slot 1's path; say
 # "build slot" instead of "build lock" at N=1 - each reds this transcript, and
 # the first two also red the existing --status and --lock-path cases above.
@@ -1484,6 +1555,7 @@ n1_transcript() {  # <root>
   norm() {
     sed -e "s#$w#WORK#g" -e "s#$lockroot#ROOT#g" \
         -e 's/pid [0-9][0-9]*/pid PID/g' \
+        -e 's/build-lock-[0-9][0-9]*-[0-9][0-9]*/build-lock-KEY/g' \
         -e "s/for $e/for AGE/g" -e "s/after $e/after AGE/g" \
         -e "s/WAITING $e/WAITING AGE/g" -e "s/waiting $e/waiting AGE/g" \
         -e "s/build lock $e/build lock AGE/g" -e "s/its slot $e/its slot AGE/g" \
@@ -1574,8 +1646,8 @@ fm-build-lock: waiting for the machine-wide build lock - this process is WAITING
 fm-build-lock: WARNING: this command has held the machine-wide build lock for AGE and is blocking every other local build: sleep 2 [in CWD]
 fm-build-lock: acquired the machine-wide build lock after AGE
 -- status --
-paused: waiting AGE for the machine-wide build lock to run sleep 2 [in CWD] - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
-working: acquired the machine-wide build lock after AGE
+paused [key=build-lock-KEY]: waiting AGE for the machine-wide build lock to run sleep 2 [in CWD] - held by pid PID for AGE running: sh -c touch\ \'WORK/h2\'\;\ while\ \[\ \!\ -e\ \'WORK/r2\'\ \]\;\ do\ sleep\ 0.05\;\ done [in CWD]
+resolved [key=build-lock-KEY]: acquired the machine-wide build lock after AGE
 note: holding the machine-wide build lock for AGE with 0 waiting, past the 1s ceiling; not being killed: sleep 2 [in CWD]
 == holder with a waiter ==
 fm-build-lock: WARNING: this command has held the machine-wide build lock for AGE and is blocking every other local build: sh -c touch\ \'WORK/h3\'\;\ sleep\ 6 [in CWD]
@@ -1905,14 +1977,14 @@ assert_grep '1 more - see mutex --status' "$W2_ERR" "the waiting notice must cou
 assert_grep 'acquired a machine-wide build slot after ' "$W2_ERR" "the waiter must report when it got a slot"
 W2_FIRST=$(sed -n 1p "$W2_STATUS")
 W2_SECOND=$(sed -n 2p "$W2_STATUS")
-assert_equals 2 "$(grep -c '' "$W2_STATUS")" "a long wait must append exactly a paused line and a working line"
+assert_equals 2 "$(grep -c '' "$W2_STATUS")" "a long wait must append exactly a paused line and its resolution"
 classify status_is_paused "$W2_FIRST" \
   || fail "the waiter's first status line must be a declared paused: wait: $W2_FIRST"
 assert_contains "$W2_FIRST" 'all 2 slots held' "the waiter's paused line must name the slot count"
 assert_contains "$W2_FIRST" 'held by pid ' "the waiter's paused line must name a holder"
 case "$W2_SECOND" in
-  'working: acquired a machine-wide build slot after '*) : ;;
-  *) fail "the waiter must say working: once it gets a slot: $W2_SECOND" ;;
+  'resolved [key=build-lock-'*']: acquired a machine-wide build slot after '*) : ;;
+  *) fail "the waiter must resolve its wait once it gets a slot: $W2_SECOND" ;;
 esac
 settle_root "$W2_ROOT"
 pass "a waiter at N>1 names the slot count and a holder, and declares its wait as paused"

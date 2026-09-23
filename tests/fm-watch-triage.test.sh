@@ -4685,6 +4685,9 @@ test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms()
 #   - fold a decision whatever key the resolution names: the other-key case.
 #   - fold back to the last paused line: the other-key and superseded cases.
 #   - never fold a captain-held line: both answered-hold cases.
+#   - never fold a note: both note cases.
+#   - never fold a keyed wait: the closed keyed-wait and build-lock cases.
+#   - fold any wait a bare resolution follows: the unkeyed-wait case.
 test_status_declared_line_classifier() {
   local dir f got
   dir="$TMP_ROOT/status-declared-line"; mkdir -p "$dir"; f="$dir/task.status"
@@ -4725,8 +4728,25 @@ test_status_declared_line_classifier() {
     'captain-held [key=shape]: held for the captain' 'resolved [key=shape]: this way'
   declared_is 'captain-held [key=shape]: held for the captain' 'a captain hold answered under another key' \
     'captain-held [key=shape]: held for the captain' 'resolved [key=other-call]: done'
+  declared_is 'paused: waiting on CI' 'a note after the wait' \
+    'paused: waiting on CI' 'note: the flaky case went green on a re-run'
+  declared_is '' 'notes only' 'note: holding the machine-wide build lock for 20m00s'
+  declared_is 'working: rebasing' 'a keyed wait its resolution closed' \
+    'working: rebasing' 'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' \
+    'resolved [key=build-lock-7-1700000000]: acquired the machine-wide build lock after 10m28s'
+  declared_is 'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' 'a keyed wait still open' \
+    'working: rebasing' 'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock'
+  declared_is 'paused: [key=ci] waiting on CI' 'a keyed wait closed under another key' \
+    'paused: [key=ci] waiting on CI' 'resolved [key=other-call]: done'
+  declared_is 'paused: suite under way, until 2026-09-21T01:00Z' 'the build lock queueing inside a declared wait' \
+    'paused: suite under way, until 2026-09-21T01:00Z' \
+    'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock' \
+    'resolved [key=build-lock-7-1700000000]: acquired the machine-wide build lock after 10m28s' \
+    'note: holding the machine-wide build lock for 20m00s with 0 waiting'
+  declared_is 'paused: waiting on CI' 'an unkeyed wait a bare resolution followed' \
+    'working: rebasing' 'paused: waiting on CI' 'resolved: answered'
   unset -f declared_is
-  pass "status_declared_line folds resolutions and the decisions they closed, and nothing else"
+  pass "status_declared_line folds notes, resolutions, and the decisions and keyed waits they closed, and nothing else"
 }
 
 # A stopped worker whose status log is <status-line>..., stale-ready as
