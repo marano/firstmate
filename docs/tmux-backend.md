@@ -68,6 +68,13 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+### Rebuilding a missing endpoint
+
+A reboot takes the tmux server and every task window down while each task's record and worktree survive, so its endpoint reads `missing`.
+`fm_backend_tmux_recreate_task` rebuilds it under the exact recorded session and window name, in the recorded worktree, through the same create path a fresh spawn uses, starting the recorded session first when it is gone.
+It refuses unless the endpoint still reads `missing`, the worktree exists, and nothing on the server could still own the task: the task's window name in any other session, or any pane whose working directory sits inside the worktree.
+`bin/fm-control.sh relaunch` is its only caller ([agent-control.md](agent-control.md) "Transactional relaunch"), and `tests/fm-backend-tmux-smoke.test.sh` proves it against a real tmux server.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.

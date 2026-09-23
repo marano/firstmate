@@ -75,9 +75,11 @@
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
-#   the new incarnation. The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   the new incarnation. An endpoint that is gone altogether is rebuilt by
+#   bin/fm-control.sh relaunch before it calls here, never by this flag. The
+#   replacement still never starts outside the copy holding the work: a Herdr
+#   shell that has drifted out of the recorded worktree is told once to return,
+#   and only a shell that will not go refuses.
 #   Before typing anything, a relaunch clears whatever the adopted shell still
 #   holds with Ctrl+C, so a previous launch that never landed - a partial line
 #   or an open quote - cannot swallow the replacement's.
@@ -1692,10 +1694,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing)
+      echo "error: task $ID's recorded endpoint is gone, and a relaunch adopts only an existing, positively agent-free endpoint; bin/fm-control.sh $ID relaunch rebuilds a missing endpoint in the recorded worktree where its backend can, then launches through here" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship

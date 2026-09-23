@@ -2709,9 +2709,177 @@ test_armed_poll_survives_a_later_producer_appending_its_own_key() {
   pass "an armed merge poll survives a later producer's own key and still refuses an injected one"
 }
 
+# A volume renumbered across a reboot, as the next reader sees it: every file
+# keeps its inode and its bytes, while each identity recorded before the reboot
+# still names the device number the volume had then (measured live: recorded
+# 16777231:<inode>, the same untouched file read back as 16777232:<inode>).
+# Each record is rewritten in place, so it keeps its own inode, mode, and single
+# link, and only the device half of its device:inode lines changes. A receipt
+# also binds the registration's bytes by hash, so that hash is re-taken from the
+# registration as rewritten, which is the registration it saw before the reboot.
+simulate_volume_renumbering() {  # <state> <task-id>
+  local state=$1 id=$2 live old registration receipt file reg_hash
+  live=$(fm_pr_file_device "$state") || return 1
+  old=$((live + 1))
+  registration="$state/$id.pr-poll-registration"
+  receipt="$state/$id.pr-poll-retirement"
+  for file in "$registration" "$receipt"; do
+    [ -f "$file" ] || continue
+    awk -v dev="$old" '/^[0-9]+:[0-9]+$/ { sub(/^[0-9]+/, dev) } { print }' "$file" > "$file.rewrite" \
+      && cat "$file.rewrite" > "$file" && rm -f "$file.rewrite" || return 1
+  done
+  if [ -f "$receipt" ] && [ -f "$registration" ]; then
+    reg_hash=$(fm_pr_sha256 "$registration") || return 1
+    awk -v hash="$reg_hash" 'NR == 12 { $0 = hash } { print }' "$receipt" > "$receipt.rewrite" \
+      && cat "$receipt.rewrite" > "$receipt" && rm -f "$receipt.rewrite" || return 1
+  fi
+}
+
+# Prove a renumbering case is not vacuous: the recorded data identity must name
+# a device the sidecar is no longer on, and the same inode it still has.
+assert_recorded_device_is_stale() {  # <state> <task-id>
+  local state=$1 id=$2 recorded live
+  recorded=$(sed -n '10p' "$state/$id.pr-poll-registration")
+  live=$(fm_pr_file_identity "$state/$id.pr-poll")
+  [ "${recorded%%:*}" != "${live%%:*}" ] \
+    || fail "the renumbering fixture left the recorded device current ($recorded vs $live), so this case proves nothing"
+  [ "${recorded#*:}" = "${live#*:}" ] \
+    || fail "the renumbering fixture changed the recorded inode ($recorded vs $live)"
+}
+
+# Swap <file> for a copy with the same bytes, mode, and name but a new inode.
+replace_with_identical_copy() {  # <file>
+  cp -p "$1" "$1.copy" && mv -f -- "$1.copy" "$1"
+}
+
+# Mutants this family reds by name:
+#   device-still-compared - fm_pr_file_identity_same comparing the whole
+#     device:inode string: every armed poll and pending receipt is refused after
+#     a renumbering (the first two assertions of each test below).
+#   inode-not-compared - fm_pr_file_identity_same accepting any two well-formed
+#     identities: a same-bytes replacement of the check or the sidecar
+#     authenticates (the replacement assertions below).
+test_armed_poll_survives_a_volume_renumbering() {
+  local dir state url rc artifact
+  dir=$(make_case renumbered-armed)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/34
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 34 "$POLL" \
+    || fail "could not prepare the poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the poll"
+  simulate_volume_renumbering "$state" task-a || fail "could not renumber the fixture volume"
+  assert_recorded_device_is_stale "$state" task-a
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a merge poll whose files were untouched was refused once its volume was renumbered"
+
+  # The symptom was the watcher's: it refused the poll as an unauthenticated
+  # custom check, so no merge would have been noticed. The stop check ends a
+  # cycle whose poll stays silent on an open PR, and the poll's own gh call is
+  # the evidence it ran.
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the bounded watcher did not complete: $(cat "$dir/watch.err")"
+  assert_no_grep 'rejected unauthenticated state checks' "$state/.wake-queue" \
+    "the watcher refused a renumbered volume's merge poll as unauthenticated"
+  assert_grep '--json state' "$dir/gh.log" \
+    "the watcher never ran the renumbered volume's merge poll"
+
+  # A replaced file is still refused, even with identical bytes: the inode is
+  # what the recorded identity still binds. Each replacement gets its own case,
+  # with no stop check, so the refusal alarm is what ends the watcher cycle.
+  for artifact in check.sh pr-poll; do
+    dir=$(make_case "renumbered-replaced-$artifact")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a "$url"
+    fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 34 "$POLL" \
+      || fail "could not prepare the $artifact replacement case's poll"
+    fm_pr_poll_publish_prepared || fail "could not publish the $artifact replacement case's poll"
+    simulate_volume_renumbering "$state" task-a || fail "could not renumber the $artifact replacement case"
+    replace_with_identical_copy "$state/task-a.$artifact" || fail "could not replace task-a.$artifact"
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "a same-bytes replacement of task-a.$artifact authenticated on a renumbered volume"
+    set +e
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "the bounded watcher did not complete after replacing task-a.$artifact: $(cat "$dir/watch.err")"
+    assert_grep 'rejected unauthenticated state checks' "$state/.wake-queue" \
+      "a same-bytes replacement of task-a.$artifact did not raise the unauthenticated-check alarm"
+    assert_no_grep '--json state' "$dir/gh.log" \
+      "the watcher ran a merge poll whose task-a.$artifact was replaced"
+  done
+
+  # Changed bytes in the same inode are refused as before.
+  dir=$(make_case renumbered-rewritten)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 34 "$POLL" \
+    || fail "could not prepare the rewritten case's poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the rewritten case's poll"
+  simulate_volume_renumbering "$state" task-a || fail "could not renumber the rewritten case"
+  printf '\n' >> "$state/task-a.check.sh"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "changed check bytes in the registered inode authenticated on a renumbered volume"
+
+  pass "an armed merge poll survives a volume renumbering and still refuses a replaced or rewritten file"
+}
+
+test_retirement_receipt_survives_a_volume_renumbering() {
+  local dir state url rc
+  dir=$(make_case renumbered-receipt)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/35
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" || fail "could not snapshot the receipt fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged || fail "could not publish the receipt"
+  simulate_volume_renumbering "$state" task-a || fail "could not renumber the receipt fixture"
+  assert_recorded_device_is_stale "$state" task-a
+  fm_pr_poll_retirement_state_valid "$state" task-a \
+    || fail "a retirement receipt was refused once its volume was renumbered"
+
+  # A restart after the receipt finishes the retirement once, with no second
+  # merged notification.
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/restart.out" 2> "$dir/restart.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the renumbered receipt's recovery watcher failed: $(cat "$dir/restart.err")"
+  assert_poll_absent "$state" task-a
+  ! grep -F 'task-a.check.sh: merged' "$dir/restart.out" >/dev/null \
+    || fail "the renumbered receipt's recovery repeated the merged notification"
+
+  # Recovery still refuses to remove a file it cannot prove is the registered one.
+  dir=$(make_case renumbered-receipt-replaced)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" || fail "could not snapshot the replacement fixture"
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged || fail "could not publish the replacement receipt"
+  simulate_volume_renumbering "$state" task-a || fail "could not renumber the replacement fixture"
+  replace_with_identical_copy "$state/task-a.check.sh" || fail "could not replace the check"
+  ! fm_pr_poll_retirement_state_valid "$state" task-a \
+    || fail "a same-bytes replacement of the check satisfied a renumbered receipt"
+  ! fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" \
+    || fail "retirement recovery reported success over a replaced check"
+  [ -f "$state/task-a.check.sh" ] && [ -f "$state/task-a.pr-poll-retirement" ] \
+    || fail "retirement recovery removed files it could not prove were the registered ones"
+
+  pass "a retirement receipt survives a volume renumbering and still refuses a replaced check"
+}
+
 test_parser_matrix
 test_record_authentication_is_position_free
 test_armed_poll_survives_a_later_producer_appending_its_own_key
+test_armed_poll_survives_a_volume_renumbering
+test_retirement_receipt_survives_a_volume_renumbering
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

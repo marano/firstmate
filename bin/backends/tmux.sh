@@ -148,12 +148,102 @@ fm_backend_tmux_window_inventory() {  # <session-target>
     printf '%s\n' "$windows"
     return 0
   fi
-  case "$windows" in
+  fm_backend_tmux_error_says_absent "$windows" && return 2
+  return 1
+}
+
+# fm_backend_tmux_error_says_absent: 0 when a failed tmux read's own error text
+# answers definitively that its session, or the whole server, does not exist.
+# The single owner of that classification for every read above and below.
+fm_backend_tmux_error_says_absent() {  # <error-text>
+  case "$1" in
     *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-      return 2
+      return 0
       ;;
   esac
   return 1
+}
+
+# fm_backend_tmux_endpoint_claimants: whatever on this tmux server could still
+# own a task whose recorded endpoint reads `missing`, one per line on stdout.
+# Its window name in ANY session could be that task's endpoint under a session
+# it was never recorded in, and any pane whose working directory sits inside
+# the recorded worktree could be an agent still working that copy; a second
+# endpoint beside either risks two agents on one worktree.
+#   0 - nothing claims it; a server that is not running has no panes at all.
+#   1 - something could; each claimant is printed.
+#   2 - the server or the worktree could not be read, which proves nothing.
+fm_backend_tmux_endpoint_claimants() {  # <target> <worktree>
+  local window=${1#*:} worktree=$2 wt_real listing name path path_real found=0
+  wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 2
+  if ! listing=$(LC_ALL=C tmux list-panes -a -F "#{session_name}:#{window_name}|#{pane_current_path}" 2>&1); then
+    fm_backend_tmux_error_says_absent "$listing" && return 0
+    return 2
+  fi
+  while IFS='|' read -r name path; do
+    [ -n "$name" ] || continue
+    if [ "${name#*:}" = "$window" ]; then
+      printf 'window %s\n' "$name"
+      found=1
+      continue
+    fi
+    [ -n "$path" ] || continue
+    path_real=$(cd "$path" 2>/dev/null && pwd -P) || path_real=$path
+    case "$path_real/" in
+      "$wt_real"/*)
+        printf 'pane in window %s at %s\n' "$name" "$path"
+        found=1
+        ;;
+    esac
+  done <<EOF
+$listing
+EOF
+  [ "$found" -eq 0 ] || return 1
+  return 0
+}
+
+# fm_backend_tmux_recreate_task: rebuild a recorded task endpoint whose window,
+# or whole server, is gone - after a reboot, say - under its exact recorded
+# session and window name, in the recorded worktree, through the create path a
+# fresh spawn uses (fm_backend_tmux_create_task). A gone session is started
+# first, detached, the way fm_backend_tmux_container_ensure starts the
+# dedicated one. Everything that licenses the rebuild is re-read here,
+# immediately before anything is created: the worktree exists, the endpoint
+# still reads `missing`, and nothing on the server could still own the task
+# (fm_backend_tmux_endpoint_claimants). Prints the new window id.
+fm_backend_tmux_recreate_task() {  # <target> <worktree>
+  local target=$1 worktree=$2 session window claimants rc
+  case "$target" in
+    *:*:*|'':*|*:'') echo "error: tmux endpoint '$target' is malformed" >&2; return 1 ;;
+    *:*) ;;
+    *) echo "error: tmux endpoint '$target' is malformed" >&2; return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  [ -d "$worktree" ] || { echo "error: worktree $worktree is missing, so endpoint $target is not recreated" >&2; return 1; }
+  [ "$(fm_backend_tmux_agent_state "$target")" = missing ] \
+    || { echo "error: endpoint $target is no longer missing, so it is not recreated" >&2; return 1; }
+  if claimants=$(fm_backend_tmux_endpoint_claimants "$target" "$worktree"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    1) echo "error: endpoint $target is not recreated because $(printf '%s' "$claimants" | paste -sd ';' -) could still own its task" >&2; return 1 ;;
+    *) echo "error: whether anything still owns endpoint $target could not be read, so it is not recreated" >&2; return 1 ;;
+  esac
+  if fm_backend_tmux_window_inventory "=$session" >/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    2) tmux new-session -d -s "$session" -c "${HOME:-/}" || return 1 ;;
+    *) echo "error: tmux session $session could not be read, so endpoint $target is not recreated" >&2; return 1 ;;
+  esac
+  fm_backend_tmux_create_task "=$session" "$window" "$worktree"
 }
 
 # fm_backend_tmux_kill: remove one explicitly named task window.

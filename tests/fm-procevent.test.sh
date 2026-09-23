@@ -620,6 +620,85 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
+# The same interrupted retirement, then a reboot that renumbers the volume: the
+# claim, which lives outside every home and survives the reboot, still names the
+# registration by the device number it had before, while the untouched
+# registration now reads back under a new one (measured live on macOS:
+# 16777231:<inode> became 16777232:<inode>). Only the device half of each
+# recorded device:inode pair, and the recorded state-root device beside it, is
+# rewritten, in place. Mutant device-still-compared (fm_pr_file_identity_same
+# comparing whole strings) reds this: the claim stops reading as a pending
+# retirement and the finished source runs again.
+renum_identity() {  # <file>: its live device:inode identity, by the library's own reader
+  bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_identity "$2"' _ "$ROOT" "$1"
+}
+RENUM_RM_BIN=$(fm_fakebin "$TMP_ROOT/renum-rm-bin")
+cat > "$RENUM_RM_BIN/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */renum-src.source|*/renum-repl-src.source) exit 1 ;; esac
+done
+exec "$REAL_RM" "$@"
+SH
+chmod +x "$RENUM_RM_BIN/rm"
+HRENUM="$TMP_ROOT/hrenum"; new_home "$HRENUM"
+fm_test_track_procevent_home "$HRENUM"
+pe_adapter "$HRENUM" register endnow renum-src -- /bin/echo "one terminal payload" >/dev/null
+out=$(PATH="$RENUM_RM_BIN:$PATH" pe_adapter "$HRENUM" start renum-src 2>&1)
+case "$out" in
+  *"cannot retire terminal source"*) ;;
+  *) fail "the renumbering case could not interrupt its terminal retirement: $out" ;;
+esac
+RENUM_CLAIM="$FM_PROCEVENT_CLAIM_ROOT/renum-src.claim"
+RENUM_SOURCE="$HRENUM/state/procevent/renum-src.source"
+renum_recorded=$(sed -n '6p' "$RENUM_CLAIM")
+renum_live=$(renum_identity "$RENUM_SOURCE")
+[ "$renum_recorded" = "$renum_live" ] \
+  || fail "the interrupted retirement's claim did not record the live registration identity ($renum_recorded vs $renum_live)"
+awk -v dev="$(( ${renum_live%%:*} + 1 ))" '
+  NR == 6 { sub(/^[0-9]+/, dev) }
+  NR == 9 && /^[0-9]+$/ { $0 = dev }
+  { print }
+' "$RENUM_CLAIM" > "$RENUM_CLAIM.rewrite"
+cat "$RENUM_CLAIM.rewrite" > "$RENUM_CLAIM"
+rm -f "$RENUM_CLAIM.rewrite"
+renum_recorded=$(sed -n '6p' "$RENUM_CLAIM")
+[ "${renum_recorded%%:*}" != "${renum_live%%:*}" ] && [ "${renum_recorded#*:}" = "${renum_live#*:}" ] \
+  || fail "the renumbering fixture did not leave a stale device over the same inode ($renum_recorded vs $renum_live)"
+out=$(pe_adapter "$HRENUM" reconcile)
+assert_contains "$out" "stopped=1" "a renumbered volume did not finish a pending retirement"
+assert_contains "$out" "started=0" "a renumbered volume restarted a source whose retirement was pending"
+assert_absent "$RENUM_SOURCE" "a renumbered volume left a pending retirement's registration in place"
+assert_absent "$RENUM_CLAIM" "a renumbered volume left a pending retirement's claim in place"
+[ "$(count_results "$HRENUM" renum-src)" = 1 ] \
+  || fail "a renumbered volume reran a source whose result was already terminal"
+
+# A registration replaced under that claim is a new generation, not the one the
+# claim finished, even with identical bytes, so it is launched rather than
+# retired on the old claim's word. Mutant inode-not-compared
+# (fm_pr_file_identity_same accepting any two well-formed identities) reds this:
+# the replacement reads as the finished generation and is dropped unrun.
+HREPL="$TMP_ROOT/hrenum-replaced"; new_home "$HREPL"
+fm_test_track_procevent_home "$HREPL"
+pe_adapter "$HREPL" register endnow renum-repl-src -- /bin/echo "one terminal payload" >/dev/null
+out=$(PATH="$RENUM_RM_BIN:$PATH" pe_adapter "$HREPL" start renum-repl-src 2>&1)
+case "$out" in
+  *"cannot retire terminal source"*) ;;
+  *) fail "the replacement case could not interrupt its terminal retirement: $out" ;;
+esac
+REPL_SOURCE="$HREPL/state/procevent/renum-repl-src.source"
+cp -p "$REPL_SOURCE" "$REPL_SOURCE.copy" && mv -f -- "$REPL_SOURCE.copy" "$REPL_SOURCE"
+repl_recorded=$(sed -n '6p' "$FM_PROCEVENT_CLAIM_ROOT/renum-repl-src.claim")
+repl_live=$(renum_identity "$REPL_SOURCE")
+[ "${repl_recorded#*:}" != "${repl_live#*:}" ] \
+  || fail "the replacement fixture kept the claimed registration's inode, so this case proves nothing"
+# A generous confirmation window keeps a runner slow to start under load from
+# reading as a failed launch; confirmation still ends as soon as it claims.
+out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=60 pe_adapter "$HREPL" reconcile)
+assert_contains "$out" "stopped=0" "a replaced registration was retired on a finished generation's claim"
+assert_contains "$out" "started=1" "a replaced registration was not launched as the new generation it is"
+pass "a pending terminal retirement survives a volume renumbering and never reruns its source"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then

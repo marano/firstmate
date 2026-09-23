@@ -52,10 +52,15 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
-#              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              bin/fm-spawn.sh --relaunch. A recorded endpoint that reads
+#              missing - its window or whole tmux server gone, as after a
+#              reboot - has no agent to exit, so relaunch rebuilds it in the
+#              recorded worktree first, and refuses while the backend cannot
+#              or anything else could still own the task
+#              (plan_missing_endpoint below). A failure before publication
+#              keeps the prior durable record in place and reports the
+#              concrete state; it never leaves a half-transitioned task
+#              claiming to be running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -624,6 +629,17 @@ relaunch_rollback() {
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
+    recreating)
+      # No agent was running to stop and none was started, so the instructions
+      # go back byte-exact as for a refusal. An endpoint that did get created
+      # is the task's own recorded one, left without an agent.
+      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+      fi
+      state=$(agent_state 2>/dev/null || printf unknown)
+      journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-endpoint-$state" || true
+      echo "error: relaunch of $ID could not recreate its missing endpoint, which now reads '$state'; no agent was running or started, its original instructions were restored, and its work is preserved at $WT" >&2
+      ;;
     stopping)
       state=$(agent_state 2>/dev/null || printf unknown)
       case "$state" in
@@ -658,6 +674,9 @@ relaunch_rollback() {
         # worse inaccuracy.
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+      elif [ "$ENDPOINT_RECREATE" = 1 ]; then
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
+        echo "error: $ID's missing endpoint was recreated but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
@@ -842,6 +861,44 @@ record_note() {
   esac
 }
 
+# plan_missing_endpoint: a recorded endpoint that reads `missing` - its window,
+# or its whole tmux server, gone, as after a reboot - holds no agent to stop,
+# and the launch owner adopts only an endpoint that exists. Relaunch then
+# rebuilds it in the recorded worktree through the backend's own create path
+# (recreate_endpoint below) and launches there. Decided before the checkpoint,
+# after safe_checkpoint has proved the worktree, so every refusal changes
+# nothing: the backend must be able to rebuild the recorded endpoint, and
+# nothing may still own the task (bin/fm-backend.sh's
+# fm_backend_endpoint_claimants).
+ENDPOINT_RECREATE=0
+plan_missing_endpoint() {
+  local claimants rc
+  [ "$(agent_state)" = missing ] || return 0
+  fm_backend_endpoint_recreatable "$BACKEND" \
+    || die "task $ID's recorded endpoint is gone, and the $BACKEND backend cannot rebuild it under its recorded identity, so a replacement has nowhere to launch; reconcile the task through its backend's own recovery path"
+  if claimants=$(fm_backend_endpoint_claimants "$BACKEND" "$T" "$WT"); then
+    ENDPOINT_RECREATE=1
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 1 ] \
+    || die "task $ID's recorded endpoint is gone, but $(printf '%s' "$claimants" | paste -sd ';' -) could still own the task; refusing to create a second endpoint for work that may still have an agent"
+  die "task $ID's recorded endpoint is gone, and whether anything else still owns the task could not be read; refusing to recreate it"
+}
+
+# recreate_endpoint: the stop step for a planned missing endpoint. Prints
+# `endpoint-recreated` once the rebuilt endpoint reads positively agent-free,
+# which is what the launch owner then requires before adopting it.
+recreate_endpoint() {
+  local state
+  fm_backend_recreate_task_endpoint "$BACKEND" "$T" "$WT" >/dev/null \
+    || die "task $ID's missing endpoint $T could not be recreated in $WT"
+  state=$(wait_agent_state "$SETTLE_WAIT" dead) \
+    || die "task $ID's recreated endpoint reads '$state' rather than an agent-free shell; refusing to launch into it"
+  printf 'endpoint-recreated'
+}
+
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
@@ -873,6 +930,7 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  plan_missing_endpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -880,8 +938,13 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$ENDPOINT_RECREATE" = 1 ]; then
+    journal_write recreating "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(recreate_endpoint)
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -907,7 +970,11 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$ENDPOINT_RECREATE" = 1 ]; then
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT endpoint_recreated=yes"
+  else
+    echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  fi
 }
 
 # --- verbs ------------------------------------------------------------------
