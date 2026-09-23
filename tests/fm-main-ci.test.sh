@@ -16,6 +16,8 @@
 #   conclude-window-ignored - a run that never concludes is polled forever
 #   arm-not-called         - bin/fm-pr-merge.sh no longer arms the watch
 #                            (tests/fm-pr-merge.test.sh)
+#   task-scoped-watch      - the watch is named after the task, so the merged
+#                            task's cleanup removes it (tests/fm-teardown.test.sh)
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
