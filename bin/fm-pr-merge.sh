@@ -146,6 +146,9 @@
 # repository, which re-verifies every condition live before deleting anything;
 # that sweep is bounded to recorded branches and never enumerates the remote.
 #
+# After a confirmed merge, bin/fm-main-ci.sh arms a watch on the base branch's
+# own CI run for the merge commit; that script's header owns the watch.
+#
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--unvalidated] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -1580,6 +1583,11 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# Same reached-only-after-proof point: the merge commit starts its own run on
+# the base branch, which the task's merge poll never sees. bin/fm-main-ci.sh
+# owns that watch, and arming it never changes this script's exit status.
+"$SCRIPT_DIR/fm-main-ci.sh" arm "$URL" || true
 
 # Same reached-only-after-proof point as the outcome report above. A failed or
 # skipped deletion is reported by the provider function and never changes this
