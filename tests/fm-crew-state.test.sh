@@ -1973,6 +1973,35 @@ test_no_run_idle_pane_paused() {
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
+# The build lock writes into the worker's own status log: a keyed wait it
+# resolves once the lock is taken, and a note past its hold ceiling. None of
+# that is the worker's word, so a worker that declared a wait before queueing
+# still reads as paused, with its own reason, rather than as the lock's
+# `working: acquired ...` line it used to report.
+# Mutant: read the log's last line again (log_last_line) - the state becomes
+# the lock's resolution or note instead of the worker's pause.
+test_no_run_idle_pane_paused_under_build_lock_lines() {
+  reset_fakes
+  local d; d=$(new_case paused-lock-lines)
+  make_repo_on_branch "$d/wt" fm/feat-lock-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-lock-pause.meta" "window=fm:fm-feat-lock-pause" "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'paused: stock-Bash lane under way, ~20 min\n'
+    printf 'paused [key=build-lock-4242-1700000000]: waiting 10m00s for the machine-wide build lock to run bin/fm-test-run.sh [in /wt]\n'
+    printf 'resolved [key=build-lock-4242-1700000000]: acquired the machine-wide build lock after 10m28s\n'
+    printf 'note: holding the machine-wide build lock for 20m00s with 1 waiting, past the 1200s ceiling; not being killed: bin/fm-test-run.sh [in /wt]\n'
+  } > "$d/state/feat-lock-pause.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-lock-pause
+  local out; out=$(run_crew_state "$d" feat-lock-pause)
+  assert_contains "$out" "state: paused" "the lock's own lines erased the worker's declared wait"
+  assert_contains "$out" "source: status-log" "the worker's wait -> status-log source"
+  assert_contains "$out" "stock-Bash lane under way" "the worker's own reason is the detail, not the lock's"
+  pass "no run + idle pane reads the worker's declared wait through the build lock's own lines"
+}
+
 test_no_run_idle_pane_custom_paused_verb() {
   reset_fakes
   local d; d=$(new_case custom-paused)
@@ -2920,6 +2949,7 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
+test_no_run_idle_pane_paused_under_build_lock_lines
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

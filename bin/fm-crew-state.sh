@@ -72,9 +72,9 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
-#      the run-step shows the run moved on, the log is deterministically stale and
-#      is flagged superseded. A genuinely parked run plus a needs-decision log
+#   3. Reconcile the status log: if its declared line (log_declared_line below)
+#      says needs-decision/blocked but the run-step shows the run moved on, the
+#      log is deterministically stale and is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal. Other daemon, timeout, or unreachability
@@ -83,9 +83,9 @@
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      recorded backend's pane busy state, then the status log's declared line
+#      only when its verb maps to a recognized run-state. Decision-only events
+#      such as `resolved` never become current state or detail.
 #   4b. Branch custody, orthogonal to 2-4: when the same `axi status` answer
 #      names this crew's branch with branch_sync.state=pipeline_owned, every
 #      line after that read carries a trailing custody segment naming the
@@ -184,10 +184,14 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
-log_last_line() {
+# The worker's current declaration, not the log's last line: a line a lock
+# helper or a resolution appended after it is not the worker's word, and
+# bin/fm-classify-lib.sh's status_declared_line owns which lines are folded and
+# why. Reading the last line instead reported a worker that had declared a wait
+# as `working`, from bin/fm-build-lock.sh's own acquisition line.
+log_declared_line() {
   [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
+  status_declared_line "$LOG"
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
@@ -209,7 +213,7 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(log_last_line || true)
+LOG_LINE=$(log_declared_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- deliberately stopped agent --------------------------------------------

@@ -124,8 +124,16 @@
 # ordinary status path. A holder appends an informational `note:` naming what it
 # runs, how long it has held and how many are queued; it is still working, so
 # the line never reads as a decision or a blocker. A waiter appends a declared
-# `paused:` wait naming the holder, and a `working:` line once it gets in, the
-# pairing a worker owes for any wait. Without FM_TASK_STATUS nothing is appended
+# `paused:` wait naming the holder, keyed to this invocation, and closes that
+# key with a `resolved` line carrying the measured wait once it gets in - or
+# once it stops waiting without getting in, so it never leaves a wait of its
+# own open. These lines share the worker's status log, so none of them may
+# stand in for what the WORKER last declared: a `working:` line here used to
+# erase a worker's own `paused:` the moment the lock was taken, which is the
+# moment its long run starts and its pane goes quiet. The supervisor's reader
+# of that declaration (bin/fm-classify-lib.sh's status_declared_line) folds a
+# `note:` and a keyed wait its resolution closed, so the worker's own line is
+# what it reads again. Without FM_TASK_STATUS nothing is appended
 # and no path is ever guessed: a captain's own terminal and pipeline agents keep
 # stderr only. A failed append never fails the build.
 #
@@ -1237,6 +1245,19 @@ fm_build_lock_wait_context() {
 
 # --- observable acquire -----------------------------------------------------
 
+# The declared wait this invocation opened in the task status log, if any, and
+# when its wait began. See A CEILING ALSO REACHES THE SUPERVISOR.
+FM_BUILD_LOCK_WAIT_KEY=
+FM_BUILD_LOCK_WAIT_START=
+
+# Close that wait, once, however the wait ended.
+fm_build_lock_close_wait() {  # <how-it-ended>
+  local key=$FM_BUILD_LOCK_WAIT_KEY
+  [ -n "$key" ] || return 0
+  FM_BUILD_LOCK_WAIT_KEY=
+  fm_build_lock_task_status "resolved [key=$key]: $1"
+}
+
 fm_build_lock_acquire() {
   local start waited=0 next_notice ctx now place paused=0
   fm_build_lock_queue_enter
@@ -1268,7 +1289,9 @@ fm_build_lock_acquire() {
       note "WARNING: still WAITING $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN, past the ${WAIT_WARN}s ceiling${place:+ - }${place}${ctx:+ - }${ctx}"
       if [ "$paused" = 0 ]; then
         paused=1
-        fm_build_lock_task_status "paused: waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN to run $DISPLAY_LINE${ctx:+ - }${ctx}"
+        FM_BUILD_LOCK_WAIT_START=$start
+        FM_BUILD_LOCK_WAIT_KEY="build-lock-$$-$start"
+        fm_build_lock_task_status "paused [key=$FM_BUILD_LOCK_WAIT_KEY]: waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN to run $DISPLAY_LINE${ctx:+ - }${ctx}"
       fi
     else
       note "still waiting $(fm_build_lock_elapsed "$waited") for $FM_BUILD_LOCK_NOUN${place:+ - }${place}${ctx:+ - }${ctx}"
@@ -1287,8 +1310,7 @@ fm_build_lock_acquire() {
   fm_build_lock_reap_dead_slots
   fm_build_lock_queue_leave
   note "acquired $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited")"
-  [ "$paused" = 0 ] \
-    || fm_build_lock_task_status "working: acquired $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited")"
+  fm_build_lock_close_wait "acquired $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited")"
 }
 
 # --- release ----------------------------------------------------------------
@@ -1312,10 +1334,15 @@ fm_build_lock_release_slots() {
 
 # shellcheck disable=SC2329 # Reached only through the EXIT trap below.
 fm_build_lock_release_now() {
+  local waited
   # An invocation interrupted while still waiting holds a ticket and no slot;
   # giving it back here retires it at once rather than leaving it for the reaper.
   fm_build_lock_queue_leave
   fm_build_lock_release_slots
+  if [ -n "$FM_BUILD_LOCK_WAIT_KEY" ]; then
+    waited=$(( $(date +%s) - FM_BUILD_LOCK_WAIT_START ))
+    fm_build_lock_close_wait "stopped waiting for $FM_BUILD_LOCK_NOUN after $(fm_build_lock_elapsed "$waited") without getting in"
+  fi
 }
 
 # Release runs from a trap rather than after the wrapped command, so a wrapper

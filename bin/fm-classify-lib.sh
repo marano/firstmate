@@ -203,12 +203,24 @@ status_outcome_line() {  # <status-file>
 # an unanswered one stays the declaration, for the reason status_outcome_line
 # gives for never folding past it.
 #
+# Two more kinds of line are not the worker's word about its own state, and
+# both are folded too. A `note:` is a report, never a declaration. And a wait
+# that STATES a key is closed by a later resolution of that key exactly as a
+# decision is. bin/fm-build-lock.sh writes both kinds into the worker's own log:
+# a hold-ceiling note, and a keyed queue wait it resolves once the lock is
+# taken. 2026-09-21: its `working: acquired ...` line erased a worker's own
+# `paused:` at the very moment the worker's long run began and its pane went
+# quiet, and the quiet pane was alarmed as a wedge. An UNKEYED `paused:` is not
+# folded by a bare `resolved:`, which closes the default decision, and one line
+# cannot also say it ended a wait that named no key.
+#
 # Prints that line, or the empty string when the log holds none.
 status_declared_line() {  # <status-file>
-  local f=$1 line key resolve held closed=$'\n'
+  local f=$1 line key resolve held paused closed=$'\n'
   [ -e "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  paused=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line; do
     case "$(status_line_verb "$line")" in
       "$resolve")
@@ -218,8 +230,18 @@ status_declared_line() {  # <status-file>
         fi
         continue
         ;;
+      note)
+        continue
+        ;;
       needs-decision|blocked|"$held")
         if key=$(_fm_decision_key "$line") \
+          && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+          case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
+        fi
+        ;;
+      "$paused")
+        if { _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null; } \
+          && key=$(_fm_decision_key "$line") \
           && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
           case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
         fi
