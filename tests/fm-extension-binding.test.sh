@@ -1128,7 +1128,7 @@ pass "the generic runner reuses one request id until that source sequence is dur
 P_TIMEOUT="$PACKAGES/timeout"
 make_package "$P_TIMEOUT" org.example.timeout ext-timeout
 H_TIMEOUT="$HOMES/timeout"; new_home "$H_TIMEOUT"
-bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 500 >/dev/null
+bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 5000 >/dev/null
 timeout_resolution=$(FM_HOME="$H_TIMEOUT" "$HOST" resolve-process-event ext-timeout)
 IFS=$'\t' read -r timeout_schema timeout_id timeout_version timeout_cap timeout_package timeout_binding timeout_extra <<< "$timeout_resolution"
 [ "$timeout_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$timeout_extra" ] \

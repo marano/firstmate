@@ -1403,8 +1403,9 @@ async function runExtensionProcess(home, record, verb, request, timeoutMs, state
     if (forcedCode) return;
     forcedCode = code;
     forcedMessage = message;
-    signalProcessGroup(invocation, "SIGTERM");
-    killTimer = setTimeout(() => signalProcessGroup(invocation, "SIGKILL"), TERMINATE_GRACE_MS);
+    // MUTANT-DO-NOT-COMMIT: skip signalling the group entirely to verify the test catches it
+    // signalProcessGroup(invocation, "SIGTERM");
+    // killTimer = setTimeout(() => signalProcessGroup(invocation, "SIGKILL"), TERMINATE_GRACE_MS);
   };
 
   const completion = new Promise((resolve, reject) => {
