@@ -191,37 +191,60 @@ fm_pr_poll_publish_prepared || {
 # bin/fm-pr-merge.sh's own gate names the missing evidence per candidate at the
 # moment it decides, which is the moment that can act on it. A task that ships
 # direct-PR or local-only has no run behind it by definition and is skipped.
+# One owner for writing a proving run's receipt and reporting the outcome, so
+# the freshest-run fast path below and the general candidate walk report the
+# same way.
+record_proving_run() {  # <run>
+  local run=$1
+  if fm_validation_receipt_write "$STATE" "$ID" \
+    "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" \
+    "$FM_VALIDATION_PROOF_HEAD" "$FM_VALIDATION_PROOF_BRANCH" "$run"; then
+    printf 'recorded: no-mistakes run %s validated head %s of %s\n' \
+      "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
+  else
+    printf 'actionable: no-mistakes run %s validated head %s of %s, but its validation receipt could not be recorded\n' \
+      "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
+  fi
+}
 capture_validation_receipt() {
-  local mode run timeout
+  local mode run timeout freshest existing_run=''
   mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$mode" in direct-PR|local-only) return 0 ;; esac
   fm_validation_receipt_remove_other "$STATE" "$ID" \
     "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" || true
+  freshest=$(fm_validation_status_freshest_bound_run "$STATE/$ID.status" "$URL")
   # bin/fm-pr-merge.sh re-records the PR through this script before its own
   # validation gate, so re-binding a head that already has its receipt must
-  # cost nothing rather than re-reading every candidate run record.
+  # cost nothing when the log has reported no run since the receipt's own -
+  # rather than re-reading every candidate run record on every merge attempt.
+  # A same-URL re-registration that DOES report a newer run beside this pull
+  # request skips this fast path so the receipt can refresh to it below, even
+  # when the head is unchanged: the worker can re-validate the same commit
+  # under a new run id, and the receipt should name the run the captain would
+  # recognise from the ready line rather than a superseded one.
   if [ -n "$PR_HEAD" ] \
-    && fm_validation_receipt_read "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" \
-    && [ "$FM_VALIDATION_RECEIPT_HEAD" = "$(printf '%s' "$PR_HEAD" | tr '[:upper:]' '[:lower:]')" ]; then
-    return 0
+    && fm_validation_receipt_read "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER"; then
+    existing_run=$FM_VALIDATION_RECEIPT_RUN
+    if [ "$FM_VALIDATION_RECEIPT_HEAD" = "$(printf '%s' "$PR_HEAD" | tr '[:upper:]' '[:lower:]')" ] \
+      && { [ -z "$freshest" ] || [ "$freshest" = "$existing_run" ]; }; then
+      return 0
+    fi
   fi
   command -v no-mistakes >/dev/null 2>&1 || return 0
   timeout=$(fm_validation_nm_timeout)
+  if [ -n "$freshest" ] && [ "$freshest" != "$existing_run" ] \
+    && fm_validation_run_record_proves "$STATE" "$timeout" "$freshest" "$URL" '' "$PR_HEAD"; then
+    record_proving_run "$freshest"
+    return 0
+  fi
   while IFS= read -r run || [ -n "$run" ]; do
     [ -n "$run" ] || continue
+    [ "$run" != "$freshest" ] || continue
     # The pull request's head branch is not read here; the receipt stores the
     # run record's own branch and the merge gate checks it against the forge's
     # head branch at merge time, live.
     if fm_validation_run_record_proves "$STATE" "$timeout" "$run" "$URL" '' "$PR_HEAD"; then
-      if fm_validation_receipt_write "$STATE" "$ID" \
-        "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" \
-        "$FM_VALIDATION_PROOF_HEAD" "$FM_VALIDATION_PROOF_BRANCH" "$run"; then
-        printf 'recorded: no-mistakes run %s validated head %s of %s\n' \
-          "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
-      else
-        printf 'actionable: no-mistakes run %s validated head %s of %s, but its validation receipt could not be recorded\n' \
-          "$run" "$FM_VALIDATION_PROOF_HEAD" "$URL" >&2
-      fi
+      record_proving_run "$run"
       return 0
     fi
   done <<CANDIDATES

@@ -66,7 +66,9 @@ chmod +x "$NM_RECORD"
 # case's nm-run-<id> file, and for the default run with a passing record at the
 # live head of whichever pull request the task has recorded, unless the case
 # marks that default absent. `axi status` with no run answers for the run named
-# in the case's nm-local-run file, or with nothing. Every call is logged.
+# in the case's nm-local-run file, or with nothing, unless the case supplies
+# nm-other-branch-status - the real CLI's shape when the local copy sits on a
+# branch with no run of its own, printed verbatim instead. Every call is logged.
 add_nm_mock() {
   local case_dir=$1
   cat > "$case_dir/fakebin/no-mistakes" <<'SH'
@@ -77,6 +79,10 @@ printf '%s|%s\n' "$PWD" "$*" >> "$dir/nm.log"
 if [ "${3:-}" = --run ]; then
   run=${4:-}
 else
+  if [ -f "$dir/nm-other-branch-status" ]; then
+    cat "$dir/nm-other-branch-status"
+    exit 0
+  fi
   [ -f "$dir/nm-local-run" ] || exit 0
   run=$(cat "$dir/nm-local-run")
 fi
@@ -2688,6 +2694,126 @@ test_local_copy_run_proves_the_head_without_a_recorded_id() {
   pass "fm-pr-merge finds the validating run from the task's local copy when none is recorded"
 }
 
+# REGRESSION (PR 88, 2026-09-23): a status line naming this pull request AND a
+# run must still yield that run's id when the line carries trailing prose past
+# the `run=<id>` token with no separating space, exactly as the worker's
+# mandated ready line does: `done: PR <url> checks green run=<id>; loaded
+# slow-composer 15/15 ...`. Before the fix, the trailing `;` made the extracted
+# token fail fm_validation_run_id_valid, so the newer run never became a
+# candidate and only an older, wrong-head run was tried - reproducing the
+# refusal firstmate hit merging PR 88.
+test_run_id_with_trailing_text_on_the_ready_line_still_proves_the_head() {
+  local case_dir head=8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a
+  local old_head=8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b
+  local url=https://github.com/example/repo/pull/200
+  case_dir=$(make_case trailing-text-ready-line)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf '%s\n%s\n' \
+    "done: PR $url checks green run=01OLDRUN" \
+    "done: PR $url checks green run=01NEWRUN; loaded slow-composer 15/15" \
+    > "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" 01OLDRUN fm/example-branch "$old_head" "$url"
+  write_nm_run "$case_dir" 01NEWRUN fm/example-branch "$head" "$url"
+  run_validation_case "$case_dir" 200
+  expect_code 0 "$(cat "$case_dir/rc")" \
+    "trailing-text-ready-line: the newer run's id must still be read past trailing prose"
+  assert_grep "verified: no-mistakes run 01NEWRUN validated head $head of $url" \
+    "$case_dir/stderr" "trailing-text-ready-line: the newer run was not named as proof"
+  assert_logged_gh_merge "$case_dir" 200 example/repo --squash
+  pass "fm-pr-merge reads a run=<id> token beside the PR regardless of trailing text"
+}
+
+# The same trailing-text failure, but for a run id reported on a line that
+# does NOT name this pull request - the "every other id in the log" tier.
+# Both tiers read every field through the same extraction, so this is red on
+# the same mutant as the test above and must recover the same way.
+test_run_id_with_trailing_text_in_the_unbound_tier_still_proves_the_head() {
+  local case_dir head=8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c
+  local url=https://github.com/example/repo/pull/201
+  case_dir=$(make_case trailing-text-unbound-tier)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: run=01OTHERTIERRUN; loaded slow-composer 15/15\n' \
+    > "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" 01OTHERTIERRUN fm/example-branch "$head" "$url"
+  run_validation_case "$case_dir" 201
+  expect_code 0 "$(cat "$case_dir/rc")" \
+    "trailing-text-unbound-tier: an unbound line's run id must still be read past trailing prose"
+  assert_grep "verified: no-mistakes run 01OTHERTIERRUN validated head $head of $url" \
+    "$case_dir/stderr" "trailing-text-unbound-tier: the run was not named as proof"
+  assert_logged_gh_merge "$case_dir" 201 example/repo --squash
+  pass "fm-pr-merge reads a run=<id> token in the unbound tier regardless of trailing text"
+}
+
+# REGRESSION check: a lane parked on a different branch has its own current
+# run listed under the real CLI's "no run on this branch" shape (a
+# current_branch/runs_on_current_branch/count/runs[]/help[] table, no
+# top-level id: scalar), not under an id: field of its own. This must not be
+# misread as a run for the task's own pull request.
+test_local_copy_other_branch_status_is_not_misattributed() {
+  local case_dir head=8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d
+  case_dir=$(make_case local-copy-other-branch)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR https://github.com/example/repo/pull/202 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  cat > "$case_dir/nm-other-branch-status" <<'EOF'
+current_branch: fm/some-other-branch
+runs_on_current_branch: 0
+count: 2 of 40 total
+runs[2]{id,branch,status,head,pr}:
+  "01SOMEOTHERID",fm/some-other-branch,completed,aaaaaaa,"https://github.com/example/repo/pull/999"
+  "01ANOTHERID",fm/some-other-branch,failed,bbbbbbb,""
+help[2]: "Run no-mistakes axi run --intent \"the user's goal\" --yes to validate the current branch",No run exists for this branch; every run listed above is on another branch - inspect one deliberately with `no-mistakes axi status --run <id>`
+EOF
+  run_validation_case "$case_dir" 202
+  expect_code 1 "$(cat "$case_dir/rc")" \
+    "local-copy-other-branch: a lane parked on another branch must not prove this pull request"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "local-copy-other-branch: gh pr merge ran on a run from another branch's status listing"
+  assert_grep "no validation run is proven for its head $head" "$case_dir/stderr" \
+    "local-copy-other-branch: the refusal did not name the unproven head"
+  pass "fm-pr-merge reads the local copy's other-branch status listing correctly, proving nothing from it"
+}
+
+# The receipt fm-pr-check.sh captures for a bound pull request must refresh
+# when a same-URL re-registration reports a newer run beside it, even when the
+# head is unchanged (the worker can re-validate the same commit under a new
+# run id). Before the fix, the "cost nothing" fast path returned as soon as
+# the receipt's stored head matched the current head, never looking at the log
+# again, so the receipt stayed pinned to the superseded run.
+test_same_url_reregistration_refreshes_the_receipt_to_a_newer_run() {
+  local case_dir head=8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e
+  local url=https://github.com/example/repo/pull/203
+  local early=01EARLYRUN later=01LATERRUN
+  case_dir=$(make_case reregistration-refreshes-receipt)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'done: PR %s checks green run=%s\n' "$url" "$early" \
+    > "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" "$early" fm/example-branch "$head" "$url"
+
+  run_pr_check "$case_dir" task-x1 "$url" > "$case_dir/check1.out" 2> "$case_dir/check1.err" \
+    || fail "reregistration-refreshes-receipt: binding the pull request failed"
+  assert_grep "recorded: no-mistakes run $early validated head $head of $url" \
+    "$case_dir/check1.err" "reregistration-refreshes-receipt: the first capture did not name the run"
+  [ "$(receipt_binding "$case_dir")" = "$head fm/example-branch $early" ] \
+    || fail "reregistration-refreshes-receipt: the receipt did not bind the head to the first run"
+
+  printf 'done: PR %s checks green run=%s\n' "$url" "$later" \
+    >> "$case_dir/state/task-x1.status"
+  write_nm_run "$case_dir" "$later" fm/example-branch "$head" "$url"
+
+  run_pr_check "$case_dir" task-x1 "$url" > "$case_dir/check2.out" 2> "$case_dir/check2.err" \
+    || fail "reregistration-refreshes-receipt: re-registering the pull request failed"
+  assert_grep "recorded: no-mistakes run $later validated head $head of $url" \
+    "$case_dir/check2.err" "reregistration-refreshes-receipt: the re-registration did not name the newer run"
+  [ "$(receipt_binding "$case_dir")" = "$head fm/example-branch $later" ] \
+    || fail "reregistration-refreshes-receipt: the receipt did not refresh to the newer run"
+  pass "fm-pr-check refreshes the validation receipt when a same-URL re-registration reports a newer run"
+}
+
 # One fm-pr-check.sh run in a merge case's sandbox, so a case can bind a pull
 # request exactly the way firstmate does before a merge and get the validation
 # receipt that binding captures. Args: case_dir [fm-pr-check.sh args...]
@@ -4507,6 +4633,10 @@ test_run_at_an_older_head_is_refused
 test_run_with_other_steps_skipped_still_merges
 test_run_that_skipped_a_step_or_names_another_pr_is_refused
 test_local_copy_run_proves_the_head_without_a_recorded_id
+test_run_id_with_trailing_text_on_the_ready_line_still_proves_the_head
+test_run_id_with_trailing_text_in_the_unbound_tier_still_proves_the_head
+test_local_copy_other_branch_status_is_not_misattributed
+test_same_url_reregistration_refreshes_the_receipt_to_a_newer_run
 test_earlier_pr_still_merges_after_later_runs_evict_its_record
 test_stale_run_pointer_and_wandering_local_copy_still_prove_the_head
 test_receipt_never_overrules_a_record_that_still_answers
