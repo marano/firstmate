@@ -52,6 +52,10 @@ signal_retire_pid=
 signal_worker_pid=
 active_runner_pid=
 active_runner_release=
+prompt_failure_pid=
+lock_order_release=
+lock_order_register_pid=
+lock_order_reconcile_pid=
 remote_active_release=
 unrelated_daemon_pid=
 unrelated_launcher_pid=
@@ -90,7 +94,11 @@ extension_test_cleanup() {
   [ -z "$signal_worker_pid" ] || kill -KILL "$signal_worker_pid" 2>/dev/null || true
   [ -z "$signal_retire_pid" ] || kill -TERM "$signal_retire_pid" 2>/dev/null || true
   [ -z "$active_runner_release" ] || touch "$active_runner_release" 2>/dev/null || true
+  [ -z "$lock_order_release" ] || touch "$lock_order_release" 2>/dev/null || true
   [ -z "$active_runner_pid" ] || kill -TERM "$active_runner_pid" 2>/dev/null || true
+  [ -z "$prompt_failure_pid" ] || kill -TERM "$prompt_failure_pid" 2>/dev/null || true
+  [ -z "$lock_order_register_pid" ] || kill -TERM -"$lock_order_register_pid" 2>/dev/null || true
+  [ -z "$lock_order_reconcile_pid" ] || kill -TERM -"$lock_order_reconcile_pid" 2>/dev/null || true
   [ -z "$remote_active_release" ] || touch "$remote_active_release" 2>/dev/null || true
   [ -z "$unrelated_daemon_pid" ] || kill -KILL "$unrelated_daemon_pid" 2>/dev/null || true
   [ -z "$unrelated_launcher_pid" ] || kill -KILL "$unrelated_launcher_pid" 2>/dev/null || true
@@ -303,6 +311,24 @@ expect_failure() {  # <needle> <command...>
   out=$("$@" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "command unexpectedly succeeded: $*"
   assert_contains "$out" "$needle" "failure did not report the expected diagnostic"
+}
+
+# A refusal that must not wait out a live runner. Checked with a bound, because
+# a regression that waits instead would hang this suite rather than fail it.
+expect_prompt_failure() {  # <needle> <command...>
+  local needle=$1 out="$TMP_ROOT/prompt-failure.out" rc=0
+  shift
+  "$@" > "$out" 2>&1 &
+  prompt_failure_pid=$!
+  for _ in $(seq 1 200); do
+    kill -0 "$prompt_failure_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill -0 "$prompt_failure_pid" 2>/dev/null && fail "command waited instead of refusing promptly: $*"
+  wait "$prompt_failure_pid" || rc=$?
+  prompt_failure_pid=
+  [ "$rc" -ne 0 ] || fail "command unexpectedly succeeded: $*"
+  assert_contains "$(cat "$out")" "$needle" "failure did not report the expected diagnostic"
 }
 
 run_owner_check() {
@@ -1404,8 +1430,8 @@ FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-sourc
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source > "$TMP_ROOT/active-runner.out" 2>&1 &
 active_runner_pid=$!
 wait_for_file "$active_runner_marker" || fail "active extension runner never entered its poll"
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
+expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
+expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
 touch "$active_runner_release"
 active_runner_release=
 wait "$active_runner_pid" || fail "active extension runner did not complete"
@@ -1417,6 +1443,66 @@ active_replacement=$(FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension 
 active_replacement_owner=$(printf '%s\n' "$active_replacement" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-owner "$active_replacement_owner" >/dev/null
 pass "all registration owner transitions wait for the prior extension runner"
+
+# A result re-announcement - every reconcile cycle, and a runner right after
+# capture - holds the source lock while it asks the captured owner for a silence
+# verdict, which takes the lifecycle lock. Registering that same source must take
+# the two locks in the same order: in the other order each side holds the lock
+# the other waits for, both owners stay alive, and neither lock is ever recovered.
+P_LOCK_ORDER="$PACKAGES/lock-order"
+lock_order_marker="$TMP_ROOT/lock-order.marker"
+lock_order_release="$TMP_ROOT/lock-order.release"
+make_package "$P_LOCK_ORDER" org.example.lock-order ext-lock-order \
+  "$(printf 'handshake-block\n%s\n%s' "$lock_order_marker" "$lock_order_release")"
+H_LOCK_ORDER="$HOMES/lock-order"; new_home "$H_LOCK_ORDER"
+touch "$lock_order_release"
+bind_package "$H_LOCK_ORDER" "$P_LOCK_ORDER" ext-lock-order >/dev/null
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" register-extension ext-lock-order order-source --config-ref good >/dev/null
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" start order-source > "$TMP_ROOT/lock-order-start.out" 2>&1
+lock_order_result="$H_LOCK_ORDER/state/procevent-inbox/order-source.1.result"
+assert_present "$lock_order_result" "lock-order fixture captured no result to re-announce"
+assert_absent "${lock_order_result%.result}.handled" "lock-order fixture result was not left for re-announcement"
+# The next handshake, the replacement registration's own, now blocks until released.
+rm -f "$lock_order_marker" "$lock_order_release"
+perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
+  "$PROCEVENT" register-extension ext-lock-order order-source --config-ref replacement \
+  > "$TMP_ROOT/lock-order-register.out" 2>&1 &
+lock_order_register_pid=$!
+wait_for_file "$lock_order_marker" || fail "lock-order registration never reached its adapter handshake"
+perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
+  "$PROCEVENT" reconcile > "$TMP_ROOT/lock-order-reconcile.out" 2>&1 &
+lock_order_reconcile_pid=$!
+# Release the handshake only once the source is locked - by the registration
+# itself, or else by the re-announcement - so the contended lock request is
+# certain to happen rather than merely likely.
+lock_order_source_lock="$TMP_ROOT/claims/order-source.lock"
+for _ in $(seq 1 200); do
+  [ -e "$lock_order_source_lock" ] || [ -L "$lock_order_source_lock" ] && break
+  sleep 0.05
+done
+[ -e "$lock_order_source_lock" ] || [ -L "$lock_order_source_lock" ] \
+  || fail "neither the registration nor the re-announcement ever locked the source"
+touch "$lock_order_release"
+lock_order_release=
+for _ in $(seq 1 600); do
+  kill -0 "$lock_order_register_pid" 2>/dev/null || kill -0 "$lock_order_reconcile_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$lock_order_register_pid" 2>/dev/null || kill -0 "$lock_order_reconcile_pid" 2>/dev/null; then
+  fail "registering a source deadlocked with that source's result re-announcement on the source and lifecycle locks"
+fi
+lock_order_register_rc=0
+wait "$lock_order_register_pid" || lock_order_register_rc=$?
+lock_order_register_pid=
+wait "$lock_order_reconcile_pid" 2>/dev/null || true
+lock_order_reconcile_pid=
+[ "$lock_order_register_rc" -eq 0 ] \
+  || fail "registration beside a result re-announcement failed: $(cat "$TMP_ROOT/lock-order-register.out")"
+assert_contains "$(cat "$TMP_ROOT/lock-order-reconcile.out")" "published=1" \
+  "the concurrent re-announcement did not republish the unhandled result"
+lock_order_owner=$(sed -n 's/^owner-token: //p' "$TMP_ROOT/lock-order-register.out")
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" retire order-source --if-owner "$lock_order_owner" >/dev/null
+pass "registration and result re-announcement take the source and lifecycle locks in one order"
 fi
 
 # --- owner tokens, overridden state, sweep, and legacy compatibility --------
@@ -1839,6 +1925,7 @@ owner_group_pid() {  # <owner-file>
   node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(value.phase!=="group"||!Number.isSafeInteger(value.group_pid))process.exit(1);process.stdout.write(String(value.group_pid));' "$1"
 }
 
+
 guarded_out=$(invoke_cleanup guarded node --disallow-code-generation-from-strings "$HOST")
 assert_contains "$guarded_out" "external evidence: guarded" \
   "the tracked static launch barrier failed under Node's no-dynamic-code guard"
@@ -2081,8 +2168,8 @@ remote_active_config="active-block|$remote_active_marker|$remote_active_release"
 remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref "$remote_active_config" >/dev/null
 remote_direct fm-procevent.sh reconcile >/dev/null
 wait_for_file "$remote_active_marker" || fail "remote active runner never reached its addressed-home poll"
-expect_failure "prior runner remains active" remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement
-expect_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
+expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement
+expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
 touch "$remote_active_release"
 remote_active_release=
 for _ in $(seq 1 400); do
