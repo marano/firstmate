@@ -6,7 +6,11 @@
 # never fires.
 #
 # The test_* functions below name the covered merge, refusal, live-head,
-# away-authority, outcome-publication, and recovery behavior directly.
+# away-authority, outcome-publication, recovery, and Linear-board behavior
+# directly. The board's own contract and its dispatch half live in
+# tests/fm-linear-board.test.sh; what belongs here is only that a PROVEN merge
+# advances the card, that an already-completed card is left alone, and that a
+# board failure never touches the merge's own outcome.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -610,6 +614,11 @@ run_pr_merge() {
   FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
   FM_TEST_AWAY_GRANTS_AT_MERGE="$case_dir/away-grants-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
+  FM_LINEAR_API_KEY="${FM_TEST_LINEAR_KEY:-}" \
+  FM_LINEAR_CMD="${FM_TEST_LINEAR_CMD:-}" \
+  FM_LINEAR_TIMEOUT="${FM_TEST_LINEAR_TIMEOUT:-20}" \
+  FM_FAKE_LINEAR_DIR="$case_dir" \
+  FM_FAKE_LINEAR_STATES="$LINEAR_TEAM_STATES" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   FM_TEST_NM_DIR="$case_dir" \
@@ -624,6 +633,73 @@ run_pr_merge() {
     return 1
   fi
   return "$rc"
+}
+
+# --- Linear board fixtures -------------------------------------------------
+#
+# The board is reached only through bin/fm-linear-lib.sh's FM_LINEAR_CMD seam,
+# because no test may call the real API. `Verified` is a second completed status
+# on this team on purpose: it is the captain's own, and a merge that moved a card
+# there would be the mutant these cases exist to kill.
+LINEAR_TEAM_STATES='[
+  {"id":"st-progress","name":"In Progress","type":"started","position":2},
+  {"id":"st-done","name":"Done","type":"completed","position":4},
+  {"id":"st-verified","name":"Verified","type":"completed","position":5}
+]'
+
+# add_linear_mocks <case_dir> <card> [current-state-line]
+# Records <card> on the case's task-x1 backlog item, installs the fake
+# transport, and turns the board on for this case by setting FM_TEST_LINEAR_*.
+add_linear_mocks() {
+  local case_dir=$1 card=$2 current=${3:-st-progress In-Progress started}
+  fm_tasks_axi_in_case "$case_dir" add task-x1 "Item task-x1" --kind ship --repo app-web \
+    || fail "fixture: could not add the backlog item"
+  fm_tasks_axi_in_case "$case_dir" linear task-x1 "$card" \
+    || fail "fixture: could not record the Linear card"
+  printf '%s\n' "$current" > "$case_dir/linear-state"
+  : > "$case_dir/linear-mutations"
+  cat > "$case_dir/fakebin/fm-fake-linear" <<'SH'
+#!/usr/bin/env bash
+set -u
+dir=$FM_FAKE_LINEAR_DIR
+body=$1
+[ ! -e "$dir/linear-fail" ] || exit 7
+case "$(cat "$body")" in
+  *FmMove*)
+    jq -r '.variables.state' < "$body" >> "$dir/linear-mutations"
+    printf '{"data":{"issueUpdate":{"success":true}}}\n'
+    exit 0
+    ;;
+esac
+read -r state_id state_name state_type < "$dir/linear-state"
+jq -n \
+  --arg team "$(jq -r '.variables.team' < "$body")" \
+  --arg number "$(jq -r '.variables.number' < "$body")" \
+  --arg sid "$state_id" --arg sname "$state_name" --arg stype "$state_type" \
+  --argjson states "$FM_FAKE_LINEAR_STATES" \
+  '{data: {issues: {nodes: [{
+      id: ("issue-" + $team + "-" + $number),
+      identifier: ($team + "-" + $number),
+      state: {id: $sid, name: $sname, type: $stype},
+      team: {key: $team, states: {nodes: $states}}
+    }]}}}'
+SH
+  chmod +x "$case_dir/fakebin/fm-fake-linear"
+  FM_TEST_LINEAR_KEY=lin_api_testkey
+  FM_TEST_LINEAR_CMD="$case_dir/fakebin/fm-fake-linear"
+}
+
+fm_tasks_axi_in_case() {  # <case_dir> <args...>
+  local case_dir=$1
+  shift
+  FM_HOME="$case_dir/home" FM_DATA_OVERRIDE="$case_dir/home/data" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+    "$ROOT/bin/fm-tasks-axi.sh" "$@" >/dev/null
+}
+
+# The state ids the board was asked to move to in this case, space separated.
+linear_mutations() {  # <case_dir>
+  tr '\n' ' ' < "$1/linear-mutations"
 }
 
 write_github_outcome() {
@@ -2887,6 +2963,112 @@ test_gitlab_merge_request_needs_the_validation_proof() {
   pass "fm-pr-merge holds GitLab merge requests to the same validation proof"
 }
 
+# --- Linear board, merge half ----------------------------------------------
+#
+# Done at merge: a card reaches the team's completed status once the merge is
+# PROVEN, at the same point the merged branch is deleted. Each case names the
+# mutant it kills.
+
+# Red on: bin/fm-pr-merge.sh does not advance the board after a proven merge.
+# It also pins the target: the team defines `Verified` as a second completed
+# status, and moving a card there is the captain's own call, never firstmate's.
+test_a_proven_merge_moves_its_card_to_the_teams_completed_status() {
+  local case_dir rc out
+  case_dir=$(make_case linear-merge-moves)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_linear_mocks "$case_dir" BLU-3268
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "linear-merge-moves: the merge should succeed"
+  out=$(cat "$case_dir/stdout" "$case_dir/stderr")
+  assert_contains "$out" "BLU-3268 moved to Done" \
+    "the merge did not report moving the card to the team's completed status"
+  assert_equals "st-done " "$(linear_mutations "$case_dir")" \
+    "the merge did not move the card to exactly the team's first completed status"
+  pass "a proven merge moves its card to the team's completed status, never to Verified"
+}
+
+# Red on: bin/fm-pr-merge.sh sets the completed status unconditionally. A card
+# the captain already closed by hand - or already marked Verified - must come out
+# of a merge exactly as it went in.
+test_a_merge_leaves_an_already_completed_card_alone() {
+  local case_dir rc out current
+  for current in "st-done Done completed" "st-verified Verified completed"; do
+    case_dir=$(make_case "linear-merge-keeps-${current%% *}")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+    add_linear_mocks "$case_dir" BLU-3268 "$current"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "the merge should succeed with a card at $current"
+    out=$(cat "$case_dir/stdout" "$case_dir/stderr")
+    assert_contains "$out" "left in" "the merge did not report leaving the card alone: $out"
+    assert_equals "" "$(linear_mutations "$case_dir")" \
+      "a card already at $current was moved anyway"
+  done
+  pass "a merge leaves a card the captain already completed or verified exactly where it is"
+}
+
+# Red on: bin/fm-pr-merge.sh lets a board failure change the merge's outcome. The
+# merge has already landed at this point and is durable whatever the board does,
+# so the only correct behavior is to report it and exit 0 - the same rule the
+# branch deletion above follows.
+test_a_linear_failure_never_fails_a_landed_merge() {
+  local case_dir rc out
+  case_dir=$(make_case linear-merge-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_linear_mocks "$case_dir" BLU-3268
+  : > "$case_dir/linear-fail"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "a board failure must not fail a landed merge"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "the merge's own bookkeeping was lost"
+  assert_grep 'actionable:' "$case_dir/stderr" \
+    "the board failure was not reported where a reader will see it"
+  assert_present "$case_dir/github-delete-branch-called" \
+    "the branch cleanup that precedes the board move did not run"
+  pass "a Linear failure never fails a landed merge and is reported, not swallowed"
+}
+
+# Red on: bin/fm-pr-merge.sh advances the board anywhere before the merge is
+# proven. "Done at merge" means exactly that - a refused merge must leave the
+# card where the dispatch put it, because the work has not landed.
+test_a_refused_merge_leaves_the_card_alone() {
+  local case_dir head=9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b
+  case_dir=$(make_case linear-merge-refused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  add_linear_mocks "$case_dir" BLU-3268
+  # No validation run anywhere, so the merge is refused before the forge call.
+  printf 'done: PR https://github.com/example/repo/pull/121 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  run_validation_case "$case_dir" 121
+
+  expect_code 1 "$(cat "$case_dir/rc")" "a merge with no validation proof must be refused"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "the refused case still merged"
+  assert_equals "" "$(linear_mutations "$case_dir")" \
+    "a refused merge moved the card anyway"
+  pass "a refused merge leaves its card exactly where the dispatch put it"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -4269,3 +4451,7 @@ test_direct_pr_merges_only_on_an_explicit_instruction
 test_task_without_a_mode_needs_the_validation_proof
 test_gitlab_merge_request_needs_the_validation_proof
 test_a_hanging_mock_turns_the_case_red_not_hung
+test_a_proven_merge_moves_its_card_to_the_teams_completed_status
+test_a_merge_leaves_an_already_completed_card_alone
+test_a_linear_failure_never_fails_a_landed_merge
+test_a_refused_merge_leaves_the_card_alone

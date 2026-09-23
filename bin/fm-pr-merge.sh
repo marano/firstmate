@@ -160,6 +160,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -177,6 +178,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-validation-receipt-lib.sh"
 # shellcheck source=bin/fm-branch-orphan-lib.sh
 . "$SCRIPT_DIR/fm-branch-orphan-lib.sh"
+# shellcheck source=bin/fm-linear-lib.sh
+. "$SCRIPT_DIR/fm-linear-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -1602,3 +1605,16 @@ case "$PROVIDER" in
 esac
 "$SCRIPT_DIR/fm-branch-orphans.sh" retry \
   --provider "$PROVIDER" --host "$PR_HOST" --path "$ORPHAN_SWEEP_PATH" || true
+
+# Same reached-only-after-proof point again: this work has landed, so its Linear
+# card belongs at the team's completed status. A grouped job's members land with
+# their unit's pull request, so their cards move with it. Like the branch
+# deletion above, nothing here changes this script's exit status - the merge is
+# durable whether or not the board could be updated - and a home with no Linear
+# key is silent (bin/fm-linear-lib.sh).
+#
+# An unreadable membership leaves the array empty, so the unit's own card still
+# moves rather than the whole board move being skipped.
+fm_backlog_members_of_meta "$STATE/$ID.meta" "$ID" || FM_BACKLOG_TRANSITION_MEMBERS=()
+fm_linear_board_advance "$FM_HOME" "$DATA" merge "$ID" \
+  ${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}
