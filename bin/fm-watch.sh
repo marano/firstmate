@@ -1345,23 +1345,37 @@ clear_write_tracking() {  # <window-key>
 # that runs its commands in its own group with no controlling terminal at all is
 # the case this cannot tell apart: its finished run is held on the long
 # FM_PAUSE_RESURFACE_SECS recheck instead of surfacing at once.
+# That ancestry comes from a process table read just BEFORE the slots, never
+# from a live read after them. A per-script hold is often seen in its last
+# moment, and by a later read it has ended: its run was then recorded as that
+# hold alone, and the next poll to land between two holds reported the live
+# runner's run as finished - on a stock-bash lane twice in half an hour, each
+# time naming a hold seen at about its script's whole runtime. Read first, the
+# table has every holder that already existed when the slots were read. A holder
+# it does not have - one whose whole hold fell inside the slot read - is not
+# evidence about any run, so it leaves the recorded run as it was rather than
+# replacing it with a run that has already ended.
 
 # The machine's build slots, read ONCE per poll and shared by every window of
-# that poll (crew_task_shell_running's snapshot argument owns why). Empty means
-# a free machine, which is a real negative; unset means this poll has not read
-# them yet.
+# that poll (crew_task_shell_running's snapshot argument owns why), and the
+# process table read just before them (see THE RUN, NOT ONE HOLD above). Empty
+# slots mean a free machine, which is a real negative; unset means this poll has
+# not read them yet.
 TASK_SHELL_HOLDERS=
+TASK_SHELL_PROCS=
 TASK_SHELL_HOLDERS_READ=1
 
-# Populates TASK_SHELL_HOLDERS in place. Deliberately NOT a function that prints
-# its answer: every caller would then have to run it in a command substitution,
-# whose assignments are discarded with the subshell, so the cache would never
-# survive its first use and the slots would be re-read once per window per poll.
+# Populates TASK_SHELL_PROCS and TASK_SHELL_HOLDERS in place, in that order.
+# Deliberately NOT a function that prints its answer: every caller would then
+# have to run it in a command substitution, whose assignments are discarded with
+# the subshell, so the cache would never survive its first use and the slots
+# would be re-read once per window per poll.
 task_shell_holders_read() {
   local bound
   [ "$TASK_SHELL_HOLDERS_READ" -ne 0 ] || return 0
   bound=$FM_TASK_SHELL_TIMEOUT
   case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  TASK_SHELL_PROCS=$(ps -Ao pid=,ppid=,pgid=,tpgid= 2>/dev/null || true)
   TASK_SHELL_HOLDERS=$(fm_run_timed "$bound" \
     "$FM_TASK_SHELL_LOCK_BIN" --holders 2>/dev/null || true)
   TASK_SHELL_HOLDERS_READ=0
@@ -1380,34 +1394,33 @@ clear_task_shell_tracking() {  # <window-key>
 # Record the run behind <holder-detail> (crew_task_shell_running's
 # `pid <pid>, ...`) in <run-file>: a `holder<TAB><pid>` line, then one
 # `<pid><TAB><identity>` line per ancestor of the holder inside the holder's own
-# process group, nearest first. Walked only when the holder changes, so a run
-# that keeps one hold costs this nothing after its first sighting. Records no
-# ancestors when that group is its terminal's foreground group (see THE RUN, NOT
-# ONE HOLD above), or when any read fails, and the single-hold reading applies.
+# process group, nearest first, found in this poll's TASK_SHELL_PROCS. Walked
+# only when the holder changes, so a run that keeps one hold costs this nothing
+# after its first sighting. Records no ancestors when that group is its
+# terminal's foreground group (see THE RUN, NOT ONE HOLD above), and the
+# single-hold reading applies. 1, leaving <run-file> untouched, when the table
+# does not have the holder at all.
 task_shell_run_record() {  # <run-file> <holder-detail>
-  local file=$1 detail=$2 hpid pgid tpgid chain p identity tmp
+  local file=$1 detail=$2 hpid chain p identity tmp
   hpid=${detail#pid }
   hpid=${hpid%%,*}
   case "$hpid" in ''|*[!0-9]*) rm -f "$file"; return 0 ;; esac
   [ "$(sed -n '1p' "$file" 2>/dev/null)" = "holder"$'\t'"$hpid" ] && return 0
+  chain=$(printf '%s\n' "$TASK_SHELL_PROCS" | awk -v start="$hpid" '
+    { parent[$1] = $2; grp[$1] = $3; term[$1] = $4 }
+    END {
+      if (!(start in grp)) exit 1
+      group = grp[start]
+      if (group + 0 <= 1 || group == term[start]) exit 0
+      p = parent[start]; n = 0
+      while (p != "" && p + 0 > 1 && grp[p] == group && n < 64) { print p; p = parent[p]; n++ }
+    }') || return 1
   tmp="$file.$$.tmp"
   printf 'holder\t%s\n' "$hpid" > "$tmp" || { rm -f "$tmp"; return 0; }
-  read -r pgid tpgid <<EOF
-$(ps -o pgid= -o tpgid= -p "$hpid" 2>/dev/null)
-EOF
-  case "$pgid" in ''|*[!0-9]*|0|1) pgid= ;; esac
-  if [ -n "$pgid" ] && [ "$pgid" != "$tpgid" ]; then
-    chain=$(ps -Ao pid=,ppid=,pgid= 2>/dev/null | awk -v start="$hpid" -v group="$pgid" '
-      { parent[$1] = $2; grp[$1] = $3 }
-      END {
-        p = parent[start]; n = 0
-        while (p != "" && p + 0 > 1 && grp[p] == group && n < 64) { print p; p = parent[p]; n++ }
-      }')
-    for p in $chain; do
-      identity=$(fm_pid_identity "$p" 2>/dev/null) || break
-      printf '%s\t%s\n' "$p" "$identity" >> "$tmp"
-    done
-  fi
+  for p in $chain; do
+    identity=$(fm_pid_identity "$p" 2>/dev/null) || break
+    printf '%s\t%s\n' "$p" "$identity" >> "$tmp"
+  done
   mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
 }
 
@@ -1449,8 +1462,10 @@ task_shell_triage() {  # <window> <task> <busy-state> -> 0 if handled
     # keeping the timer is what lets the ladder RESUME the moment that run is gone
     # instead of granting the lane another full threshold of quiet first.
     [ -e "$STATE/.taskshell-since-$key" ] || date +%s > "$STATE/.taskshell-since-$key"
-    printf '%s' "$holder" > "$STATE/.taskshell-holder-$key"
-    task_shell_run_record "$STATE/.taskshell-run-$key" "$holder"
+    # A hold whose run could not be read is not recorded either, so the hold and
+    # the run on record always describe each other.
+    task_shell_run_record "$STATE/.taskshell-run-$key" "$holder" \
+      && printf '%s' "$holder" > "$STATE/.taskshell-holder-$key"
     age=$(age_of "$STATE/.taskshell-since-$key")
     resurface_absorbed "$win" "$STATE/.taskshell-resurfaced-$key" "$age" \
       "stale: $win (the worker's turn ended ${age}s ago while a run of its own is still going - $holder; held off the wedge ladder, not wedged, and not to be relaunched while that run is live; confirm the run is real progress)"

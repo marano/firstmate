@@ -2302,11 +2302,11 @@ wait_task_holders() {  # <lockroot> <held|free>
 }
 
 # One watcher over a task-shell fixture, with the task-shell triage reading the
-# fixture's private lock root.
-task_shell_watch_bg() {  # <state> <fakebin> <out> <window> <capture-file> <lockroot>
+# fixture's private lock root, through [lock-bin] when a case supplies one.
+task_shell_watch_bg() {  # <state> <fakebin> <out> <window> <capture-file> <lockroot> [lock-bin]
   PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$4" FM_FAKE_TMUX_CAPTURE="$5" \
     FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$2/fm-crew-state.sh" \
-    FM_TASK_SHELL_LOCK_BIN="$ROOT/bin/fm-build-lock.sh" \
+    FM_TASK_SHELL_LOCK_BIN="${7:-$ROOT/bin/fm-build-lock.sh}" FM_TASK_SHELL_TIMEOUT=60 \
     FM_BUILD_LOCK_DIR="$6" FM_BUILD_LOCK_CI=0 \
     FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$3" &
@@ -2316,17 +2316,20 @@ task_shell_watch_bg() {  # <state> <fakebin> <out> <window> <capture-file> <lock
 # per-command wrapper: it leads its own process group, takes one build-slot hold
 # per script, holds NOTHING between two of them, and ends only after its last.
 # It also leaves a stray background job in its group that outlives it, as a
-# worker's `&` job does. Driven through files in <ctl>: `release1` ends the first
-# hold, `next` takes the second, `release2` ends the second and the run with it.
+# worker's `&` job does. Driven through files in <ctl>: `release<i>` ends hold
+# <i>, labelled `bin/fm-test-run.sh tests/script-<i>.test.sh`, and `next<i>`
+# lets the runner ask for hold <i> once the one before it has ended; the run
+# ends with its last hold ([holds], 2 by default).
 # Publishes the runner pid in TASK_RUNNER_PID; the stray's pid lands in
 # <ctl>/stray. Every wait is bounded, so an escaped fixture stops itself.
 TASK_RUNNER_PID=
-start_per_script_runner() {  # <lockroot> <worktree> <ctl-dir>
-  local lockroot=$1 wt=$2 ctl=$3
+start_per_script_runner() {  # <lockroot> <worktree> <ctl-dir> [holds]
+  local lockroot=$1 wt=$2 ctl=$3 holds=${4:-2}
   TASK_RUNNER_PID=
   mkdir -p "$ctl"
+  printf '%s\n' "$holds" > "$ctl/holds"
   cat > "$ctl/runner.sh" <<'RUNNER'
-lock=$1 ctl=$2
+lock=$1 ctl=$2 holds=$3
 deadline=$((SECONDS + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}))
 await() {
   while [ ! -e "$ctl/$1" ]; do
@@ -2342,20 +2345,27 @@ hold() {  # <label> <release-file>
 }
 sleep "$((deadline - SECONDS))" &
 printf '%s\n' "$!" > "$ctl/stray"
-hold "bin/fm-test-run.sh tests/first.test.sh" release1
-await next
-hold "bin/fm-test-run.sh tests/second.test.sh" release2
+i=1
+while [ "$i" -le "$holds" ]; do
+  [ "$i" -eq 1 ] || await "next$i"
+  hold "bin/fm-test-run.sh tests/script-$i.test.sh" "release$i"
+  i=$((i + 1))
+done
 RUNNER
   ( cd "$wt" && exec perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!\n"' \
       env FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 \
-      bash "$ctl/runner.sh" "$ROOT/bin/fm-build-lock.sh" "$ctl" ) > "$ctl/runner.out" 2>&1 &
+      bash "$ctl/runner.sh" "$ROOT/bin/fm-build-lock.sh" "$ctl" "$holds" ) > "$ctl/runner.out" 2>&1 &
   TASK_RUNNER_PID=$!
   disown "$TASK_RUNNER_PID" 2>/dev/null || true
 }
 
 stop_per_script_runner() {  # <ctl-dir> <lockroot>
-  local ctl=$1 stray
-  : > "$ctl/release1"; : > "$ctl/next"; : > "$ctl/release2"
+  local ctl=$1 stray holds i=1
+  holds=$(cat "$ctl/holds" 2>/dev/null || echo 2)
+  while [ "$i" -le "$holds" ]; do
+    : > "$ctl/next$i"; : > "$ctl/release$i"
+    i=$((i + 1))
+  done
   [ -z "$TASK_RUNNER_PID" ] || kill_task_hold "$TASK_RUNNER_PID" || true
   stray=$(cat "$ctl/stray" 2>/dev/null || true)
   [ -z "$stray" ] || kill_task_hold "$stray" || true
@@ -2423,7 +2433,7 @@ test_a_per_script_runner_between_holds_is_not_reported_finished() {
   ack_stopped_cycle "$state" || { stop_per_script_runner "$ctl" "$lockroot"; fail "could not acknowledge the phase-B watcher stop"; }
 
   # Phase C: the next script's hold. Held again, now naming that hold.
-  : > "$ctl/next"
+  : > "$ctl/next2"
   wait_task_holders "$lockroot" held \
     || { stop_per_script_runner "$ctl" "$lockroot"; fail "the runner never took its second hold"; }
   hold2=$(task_holders "$lockroot" | cut -f1)
@@ -2534,6 +2544,301 @@ EOF
   grep -F "has finished and its turn was already over" "$out" >/dev/null \
     || fail "the finished hold was not reported as itself: $(cat "$out")"
   pass "a hold taken inside its terminal's foreground group is never mistaken for a run, so its end is still reported at once"
+}
+
+# A lock whose `--holders` answer can move a hold across the watcher's own read
+# of the slots. <ctl>/before runs just before the slots are read and <ctl>/after
+# just after, with that answer as its argument; each runs at most once, and the
+# watcher is handed the answer exactly as it was read. Every other invocation is
+# the real lock. A hook that fails appends its name to <ctl>/hook.failed, so a
+# case can tell a broken fixture from a watcher verdict.
+racing_task_lock() {  # <ctl-dir> -> the lock's path on stdout
+  local ctl=$1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'real=%q\n' "$ROOT/bin/fm-build-lock.sh"
+    cat <<'LOCK'
+ctl=${0%/*}
+[ "${1:-}" = --holders ] || exec "$real" "$@"
+hook() {  # <name> [answer]
+  [ -e "$ctl/$1" ] || return 0
+  mv -f "$ctl/$1" "$ctl/$1.ran" || return 1
+  real=$real ctl=$ctl bash "$ctl/$1.ran" "${2-}" && return 0
+  printf '%s\n' "$1" >> "$ctl/hook.failed"
+  return 1
+}
+hook before || exit 1
+answer=$("$real" --holders) || exit 1
+hook after "$answer" || exit 1
+[ -z "$answer" ] || printf '%s\n' "$answer"
+LOCK
+  } > "$ctl/racing-lock.sh"
+  chmod +x "$ctl/racing-lock.sh"
+  printf '%s\n' "$ctl/racing-lock.sh"
+}
+
+# Arm <ctl>/<before|after> for racing_task_lock with <body>. The body runs under
+# `set -e` with the real lock in $real, the control directory in $ctl, the
+# answer read in $1 (after only), and `until_holders <held|free> <text>`, which
+# waits, bounded, until some live holder line contains <text> (held) or none
+# does (free).
+race_hook() {  # <ctl-dir> <before|after> <body>
+  {
+    cat <<'HOOK'
+set -e
+until_holders() {
+  local i=0 found
+  while [ "$i" -lt 300 ]; do
+    found=0
+    "$real" --holders 2>/dev/null | grep -F -- "$2" >/dev/null && found=1
+    case "$1:$found" in held:1|free:0) return 0 ;; esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+HOOK
+    printf '%s\n' "$3"
+  } > "$1/$2"
+}
+
+# Another lane's run that needs the whole machine, from that lane's own
+# worktree: it takes every slot once nothing else is live, and ends when
+# <ctl>/<release-file> appears. Its pid lands in WHOLE_MACHINE_PID.
+WHOLE_MACHINE_PID=
+start_whole_machine_hold() {  # <lockroot> <worktree> <ctl-dir> <release-file>
+  WHOLE_MACHINE_PID=
+  # shellcheck disable=SC2016 # Expanded by the child shell.
+  ( cd "$2" && exec env FM_BUILD_LOCK_DIR="$1" FM_BUILD_LOCK_CI=0 \
+      "$ROOT/bin/fm-build-lock.sh" --exclusive --label 'other lane whole-machine run' -- bash -c '
+        end=$((SECONDS + 120))
+        while [ ! -e "$1" ] && [ "$SECONDS" -lt "$end" ]; do sleep 0.05; done
+      ' _ "$3/$4" ) > "$3/whole-machine.out" 2>&1 &
+  WHOLE_MACHINE_PID=$!
+  disown "$WHOLE_MACHINE_PID" 2>/dev/null || true
+}
+
+lane_race_cleanup() {  # <ctl-dir> <lockroot>
+  : > "$1/release-other"
+  stop_per_script_runner "$1" "$2"
+  [ -z "$WHOLE_MACHINE_PID" ] || kill_task_hold "$WHOLE_MACHINE_PID" || true
+  rm -rf "$2"/fm-build-lock* 2>/dev/null || true
+}
+
+# 0 when a live holder in <lockroot> was taken in exactly <worktree>.
+worktree_holds() {  # <lockroot> <worktree>
+  task_holders "$1" | cut -f3 | grep -Fx -- "$2" >/dev/null
+}
+
+# THE HOLD THAT ENDS INSIDE THE POLL. The run behind a hold is found from the
+# holder's ancestry in the process table, so the holder has to still be in that
+# table when it is read. The watcher read the slots first and walked the
+# holder's ancestry afterwards, from a live read: a per-script hold seen in its
+# last moment was already gone by then, its run was recorded as that hold alone,
+# and the next poll to land between two holds reported the live runner's run as
+# finished and told firstmate to steer the worker. That is the 2026-09-23 alarm
+# on a stock-bash lane, twice in half an hour: each hold it named had been held
+# for about its script's whole runtime (4s, 16s) when the slots were read, the
+# runner was alive both times, and its next script was queued behind other
+# lanes' holds, whole-machine runs among them. Modelled with two slots, another
+# lane's whole-machine run for the lane to queue behind, and a worker that
+# declared its wait and ended its turn with shells still running.
+#
+# Mutants that must turn this red:
+#   - walk the run from a live process read taken after the slot read (current
+#     main): phase B records the lane's run as a hold that has ended, and the
+#     queued runner is reported as finished.
+#   - record a holder the process table does not have as a run of its own (drop
+#     that guard from task_shell_run_record): phase C's hold, taken after the
+#     table was read, replaces the runner's record, and the gap after it is
+#     reported as finished.
+#   - hold the finished report whenever the worker has declared a wait: phase D
+#     never reports the run that has really ended.
+test_a_lane_runner_whose_hold_ends_inside_the_poll_is_not_reported_finished() {
+  local dir state fakebin out capture_file window key wt other lockroot ctl lock pid stray i
+  dir=$(make_case turn-ended-lane-race); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-lanerace"; wt="$dir/wt"; other="$dir/wt-other"; lockroot="$dir/lockroot"; ctl="$dir/ctl"
+  mkdir -p "$wt/src" "$other" "$lockroot" "$ctl"
+  FM_BUILD_LOCK_DIR="$lockroot" FM_BUILD_LOCK_CI=0 "$ROOT/bin/fm-build-lock.sh" --set-slots 2 >/dev/null 2>&1 \
+    || fail "could not give the private lock root two build slots"
+  printf 'done 3:49 PM - 3 shells still running' > "$capture_file"
+  arm_turn_ended_fixture "$state" lanerace "$window" "$wt" "$capture_file" \
+    'paused: stock-Bash lane running in background (bin/fm-stock-bash-lane.sh, task bf6vxplu4, unverifiable)'
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_busy_state "$state" lanerace idle || fail "could not record the idle turn-end verdict"
+  lock=$(racing_task_lock "$ctl")
+  start_per_script_runner "$lockroot" "$wt" "$ctl" 5
+  wait_task_holders "$lockroot" held \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the lane runner never took its first hold"; }
+
+  # Phase A: the lane's first script holds a slot. Held.
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    lane_race_cleanup "$ctl" "$lockroot"
+    fail "the watcher did not hold a lane whose runner was holding a build slot: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || { lane_race_cleanup "$ctl" "$lockroot"; fail "could not acknowledge the phase-A watcher stop"; }
+
+  # Phase B: the next script's hold is seen in its last moment - the watcher is
+  # handed a slot answer naming it, and it has ended before that answer returns.
+  # Its end lets another lane's whole-machine run take every slot, and the
+  # lane's next script queues behind it. Nothing has finished.
+  : > "$ctl/release1"
+  wait_task_holders "$lockroot" free \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the first script's hold never ended"; }
+  : > "$ctl/next2"
+  wait_task_holders "$lockroot" held \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the runner never took its second hold"; }
+  start_whole_machine_hold "$lockroot" "$other" "$ctl" release-other
+  # shellcheck disable=SC2016 # Expanded by the hook's own shell.
+  race_hook "$ctl" after 'printf "%s\n" "$1" > "$ctl/after.answer"
+: > "$ctl/release2"
+until_holders free tests/script-2.test.sh
+until_holders held "other lane whole-machine run"
+: > "$ctl/next3"'
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot" "$lock"
+  pid=$!
+  # Two whole cycles: the one that read the vanishing hold, and at least one
+  # after it that finds the lane between holds.
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    [ ! -e "$ctl/hook.failed" ] || { lane_race_cleanup "$ctl" "$lockroot"; fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so phase B tests nothing"; }
+    lane_race_cleanup "$ctl" "$lockroot"
+    fail "a lane runner whose hold ended inside the watcher's read was reported as a finished run: $(cat "$out")"
+  fi
+  [ ! -e "$ctl/hook.failed" ] || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so phase B tests nothing"; }
+  grep -F "tests/script-2.test.sh" "$ctl/after.answer" >/dev/null 2>&1 || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the watcher was never handed the second script's hold, so phase B tests nothing"; }
+  { ! worktree_holds "$lockroot" "$wt" && task_holders "$lockroot" | grep -F "other lane whole-machine run" >/dev/null; } \
+    || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+      fail "the lane was not queued behind the other lane's whole-machine run, so phase B tests nothing: $(task_holders "$lockroot")"; }
+  kill -0 "$TASK_RUNNER_PID" 2>/dev/null || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the lane runner ended, so phase B tests nothing"; }
+  grep -F "has finished" "$out" >/dev/null && { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "a queued lane runner was reported as a finished run: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the lane between holds enqueued a wake: $(cat "$state/.wake-queue")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the lane between holds advanced the wedge escalation counter"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { lane_race_cleanup "$ctl" "$lockroot"; fail "could not acknowledge the phase-B watcher stop"; }
+
+  # Phase C: the other lane finishes, the queued script gets its slot and runs,
+  # and then the lane's next script asks for its slot and runs to its end
+  # entirely inside the watcher's read - after the process table was taken,
+  # before the slot answer returns - so the answer names a hold that table never
+  # saw. Still nothing has finished.
+  : > "$ctl/release-other"
+  i=0
+  while ! task_holders "$lockroot" | grep -F "tests/script-3.test.sh" >/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$i" -lt 300 ] || { lane_race_cleanup "$ctl" "$lockroot"; fail "the queued script never got its slot"; }
+  : > "$ctl/release3"
+  wait_task_holders "$lockroot" free \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the queued script's hold never ended"; }
+  # shellcheck disable=SC2016 # Expanded by the hook's own shell.
+  race_hook "$ctl" before ': > "$ctl/next4"
+until_holders held tests/script-4.test.sh'
+  # shellcheck disable=SC2016 # Expanded by the hook's own shell.
+  race_hook "$ctl" after 'printf "%s\n" "$1" > "$ctl/after.answer"
+: > "$ctl/release4"
+until_holders free tests/script-4.test.sh'
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot" "$lock"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    [ ! -e "$ctl/hook.failed" ] || { lane_race_cleanup "$ctl" "$lockroot"; fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so phase C tests nothing"; }
+    lane_race_cleanup "$ctl" "$lockroot"
+    fail "a lane runner whose whole hold fell inside the watcher's read was reported as a finished run: $(cat "$out")"
+  fi
+  [ ! -e "$ctl/hook.failed" ] || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so phase C tests nothing"; }
+  grep -F "tests/script-4.test.sh" "$ctl/after.answer" >/dev/null 2>&1 || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the watcher was never handed the fourth script's hold, so phase C tests nothing"; }
+  kill -0 "$TASK_RUNNER_PID" 2>/dev/null || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the lane runner ended, so phase C tests nothing"; }
+  grep -F "has finished" "$out" >/dev/null && { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "a lane runner between holds was reported as a finished run: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+    fail "the lane between holds enqueued a wake: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || { lane_race_cleanup "$ctl" "$lockroot"; fail "could not acknowledge the phase-C watcher stop"; }
+
+  # Phase D: the last script runs and the run ends with it, leaving only its
+  # stray background job in the group. That run HAS finished, with the turn over
+  # and a wait declared: surface AT ONCE.
+  : > "$ctl/next5"
+  i=0
+  while ! task_holders "$lockroot" | grep -F "tests/script-5.test.sh" >/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  : > "$ctl/release5"
+  i=0
+  while is_live_non_zombie "$TASK_RUNNER_PID" && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  ! is_live_non_zombie "$TASK_RUNNER_PID" \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the lane runner outlived its last hold"; }
+  stray=$(cat "$ctl/stray" 2>/dev/null || true)
+  if [ -z "$stray" ] || ! kill -0 "$stray" 2>/dev/null; then
+    lane_race_cleanup "$ctl" "$lockroot"
+    fail "the stray job did not outlive the run, so phase D cannot tell the run from its group"
+  fi
+  : > "$out"
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; lane_race_cleanup "$ctl" "$lockroot"
+      fail "the watcher stayed quiet after the lane's run finished with its turn over: $(cat "$out")"; }
+  grep -F "has finished and its turn was already over" "$out" >/dev/null \
+    || { lane_race_cleanup "$ctl" "$lockroot"; fail "the finished lane run was not reported as itself: $(cat "$out")"; }
+  lane_race_cleanup "$ctl" "$lockroot"
+  pass "a lane runner whose hold ends inside the watcher's own read is still one live run between holds, and reported finished once it has ended"
+}
+
+# A RUN THAT ENDS INSIDE THE POLL STILL SURFACES. The other direction of the
+# case above: a run that genuinely ends in the moment after the watcher's slot
+# read is still reported the moment it is gone, rather than dropped as a hold
+# whose run the watcher could not read. One hold, taken as a command a harness
+# ran in a fresh group of its own, ends between the watcher's slot read and the
+# return of that answer.
+#
+# Mutant that must turn this red:
+#   - walk the run from a live process read taken after the slot read, and drop
+#     a holder that read cannot find: the hold is never recorded, and its
+#     finished run is never reported.
+test_a_single_hold_that_ends_inside_the_poll_is_still_reported_finished() {
+  local dir state fakebin out capture_file window wt lockroot ctl lock hold pid
+  dir=$(make_case turn-ended-single-hold-race); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-holdrace"; wt="$dir/wt"; lockroot="$dir/lockroot"; ctl="$dir/ctl"
+  mkdir -p "$wt/src" "$lockroot" "$ctl"
+  printf 'done 3:49 PM - 1 shell still running' > "$capture_file"
+  arm_turn_ended_fixture "$state" holdrace "$window" "$wt" "$capture_file" \
+    'paused: waiting on the test lane, build slot held'
+  set_busy_state "$state" holdrace idle || fail "could not record the idle turn-end verdict"
+  take_task_hold "$lockroot" "$wt" 'mutex bash tests/lane.test.sh' \
+    || fail "the lane fixture never took a build slot"
+  hold=$TASK_HOLD_PID
+  lock=$(racing_task_lock "$ctl")
+  # shellcheck disable=SC2016 # Expanded by the hook's own shell.
+  race_hook "$ctl" after 'printf "%s\n" "$1" > "$ctl/after.answer"
+kill -9 -- "-'"$hold"'"
+until_holders free "mutex bash tests/lane.test.sh"'
+
+  task_shell_watch_bg "$state" "$fakebin" "$out" "$window" "$capture_file" "$lockroot" "$lock"
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; release_task_hold "$hold" "$lockroot"
+    [ ! -e "$ctl/hook.failed" ] || fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so this case tests nothing"
+    fail "a run that ended right after the watcher read its hold was never reported finished: $(cat "$out")"
+  fi
+  release_task_hold "$hold" "$lockroot"
+  [ ! -e "$ctl/hook.failed" ] || fail "the racing lock's $(cat "$ctl/hook.failed") hook failed, so this case tests nothing"
+  grep -F "mutex bash tests/lane.test.sh" "$ctl/after.answer" >/dev/null 2>&1 \
+    || fail "the watcher was never handed the hold, so this case tests nothing"
+  grep -F "has finished and its turn was already over" "$out" >/dev/null \
+    || fail "the run that ended inside the watcher's read was not reported as a finished run: $(cat "$out")"
+  pass "a run that ends right after the watcher reads its hold is still reported finished at once"
 }
 
 # THE FALSE-ALARM GUARD. The agent half must be a POSITIVE idle verdict. A lane
@@ -6295,6 +6600,8 @@ test_status_wait_subject_class_classifier
 test_turn_ended_with_a_task_owned_run_holds_the_ladder_then_reports_it_finished
 test_a_per_script_runner_between_holds_is_not_reported_finished
 test_a_hold_in_its_terminals_foreground_group_still_reports_finished
+test_a_lane_runner_whose_hold_ends_inside_the_poll_is_not_reported_finished
+test_a_single_hold_that_ends_inside_the_poll_is_still_reported_finished
 test_a_lane_that_is_not_positively_idle_is_left_to_the_ordinary_ladder
 test_a_declared_wait_with_its_agent_present_is_not_reported
 test_an_unverifiable_declared_wait_is_distinguishable_from_a_checkable_one
