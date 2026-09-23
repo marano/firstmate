@@ -25,7 +25,10 @@
 # the branch head, and the ancestry and patch-equivalence checks when that head
 # differs from the recorded forge head. They run only for a task that already
 # has both a done outcome and a recorded forge head - never on the hot path of
-# an ordinary working task.
+# an ordinary working task. When the recorded head's commit is not in that copy,
+# those reads borrow the object stores of the repositories on this machine that
+# the copy's remotes name - the pipeline's gate among them - read-only
+# (_fm_awaiting_landing_remote_stores).
 #
 # THE THREE CLASSES
 #   awaiting-landing  finished, held by firstmate, nothing says it cannot land.
@@ -78,6 +81,16 @@
 #      no matching receipt, a `behind` head (unpushed local work), and an
 #      unrelated head that lacks or alters any branch commit (rewritten
 #      history) all stay landing-blocked.
+#      Both exceptions read the pipeline's commits, which it makes in its own
+#      gate repository and pushes to the forge from there, so the task's copy
+#      holds them only once something fetches them. 2026-09-23 10:37: a stopped
+#      worker's validated, rebased PR head reached that copy an hour and a
+#      quarter after the alarm it raised as rewritten history, because every
+#      read of a commit the copy lacked failed. Those reads now borrow the
+#      gate's store. A head that no store on this machine holds stays
+#      landing-blocked with target=unreadable and says so, rather than
+#      claiming history was rewritten: nothing proves it is this branch's
+#      work, and a head nobody here ever held is worth a look before landing.
 #
 # The target check can only ever move a task OUT of quiet, never into it.
 # Absence of verification is not evidence of a problem: bin/fm-pr-check.sh
@@ -151,14 +164,53 @@ _fm_awaiting_landing_branch_head() {  # <worktree>
   printf '%s' "$head"
 }
 
+# The object stores of the repositories on this machine that <worktree>'s
+# remotes name, joined for GIT_ALTERNATE_OBJECT_DIRECTORIES, or the empty string.
+# The pipeline's gate is the one that matters: its commits exist there from the
+# moment it makes them, and in this copy only once something fetches them.
+# Lending a store to a read writes to neither repository, and a store can only
+# answer for the exact commit a sha names.
+_fm_awaiting_landing_remote_stores() {  # <worktree>
+  local wt=$1 url dir stores=''
+  while read -r _ url; do
+    case "$url" in
+      file://*) dir=${url#file://} ;;
+      /*) dir=$url ;;
+      *) continue ;;
+    esac
+    if [ -d "$dir/objects" ]; then
+      dir=$dir/objects
+    elif [ -d "$dir/.git/objects" ]; then
+      dir=$dir/.git/objects
+    else
+      continue
+    fi
+    # The variable's own separator: a path holding one cannot be lent.
+    case "$dir" in *:*) continue ;; esac
+    stores=${stores:+$stores:}$dir
+  done < <(git -C "$wt" config --get-regexp '^remote\..*\.(push)?url$' 2>/dev/null || true)
+  printf '%s' "$stores"
+}
+
+# git in <worktree>, with <stores> lent to its object lookups when non-empty.
+_fm_awaiting_landing_git() {  # <worktree> <stores> <git-args>...
+  local wt=$1 stores=$2
+  shift 2
+  if [ -n "$stores" ]; then
+    GIT_ALTERNATE_OBJECT_DIRECTORIES=$stores git -C "$wt" "$@"
+  else
+    git -C "$wt" "$@"
+  fi
+}
+
 # How a recorded head and a branch head disagree. Free once both SHAs are in
 # hand, and it is what makes the surfaced line actionable: `unrelated` is the
 # rewritten-history case that produced this leg.
-_fm_awaiting_landing_divergence() {  # <worktree> <recorded-head> <branch-head>
-  local wt=$1 recorded=$2 branch=$3
-  if git -C "$wt" merge-base --is-ancestor "$recorded" "$branch" 2>/dev/null; then
+_fm_awaiting_landing_divergence() {  # <worktree> <recorded-head> <branch-head> <stores>
+  local wt=$1 recorded=$2 branch=$3 stores=$4
+  if _fm_awaiting_landing_git "$wt" "$stores" merge-base --is-ancestor "$recorded" "$branch" 2>/dev/null; then
     printf 'behind'
-  elif git -C "$wt" merge-base --is-ancestor "$branch" "$recorded" 2>/dev/null; then
+  elif _fm_awaiting_landing_git "$wt" "$stores" merge-base --is-ancestor "$branch" "$recorded" 2>/dev/null; then
     printf 'ahead'
   else
     printf 'unrelated'
@@ -169,12 +221,12 @@ _fm_awaiting_landing_divergence() {  # <worktree> <recorded-head> <branch-head>
 # patch-equivalent commit: the proof that a head the pipeline rebased onto a newer
 # base is still this branch's work. A merge on the branch fails it, because patch
 # equivalence cannot see what a merge commit itself resolved, and so does any
-# read git cannot complete, such as a head whose objects this copy never fetched.
-_fm_awaiting_landing_carries_branch() {  # <worktree> <pr-head> <branch-head>
-  local wt=$1 pr_head=$2 branch=$3 merges cherry
-  merges=$(git -C "$wt" rev-list --merges --max-count=1 "$pr_head..$branch" 2>/dev/null) || return 1
+# read git cannot complete.
+_fm_awaiting_landing_carries_branch() {  # <worktree> <pr-head> <branch-head> <stores>
+  local wt=$1 pr_head=$2 branch=$3 stores=$4 merges cherry
+  merges=$(_fm_awaiting_landing_git "$wt" "$stores" rev-list --merges --max-count=1 "$pr_head..$branch" 2>/dev/null) || return 1
   [ -z "$merges" ] || return 1
-  cherry=$(git -C "$wt" cherry "$pr_head" "$branch" 2>/dev/null) || return 1
+  cherry=$(_fm_awaiting_landing_git "$wt" "$stores" cherry "$pr_head" "$branch" 2>/dev/null) || return 1
   [ -n "$cherry" ] || return 1
   case $'\n'"$cherry" in
     *$'\n+'*) return 1 ;;
@@ -196,7 +248,7 @@ _fm_awaiting_landing_head_validated() {  # <state> <id> <pr-url> <pr-head>
 # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_awaiting_landing_read() {  # <id> <state-dir>
   local id=${1-} state=${2-}
-  local meta line verb pr pr_head worktree branch_head stopped=1 shape
+  local meta line verb pr pr_head worktree branch_head stopped=1 shape stores=
 
   FM_AWAITING_LANDING_CLASS="none"
   FM_AWAITING_LANDING_OUTCOME=
@@ -266,7 +318,22 @@ fm_awaiting_landing_read() {  # <id> <state-dir>
     FM_AWAITING_LANDING_DETAIL="awaiting landing: work reported done, $pr holds this branch's head ${branch_head:0:7}"
     return 0
   fi
-  shape=$(_fm_awaiting_landing_divergence "$worktree" "$pr_head" "$branch_head")
+  # Every read below needs the recorded head's commit, which this copy lacks
+  # whenever the pipeline made it: it commits in its own gate repository and
+  # pushes to the forge from there. The gate's store is lent to those reads.
+  # A head that no store here holds cannot be compared at all, which is not
+  # evidence that history was rewritten, so the line says what is really known.
+  if ! _fm_awaiting_landing_git "$worktree" "" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
+    stores=$(_fm_awaiting_landing_remote_stores "$worktree")
+    if [ -z "$stores" ] \
+      || ! _fm_awaiting_landing_git "$worktree" "$stores" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
+      FM_AWAITING_LANDING_TARGET="unreadable"
+      FM_AWAITING_LANDING_CLASS="landing-blocked"
+      FM_AWAITING_LANDING_DETAIL="landing blocked: $pr holds ${pr_head:0:7}, which neither the local copy at ${branch_head:0:7} nor any repository on this machine that it names as a remote holds, so whether the PR carries this branch's work cannot be read"
+      return 0
+    fi
+  fi
+  shape=$(_fm_awaiting_landing_divergence "$worktree" "$pr_head" "$branch_head" "$stores")
   # An `ahead` PR is the ordinary end state of a validated ship: the pipeline
   # pushes its own fix commits and the worker's local branch is never
   # fast-forwarded to them, so the PR holds everything the branch has plus the
@@ -286,7 +353,7 @@ fm_awaiting_landing_read() {  # <id> <state-dir>
   # ones. The receipt vouches for the head, and the patch check proves it still
   # carries every commit of this branch; either one missing stays blocked.
   if [ "$shape" = unrelated ] && _fm_awaiting_landing_head_validated "$state" "$id" "$pr" "$pr_head" \
-    && _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head"; then
+    && _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head" "$stores"; then
     FM_AWAITING_LANDING_TARGET="validated"
     FM_AWAITING_LANDING_CLASS="awaiting-landing"
     FM_AWAITING_LANDING_DETAIL="awaiting landing: work reported done, $pr holds ${pr_head:0:7}, validated by pipeline run $FM_VALIDATION_RECEIPT_RUN and carrying this branch's commits up to ${branch_head:0:7} rebased onto a newer base"

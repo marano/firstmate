@@ -4621,7 +4621,7 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
 # receipt: a validated ahead head with a dead endpoint raises NO stale wake, while
 # the same task with an unvouched ahead head, or a behind head, STILL does - and the
 # alarm that fires leaves a triage-log line naming the landing class that decided it.
-landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind|rebased> -> key
+landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind|rebased|gate-rebased> -> key
   local case_dir=$1 task_id=$2 num=$3 receipt=$4 shape=$5 base pr_head
   local state_dir="$case_dir/state" win="test:fm-$task_id"
   fm_git_worktree "$case_dir/repo" "$case_dir/wt" "fm/$task_id" >/dev/null 2>&1 \
@@ -4629,6 +4629,8 @@ landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead
   base=$(git -C "$case_dir/wt" rev-parse HEAD)
   if [ "$shape" = rebased ]; then
     pr_head=$(landing_rebased_head "$case_dir/wt" "fm/$task_id") || fail "could not rebase $task_id's branch"
+  elif [ "$shape" = gate-rebased ]; then
+    pr_head=$(landing_gate_rebased_head "$case_dir" "fm/$task_id") || fail "could not rebase $task_id's branch in its gate"
   else
     git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
       commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
@@ -4669,6 +4671,33 @@ landing_rebased_head() {  # <worktree> <branch>
   pr_head=$(git -C "$wt" rev-parse HEAD)
   git -C "$wt" checkout -q "$branch" || return 1
   if git -C "$wt" merge-base --is-ancestor "$work" "$pr_head" || git -C "$wt" merge-base --is-ancestor "$pr_head" "$work"; then
+    return 1
+  fi
+  printf '%s' "$pr_head"
+}
+
+# The same rebase, made where the pipeline makes it: in a worktree of its gate, a
+# bare repository on this machine that the worker's copy names as its
+# `no-mistakes` remote. The copy is left without the rebased head, which is the
+# measured shape, and a fixture that leaked the head into the copy fails rather
+# than proving the same-repository case over again. Prints the rebased PR head.
+landing_gate_rebased_head() {  # <case-dir> <branch>
+  local case_dir=$1 branch=$2 wt=$1/wt gate=$1/gate.git gate_wt=$1/gate-wt base work pr_head
+  local -a gate_git_id=(-c user.name='Firstmate Tests' -c user.email='tests@example.invalid')
+  base=$(git -C "$wt" rev-parse HEAD)
+  printf 'the work\n' > "$wt/work.txt"
+  git -C "$wt" add work.txt && git -C "$wt" "${gate_git_id[@]}" commit -qm "the worker's commit" || return 1
+  work=$(git -C "$wt" rev-parse HEAD)
+  git clone --quiet --bare "$case_dir/repo" "$gate" || return 1
+  git -C "$case_dir/repo" remote add no-mistakes "$gate" || return 1
+  git -C "$gate" worktree add -q --detach "$gate_wt" "$base" 2>/dev/null || return 1
+  printf 'the base moved on\n' > "$gate_wt/base.txt"
+  git -C "$gate_wt" add base.txt && git -C "$gate_wt" "${gate_git_id[@]}" commit -qm 'the base branch moved on' || return 1
+  git -C "$gate_wt" "${gate_git_id[@]}" cherry-pick "$work" > /dev/null || return 1
+  git -C "$gate_wt" "${gate_git_id[@]}" commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || return 1
+  pr_head=$(git -C "$gate_wt" rev-parse HEAD)
+  [ "$(git -C "$wt" symbolic-ref --short HEAD)" = "$branch" ] || return 1
+  if git -C "$wt" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
     return 1
   fi
   printf '%s' "$pr_head"
@@ -4754,6 +4783,36 @@ test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms()
   grep -Fx "stale: $window" "$out" >/dev/null || fail "the wedged worker printed the wrong wake: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the wedged leg's watcher stop"
   pass "a validated rebased head on a stopped worker raises no stale wake; an unvouched one and a real wedge still do"
+}
+
+# THE 2026-09-23 10:37 false alarm, in the shape it was measured. After the fix
+# above had merged, a stopped worker whose PR head was a validated pipeline
+# rebase of its branch still alarmed "stale (terminal status;
+# landing=landing-blocked - ... the commits were rewritten ...)": the pipeline
+# made that head in its own gate repository and pushed it to the forge from
+# there, and the worker's copy fetched it only later. The same records over a
+# head only the gate holds raise NO stale wake, while the same records without
+# the receipt STILL do.
+test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet() {
+  local dir state fakebin out capture window key pid
+  dir=$(make_case landing-gate-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-gate-ok"
+  key=$(landing_ahead_task "$dir" gate-ok 47 yes gate-rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a stopped worker whose validated PR head only the pipeline's gate holds"
+
+  dir=$(make_case landing-gate-unvouched); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-gate-unvouched"
+  key=$(landing_ahead_task "$dir" gate-unvouched 48 no gate-rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unvouched head only the gate holds never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the unvouched gate-held head printed the wrong wake: $(cat "$out")"
+  grep -F "surfaced stale" "$state/.watch-triage.log" | grep -F "landing=landing-blocked" | grep -F "$window" >/dev/null \
+    || fail "the unvouched gate-held alarm left no triage-log line naming the landing class: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unvouched gate-held leg's watcher stop"
+  pass "a validated PR head only the pipeline's gate holds raises no stale wake on a stopped worker; an unvouched one still does"
 }
 
 # --- a declared wait survives the resolutions logged after it ----------------
@@ -6759,6 +6818,7 @@ test_a_declared_wait_survives_the_resolutions_logged_after_it
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
+test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
