@@ -128,24 +128,44 @@ fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Append <line> to <path> unless that exact line is already there.
-fm_parent_channel_append_once() {  # <path> <line>
+# Append <line> to <path> unconditionally, creating the destination as needed.
+fm_parent_channel_append() {  # <path> <line>
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
   else
     mkdir -p "$(dirname "$path")" || return 1
   fi
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
-    return 0
-  fi
   printf '%s\n' "$line" >> "$path"
 }
 
+# Append <line> to <path> unless that exact line is already there. Used by
+# publishers that poll or re-derive the same outcome repeatedly (a watcher
+# loop, a reconciler pass), where re-appending an unchanged line would just
+# duplicate an already-delivered event.
+fm_parent_channel_append_once() {  # <path> <line>
+  local path=$1 line=$2
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  fi
+  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
+    return 0
+  fi
+  fm_parent_channel_append "$path" "$line"
+}
+
 # Publish one parent-facing line from <home>. See the return codes above.
-fm_parent_channel_report() {  # <home> <state> <line>
-  local home=$1 state=$2 line=$3 destination rc=0
+# <mode> is "once" (default, dedup by exact content) or "always" for a
+# caller whose publish is itself an explicit, deliberate action - such as a
+# re-registration retried after a suspected delivery failure - where the
+# same content must be republished rather than silently absorbed.
+fm_parent_channel_report() {  # <home> <state> <line> [mode]
+  local home=$1 state=$2 line=$3 mode=${4:-once} destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  fm_parent_channel_append_once "$destination" "$line" || return 4
+  if [ "$mode" = always ]; then
+    fm_parent_channel_append "$destination" "$line" || return 4
+  else
+    fm_parent_channel_append_once "$destination" "$line" || return 4
+  fi
 }

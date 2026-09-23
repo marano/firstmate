@@ -258,7 +258,7 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 [ -z "$MERGE_HOLD_SUMMARY" ] || READY_LINE="$READY_LINE held: $(fm_parent_channel_clean_note "$MERGE_HOLD_SUMMARY")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" always || READY_RC=$?
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
