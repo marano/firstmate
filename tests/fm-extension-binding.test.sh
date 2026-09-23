@@ -62,6 +62,7 @@ unrelated_launcher_pid=
 signal_cleanup_host_pid=
 signal_cleanup_group_pid=
 crash_cleanup_host_pid=
+crash_invocation_host_pid=
 crash_cleanup_group_pid=
 crash_cleanup_release=
 crash_silent_start_pid=
@@ -105,6 +106,7 @@ extension_test_cleanup() {
   [ -z "$signal_cleanup_host_pid" ] || kill -KILL "$signal_cleanup_host_pid" 2>/dev/null || true
   [ -z "$signal_cleanup_group_pid" ] || kill -KILL -"$signal_cleanup_group_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_host_pid" ] || kill -KILL "$crash_cleanup_host_pid" 2>/dev/null || true
+  [ -z "$crash_invocation_host_pid" ] || kill -KILL "$crash_invocation_host_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_group_pid" ] || kill -KILL -"$crash_cleanup_group_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_release" ] || touch "$crash_cleanup_release" 2>/dev/null || true
   [ -z "$crash_silent_start_pid" ] || kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
@@ -1925,6 +1927,9 @@ owner_group_pid() {  # <owner-file>
   node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(value.phase!=="group"||!Number.isSafeInteger(value.group_pid))process.exit(1);process.stdout.write(String(value.group_pid));' "$1"
 }
 
+owner_host_pid() {  # <owner-file>
+  node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Number.isSafeInteger(value.host_pid))process.exit(1);process.stdout.write(String(value.host_pid));' "$1"
+}
 
 guarded_out=$(invoke_cleanup guarded node --disallow-code-generation-from-strings "$HOST")
 assert_contains "$guarded_out" "external evidence: guarded" \
@@ -1977,7 +1982,14 @@ crash_owner=$(wait_for_invocation_owner "$H_INVOCATION_CLEANUP") \
 crash_cleanup_group_pid=$(owner_group_pid "$crash_owner") \
   || fail "crash cleanup fixture published no exact process group"
 crash_entry_pid=$(cat "$crash_marker")
-kill -KILL "$crash_cleanup_host_pid" 2>/dev/null || fail "cannot stop the extension host at the crash cut"
+# The public host hands the invocation to a lifecycle-locked worker, and the
+# owner record names that worker as the host that owns the group. The crash cut
+# kills that host: killing only the public process crashes nothing, because the
+# worker goes on to finish or time out on its own.
+crash_invocation_host_pid=$(owner_host_pid "$crash_owner") \
+  || fail "crash cleanup fixture recorded no invocation host"
+kill -KILL "$crash_invocation_host_pid" 2>/dev/null || fail "cannot stop the extension host at the crash cut"
+crash_invocation_host_pid=
 wait "$crash_cleanup_host_pid" 2>/dev/null || true
 crash_cleanup_host_pid=
 kill -0 -"$crash_cleanup_group_pid" 2>/dev/null \
