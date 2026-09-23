@@ -86,6 +86,7 @@ The supervisor guard selects only the detected primary harness's signature rathe
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
+Text still arriving is not a swallowed Enter: while the composer provably holds a growing leading part of the typed text, the harness is still taking the keystrokes with the Enter queued behind them, so the core waits instead of pressing Enter again, which would submit a second time.
 Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).
@@ -97,7 +98,7 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, and text still arriving; `tests/fm-afk-inject-e2e.test.sh` (Scenario C under a slow composer) covers the arriving text end to end.
 
 Typed content can impersonate structure, so a composer holding the caller's own unconfirmed text can read `unknown` indefinitely: a wrapped row ending in the away digest's ` | ` separator reads as a box edge.
 `fm_tmux_resubmit_own_text` therefore presses Enter again, never retyping or clearing, only while `fm_composer_holds_text` proves the composer holds exactly the text the caller typed, anchored on the agent prompt glyph and the cursor row; any other, extra, or moved text sends nothing.

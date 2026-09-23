@@ -1567,7 +1567,22 @@ fm_composer_squash_var() {  # <varname>
 # A screen this cannot prove - a bordered or left-bar composer, text taller
 # than the pane, or anything else - returns 1 and the caller must not press.
 fm_composer_holds_text() {  # <caps> <screen> <cursor_row> <text>
-  local caps=$1 screen=$2 cy=${3:-} text=$4 kv cursor=0 plain expected row=0 line glyph='' g=-1 acc next
+  local held expected=$4
+  fm_composer_held_text_var held "$@" || return 1
+  fm_composer_squash_var expected
+  [ "$held" -eq "${#expected}" ]
+}
+
+# fm_composer_held_text_var: the same proof, also accepting a LEADING PART of
+# <text>: sets <out-varname> to how many squashed characters of <text> the
+# composer provably holds, and nothing else, which is all of them or, with a
+# cursor, a non-empty leading part ending on the cursor row. That partial read
+# is what a harness still taking the caller's typed keystrokes shows, so a
+# caller can tell text still arriving from a submit that was swallowed. Without
+# a cursor nothing marks where a partial text ends, so only the whole of it is
+# proven. Returns 1, setting nothing, on any screen the proof above refuses.
+fm_composer_held_text_var() {  # <out-varname> <caps> <screen> <cursor_row> <text>
+  local __fmht_out=$1 caps=$2 screen=$3 cy=${4:-} text=$5 kv cursor=0 plain expected row=0 line glyph='' g=-1 acc next
   local -a rows=()
   while IFS= read -r kv; do
     [ "$kv" = cursor=1 ] && cursor=1
@@ -1601,6 +1616,7 @@ SCREEN
       *) return 1 ;;
     esac
     [ "$acc" != "$expected" ] || break
+    [ -z "$cy" ] || [ "$row" -lt "$cy" ] || break
     row=$((row + 1))
     [ "$row" -lt "${#rows[@]}" ] || return 1
     line=${rows[row]}
@@ -1608,12 +1624,14 @@ SCREEN
     [ -n "$line" ] || return 1
     acc=$acc$line
   done
+  [ -n "$acc" ] || return 1
   if [ -n "$cy" ] && [ "$cy" -ne "$row" ]; then
     return 1
   fi
   next=${rows[row + 1]:-}
   fm_composer_normalize_trim_var next
-  [ -z "$next" ] || fm_composer_row_has_edge "$next"
+  [ -z "$next" ] || fm_composer_row_has_edge "$next" || return 1
+  printf -v "$__fmht_out" '%s' "${#acc}"
 }
 
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop

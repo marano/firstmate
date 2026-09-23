@@ -342,8 +342,134 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
+# A pane whose harness takes typed input at its own pace: each interval the
+# submit core sleeps (arriving_sleep, standing in for `sleep`) lets it take
+# FM_FAKE_TAKE more queued keystrokes, in the order they were sent, and reads
+# change nothing. An Enter it takes submits whatever the composer holds, even
+# nothing, as a line of $dir/submitted - the harness this models is the away
+# daemon's e2e supervisor fixture, where a second Enter queued behind a digest
+# showed up as an empty line. FM_FAKE_SWALLOW_ALL=1 drops every Enter instead.
+make_arriving_mock() {
+  local dir=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  : > "$dir/typed"; : > "$dir/buf"; : > "$dir/submitted"; : > "$dir/sent"
+  printf '0\n' > "$dir/pos"; printf '0\n' > "$dir/enters"; printf '0\n' > "$dir/taken-enters"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D="${FM_FAKE_ARRIVE_DIR:?}"
+take() {
+  local typed pos enters taken budget=${FM_FAKE_TAKE:?} buf
+  typed=$(cat "$D/typed"); pos=$(cat "$D/pos"); enters=$(cat "$D/enters")
+  taken=$(cat "$D/taken-enters"); buf=$(cat "$D/buf")
+  while [ "$budget" -gt 0 ]; do
+    if [ "$pos" -lt "${#typed}" ]; then
+      buf=$buf${typed:pos:1}
+      pos=$((pos + 1))
+    elif [ "$taken" -lt "$enters" ]; then
+      printf '%s\n' "$buf" >> "$D/submitted"
+      buf=
+      taken=$((taken + 1))
+    else
+      break
+    fi
+    budget=$((budget - 1))
+  done
+  printf '%s\n' "$pos" > "$D/pos"; printf '%s\n' "$taken" > "$D/taken-enters"
+  printf '%s' "$buf" > "$D/buf"
+}
+capture() { printf '❯ %s\n' "$(cat "$D/buf")"; }
+case "${1:-}" in
+  __tick) take; exit 0 ;;
+  display-message)
+    chained=0
+    for a in "$@"; do [ "$a" != ';' ] || chained=1; done
+    printf '0\n'
+    [ "$chained" = 0 ] || capture
+    exit 0 ;;
+  capture-pane) capture; exit 0 ;;
+  send-keys)
+    shift; literal=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift ;;
+        -l) literal=1 ;;
+        Enter)
+          printf 'Enter\n' >> "$D/sent"
+          [ "${FM_FAKE_SWALLOW_ALL:-0}" = 1 ] \
+            || printf '%s\n' "$(( $(cat "$D/enters") + 1 ))" > "$D/enters" ;;
+        *) [ "$literal" = 0 ] || { printf '%s' "$1" > "$D/typed"; printf '0\n' > "$D/pos"; } ;;
+      esac
+      shift
+    done
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# Run the submit core against the arriving mock: <dir> <take> <verdict-file>
+# <core args...>. `sleep` is where the harness gets its time, so it is replaced
+# for this run only.
+arriving_submit() {
+  local dir=$1 take=$2 vfile=$3
+  shift 3
+  (
+    export FM_FAKE_ARRIVE_DIR="$dir" FM_FAKE_TAKE="$take" FM_FAKE_PANE_BUSY=0
+    # shellcheck disable=SC2329
+    sleep() { "$dir/fakebin/tmux" __tick; }
+    PATH="$dir/fakebin:$PATH" fm_tmux_submit_core "$@" > "$vfile" 2>/dev/null
+  )
+}
+
+test_text_still_arriving_is_not_a_swallowed_enter() {
+  local dir vfile text i
+  dir="$TMP_ROOT/text-arriving"
+  mkdir -p "$dir"
+  make_arriving_mock "$dir" >/dev/null
+  vfile="$dir/verdict"
+  # 48 characters at 4 per interval: one read shows the whole text with its
+  # Enter still queued behind it, which is not a swallow either.
+  text="fm steer: review the pending PR and report it ok"
+  [ "${#text}" -eq 48 ] || fail "fixture: the steer text must be 48 characters, is ${#text}"
+  arriving_submit "$dir" 4 "$vfile" "win" "$text" 3 0.01 0.01
+  # Let the harness take whatever is still queued before reading what it got.
+  i=0
+  while [ "$i" -lt 16 ]; do
+    FM_FAKE_ARRIVE_DIR="$dir" FM_FAKE_TAKE=4 "$dir/fakebin/tmux" __tick
+    i=$((i + 1))
+  done
+  # Counted, not only compared: $(cat) would drop the empty lines that a
+  # second Enter submits after the text.
+  [ "$(wc -l < "$dir/submitted" | tr -d ' ')" -eq 1 ] && [ "$(cat "$dir/submitted")" = "$text" ] \
+    || fail "a composer still taking the typed text must get exactly one submit; it submitted: $(sed 's/^/[/; s/$/]/' "$dir/submitted" | tr '\n' ' ')"
+  [ "$(grep -c '^Enter$' "$dir/sent")" -eq 1 ] \
+    || fail "text still arriving must not be answered with another Enter, sent $(grep -c '^Enter$' "$dir/sent")"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "the submit of text that arrived slowly should be confirmed, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_core: a composer still taking the typed text gets one Enter, and the submit is confirmed"
+}
+
+test_whole_text_with_swallowed_enter_still_retries() {
+  local dir vfile
+  dir="$TMP_ROOT/text-whole-swallowed"
+  mkdir -p "$dir"
+  make_arriving_mock "$dir" >/dev/null
+  vfile="$dir/verdict"
+  FM_FAKE_SWALLOW_ALL=1 arriving_submit "$dir" 1000 "$vfile" "win" "fm steer: review the pending PR" 3 0.01 0.01
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "a swallowed Enter on text that has fully arrived must stay pending, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$dir/sent")" -eq 3 ] \
+    || fail "a swallowed Enter on text that has fully arrived must use the Enter retry budget, sent $(grep -c '^Enter$' "$dir/sent")"
+  pass "fm_tmux_submit_core: text that has fully arrived keeps the swallowed-Enter retries"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+test_text_still_arriving_is_not_a_swallowed_enter
+test_whole_text_with_swallowed_enter_still_retries
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
 test_busy_pane_composer_clears_first_try

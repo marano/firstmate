@@ -569,6 +569,26 @@ ok - live composer-matrix guard verified 3 live surface(s)
 
 The guard does not press Enter, so the swallowed-Enter behavior above is recorded from the isolated runs rather than refreshed by it; `tests/fm-afk-inject-e2e.test.sh` Scenario E pins the resulting daemon behavior portably against a fixture composer with that shape.
 
+### 2026-09-23 Claude composer holding typed text still arriving
+
+The tmux submit core tells text still arriving from a swallowed Enter by measuring how much of the typed text the composer holds (`fm_composer_held_text_var`), so that measurement reads rendered rows and is proven on a real composer.
+Verified on 2026-09-23 on macOS arm64 with tmux 3.6a against Claude Code 2.1.280, in the same isolated private tmux server at 140 columns with nothing submitted: the composer holding the typed digest measures as the leading part, all 497 squashed characters, of a longer text whose remainder never arrived.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.280 (Claude Code)): real idle composer classifies empty
+ok - claude (2.1.280 (Claude Code)): its composer holding the daemon's own digest is provable, measures as the leading part of a longer text still arriving, and one more character breaks the proof (classifier verdict: unknown)
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 3 live surface(s)
+```
+
+A harness whose composer the measurement cannot read, such as a bordered one, gets no wait and keeps the Enter retries described in the [tmux backend](../tmux-backend.md); `tests/fm-afk-inject-e2e.test.sh` (Scenario C under a slow composer) and `tests/fm-tmux-submit-busy.test.sh` pin the wait portably.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
