@@ -925,6 +925,56 @@ test_holds_text_refuses_anything_else() {
   pass "fm_composer_holds_text: refuses other, extra, moved, echoed, bordered, and shell-anchored text"
 }
 
+# held <label> <want-part|-> <caps> <screen> <cursor> <text>, in both locales:
+# the composer holds exactly <want-part> of <text> (its squashed length), or,
+# with `-`, the proof refuses.
+assert_held() {
+  local label=$1 want=$2 got rc expected loc
+  shift 2
+  for loc in '' C; do
+    got='unset'
+    if [ -n "$loc" ]; then
+      LC_ALL=$loc fm_composer_held_text_var got "$@"; rc=$?
+    else
+      fm_composer_held_text_var got "$@"; rc=$?
+    fi
+    if [ "$want" = - ]; then
+      [ "$rc" = 1 ] && [ "$got" = unset ] || fail "$label${loc:+ under LC_ALL=$loc}: expected a refusal, got rc=$rc held=$got"
+      continue
+    fi
+    expected=$want
+    if [ -n "$loc" ]; then
+      LC_ALL=$loc fm_composer_squash_var expected
+      expected=$(LC_ALL=$loc; printf '%s' "${#expected}")
+    else
+      fm_composer_squash_var expected
+      expected=${#expected}
+    fi
+    [ "$rc" = 0 ] && [ "$got" = "$expected" ] \
+      || fail "$label${loc:+ under LC_ALL=$loc}: expected held=$expected, got rc=$rc held=$got"
+  done
+}
+
+test_held_text_measures_text_still_arriving() {
+  local part screen rows1
+  assert_held "the whole stranded digest" "$HOLD_TEXT" "$CAPS_TMUX" "$HOLD_SCREEN" "$HOLD_LAST" "$HOLD_TEXT"
+  assert_held "the whole stranded digest (cursorless)" "$HOLD_TEXT" "$CAPS_STYLED" "$HOLD_SCREEN" '' "$HOLD_TEXT"
+  # The digest part way in: its first row whole and the second cut mid-word,
+  # with the cursor after the last character taken.
+  part=${HOLD_ROWS%%$'\n'*}
+  rows1="  presentation: child=demo-al"
+  screen="⏺ ack"$'\n'"$HOLD_RULE"$'\n'"$part"$'\n'"$rows1"$'\n'"$HOLD_RULE"
+  assert_held "a leading part ending on the cursor row" "${part#❯ }${rows1}" "$CAPS_TMUX" "$screen" 3 "$HOLD_TEXT"
+  assert_holds "a leading part is not the whole text" 1 "$CAPS_TMUX" "$screen" 3 "$HOLD_TEXT"
+  assert_held "a leading part on the anchor row alone" "FIRSTMATE_OP: v1" "$CAPS_TMUX" $'❯ FIRSTMATE_OP: v1\n' 0 "$HOLD_TEXT"
+  assert_held "a leading part without a cursor" - "$CAPS_STYLED" "$screen" '' "$HOLD_TEXT"
+  assert_held "a leading part with the cursor above its end" - "$CAPS_TMUX" "$screen" 2 "$HOLD_TEXT"
+  screen="⏺ ack"$'\n'"$HOLD_RULE"$'\n'"$part"$'\n'"  presentation: child=demo-al and my reply"$'\n'"$HOLD_RULE"
+  assert_held "a leading part followed by other text" - "$CAPS_TMUX" "$screen" 3 "$HOLD_TEXT"
+  assert_held "an empty composer holds none of it" - "$CAPS_TMUX" $'❯ \n' 0 "$HOLD_TEXT"
+  pass "fm_composer_held_text_var: measures the caller's text still arriving, and refuses anything else"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)
@@ -957,3 +1007,4 @@ test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 test_holds_text_proves_own_text_the_classifier_cannot
 test_holds_text_refuses_anything_else
+test_held_text_measures_text_still_arriving

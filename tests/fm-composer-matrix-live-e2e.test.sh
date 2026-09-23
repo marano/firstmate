@@ -12,7 +12,9 @@
 #   - the strict blank-row posture live: a plain shell pane with a blank
 #     cursor row must classify unknown and defer injection;
 #   - the away daemon's own unsent digest provable in a real claude composer
-#     (fm_tmux_composer_holds_text), with one more typed character breaking it;
+#     (fm_tmux_composer_holds_text), measurable as the leading part of a longer
+#     text still arriving (fm_tmux_composer_held_text_var), with one more typed
+#     character breaking the proof;
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
@@ -135,10 +137,12 @@ done
 # daemon then resubmits only text fm_tmux_composer_holds_text proves is
 # exactly its own. This types a digest into a real idle claude at a width that
 # wraps it (no Enter, so no prompt is submitted), requires the proof to hold,
-# requires it to fail once one more character is typed, and reports whether
-# the classifier could prove the same composer.
+# requires the same composer to measure as the leading part of a longer text,
+# which is how the submit core tells text still arriving from a swallowed Enter,
+# requires the proof to fail once one more character is typed, and reports
+# whether the classifier could prove the same composer.
 check_claude_own_digest_provable() {
-  local win=hx-claude-own version encoded msg verdict i=0
+  local win=hx-claude-own version encoded msg verdict arriving held i=0
   version=$(harness_version claude)
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- claude \
     || fail "claude ($version): could not launch the own-digest check"
@@ -155,14 +159,25 @@ check_claude_own_digest_provable() {
   sleep 2
   verdict=$(fm_tmux_composer_state "$SESSION:$win")
   if fm_tmux_composer_holds_text "$SESSION:$win" "$encoded"; then
+    # The same composer read as text still arriving: the digest is the leading
+    # part of a longer typed text, which the submit core must measure rather
+    # than take for a swallowed Enter.
+    arriving=$encoded
+    fm_composer_squash_var arriving
+    held=
+    fm_tmux_composer_held_text_var held "$SESSION:$win" "$encoded and the rest still on its way" || held=
     tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l 'x'
     sleep 1
-    if fm_tmux_composer_holds_text "$SESSION:$win" "$encoded"; then
+    if [ "$held" != "${#arriving}" ]; then
+      FAILED=1
+      printf 'not ok - claude (%s): its composer holding the leading part of a longer typed text read as held=%s, not the %s characters it holds\n' \
+        "$version" "${held:-refused}" "${#arriving}" >&2
+    elif fm_tmux_composer_holds_text "$SESSION:$win" "$encoded"; then
       FAILED=1
       printf 'not ok - claude (%s): own-digest proof still held after another character was typed\n' "$version" >&2
     else
       CHECKED=$((CHECKED + 1))
-      pass "claude ($version): its composer holding the daemon's own digest is provable, and one more character breaks the proof (classifier verdict: $verdict)"
+      pass "claude ($version): its composer holding the daemon's own digest is provable, measures as the leading part of a longer text still arriving, and one more character breaks the proof (classifier verdict: $verdict)"
     fi
   else
     printf '# claude own-digest pane tail at failure:\n' >&2

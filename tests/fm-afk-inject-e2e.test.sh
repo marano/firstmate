@@ -14,7 +14,9 @@
 #   Scenario C (normal digest): no human input and no swallowed Enter.
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
 #     single-line digest with no duplicate or spurious user submission, and it
-#     must END with the trailing sentinel.
+#     must END with the trailing sentinel. It holds again when the composer
+#     takes the typed digest slower than the daemon's first submit check, as a
+#     loaded machine makes it: text still arriving is not a swallowed Enter.
 #
 #   Scenario D (shutdown cannot confirm): escalations are buffered and every
 #     Enter is swallowed, so no submit can be confirmed, when the daemon is
@@ -106,6 +108,7 @@ cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\xE2\x81\xA3'
 LOG="$1"
+DELAY="${2:-}"  # seconds to take each keystroke; empty takes them at once
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
 cleanup() {
@@ -142,6 +145,7 @@ submit_line() {
 
 redraw
 while IFS= read -r -n 1 _ch; do
+  [ -z "$DELAY" ] || sleep "$DELAY"
   if [ -z "$_ch" ]; then
     submit_line
     continue
@@ -473,6 +477,63 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario C under a slow composer ---------------------------------------
+# The same contract when the composer takes the typed digest slower than the
+# daemon's first submit check, which a loaded CI runner did to Scenario C:
+# the check read part of the digest, took it for a swallowed Enter, and pressed
+# Enter again, and each extra Enter queued behind the digest submitted an empty
+# line after it. Here every keystroke takes 10ms, so the digest is still
+# arriving for seconds after the first check.
+
+supervisor_fixture_start() {  # [keystroke-delay]
+  rm -f "$LOG_FILE.composer"
+  "$REAL_TMUX" -L "$SOCKET" respawn-pane -k -t "$SUPERVISOR_PANE" "bash '$LOOP_SCRIPT' '$LOG_FILE' ${1:-}"
+  local i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$LOG_FILE.composer" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$LOG_FILE.composer" ] || fail "the supervisor fixture composer did not restart"
+}
+
+test_scenario_c_slow_composer() {
+  local i marker_count user_count digest_hex
+  reset_state
+  supervisor_fixture_start 0.01
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  echo "done: PR https://example.test/pr/310" > "$STATE_DIR/fake-c1.status"
+  # The flush is over once the digest is logged and the daemon has cleared its
+  # buffer; an Enter it sent twice was queued before then, so one more second
+  # lets any such Enter reach the log before the count.
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -q 'Supervisor escalate' "$LOG_FILE" && [ ! -s "$STATE_DIR/.subsuper-escalations" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q 'Supervisor escalate' "$LOG_FILE" \
+    || fail "Scenario C (slow composer): the digest was never submitted (log: $(tail -3 "$STATE_DIR/.supervise-daemon.log" 2>/dev/null))"
+  sleep 1
+
+  marker_count=$(header_count)
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario C (slow composer): expected exactly 1 operational header, got $marker_count"
+  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
+  [ "$user_count" -eq 0 ] \
+    || fail "Scenario C (slow composer): expected 0 user lines, got $user_count (an Enter pressed while the digest was still arriving?)"
+  digest_hex=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1 | cut -f1)
+  case "$digest_hex" in
+    e281a3*"$TAIL_HEX") ;;
+    *) fail "Scenario C (slow composer): the digest is not one whole sentinel-framed line (hex: $digest_hex)" ;;
+  esac
+
+  stop_daemon
+  supervisor_fixture_start
+  pass "Scenario C: a composer still taking the typed digest gets exactly one submit"
+}
+
 # --- Scenario D: shutdown with an unconfirmable submit ----------------------
 # The 2026-09-17 incident: the daemon deferred a digest while the captain's
 # pane was busy, was stopped, and its shutdown flush typed the digest into a
@@ -729,7 +790,7 @@ test_scenario_e() {
   claude_flush || true
   if [ "$(wc -l < "$CLAUDE_LOG" | tr -d ' ')" != 2 ] \
     || ! grep -F 'a newer event buffered behind the stranded digest' "$CLAUDE_LOG" >/dev/null; then
-    fail "Scenario E: the event buffered behind the stranded digest was not delivered next (submitted: $(cat "$CLAUDE_LOG"))"
+    fail "Scenario E: the event buffered behind the stranded digest was not delivered next (submitted $(wc -l < "$CLAUDE_LOG" | tr -d ' ') lines, each in brackets: $(sed 's/^/[/; s/$/]/' "$CLAUDE_LOG"))"
   fi
   pass "Scenario E: a digest stranded by an earlier flush is resubmitted, and what was buffered behind it follows"
 
@@ -871,6 +932,7 @@ test_scenario_f() {
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_c_slow_composer
 test_scenario_d
 test_scenario_e
 test_scenario_f

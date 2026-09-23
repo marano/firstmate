@@ -239,11 +239,45 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state busy_state
+# Text still arriving is not a swallowed Enter: a harness takes typed keystrokes
+# at its own pace, and the Enter queues behind them, so a composer read before
+# the harness has taken the whole text shows part of it. Pressing Enter again
+# then queues a second submit that lands after the first, on whatever the
+# composer holds by then (an empty line, or a draft the captain started). So
+# while the composer provably holds a growing leading part of the typed text
+# (fm_composer_held_text_var), the loop waits instead of reading a verdict,
+# and grants one more interval once that text completes, for the Enter queued
+# right behind it. Growth is bounded by the text's length, so the wait ends.
+# A read that shows no more of text still arriving - less of it, or none the
+# proof can read - gets one re-read before the wait ends: a harness repainting
+# its composer shows only part of the text for a moment, and ending the wait
+# on that read pressed a second Enter behind text that was still arriving.
+# The verdict is read only after that proof, never before it: the Enter can
+# land between two reads, and a verdict older than the proof is stale.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [typed-text]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} text=${5:-} i=0 j state busy_state
+  local full=0 taken=0 held=0 reread=0
+  if [ -n "$text" ]; then
+    full=$text
+    fm_composer_squash_var full
+    full=${#full}
+  fi
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
+    reread=0
+    while [ "$full" -gt 0 ]; do
+      if fm_tmux_composer_held_text_var held "$target" "$text" \
+        && [ "$held" -gt "$taken" ] && [ "$taken" -lt "$full" ]; then
+        taken=$held
+        reread=0
+      elif [ "$taken" -gt 0 ] && [ "$taken" -lt "$full" ] && [ "$reread" -eq 0 ]; then
+        reread=1
+      else
+        break
+      fi
+      sleep "$sleep_s"
+    done
     state=$(fm_tmux_composer_state "$target")
     case "$state" in
       pending|pending-unproven) ;;
@@ -289,6 +323,24 @@ fm_tmux_composer_holds_text() {  # <target> <text>
   fm_composer_holds_text "$(fm_tmux_composer_caps)" "$pane" "$cy" "$text"
 }
 
+# fm_tmux_composer_held_text_var: the same adapter over fm_composer_held_text_var,
+# which owns the proof of how much of <text> the composer holds. Its caller
+# reads it while text is still arriving, when each keystroke can move the
+# cursor to another row, so the cursor row and the screen are read in ONE tmux
+# command list (the fm_tmux_composer_cursor_row and fm_tmux_composer_capture
+# reads), which the server runs without taking pane output in between; read
+# separately, they can describe two different screens.
+fm_tmux_composer_held_text_var() {  # <out-varname> <target> <text>
+  local __fmth_out=$1 target=$2 text=$3 snap cy pane
+  snap=$(tmux display-message -p -t "$target" '#{cursor_y}' \; \
+    capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
+  case "$snap" in *$'\n'*) ;; *) return 1 ;; esac
+  cy=${snap%%$'\n'*}
+  pane=${snap#*$'\n'}
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  fm_composer_held_text_var "$__fmth_out" "$(fm_tmux_composer_caps)" "$pane" "$cy" "$text"
+}
+
 # fm_tmux_resubmit_own_text: re-press Enter on text this caller typed earlier
 # whose submit it could not confirm, ONLY while the composer provably holds
 # exactly that text. Prints `not-own` and sends nothing when the proof fails
@@ -314,5 +366,5 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$text"
 }
