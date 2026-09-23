@@ -827,6 +827,157 @@ test_missing_final_archive_keeps_retained_contract_gated() {
   pass "the retained contract epoch requires its final archive on every check"
 }
 
+# --- the second-boundary tick never desyncs entered from entered_epoch -----
+# bin/fm-afk-contract.sh's confirm derives entered's ISO string from the same
+# epoch it stores in entered_epoch (fm_afk_contract_epoch_to_iso), rather than
+# a second independent `date` read, so a clock tick between two `date` calls
+# can never make the pair disagree. This stub forces that tick deterministically
+# instead of relying on a timing race, so the property is proven every run
+# rather than the 1-in-40 rate the original CI failure showed.
+
+install_clock_tick_stub() {  # <case-dir> -> prints the fakebin dir to prepend to PATH
+  local dir=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+# Each "read the current time" call (a bare +%s, or now_iso's bare
+# -u +%Y-%m-%dT%H:%M:%SZ) advances a shared counter by one simulated second,
+# so two such reads in the same shell function straddle a tick. A call that
+# converts an already-captured epoch (-u -r/-d) is deterministic and never
+# advances the counter, matching a real clock: converting a fixed epoch never
+# ticks, only reading "now" does.
+set -eu
+real="$FAKE_DATE_REAL"
+counter_file="$FAKE_DATE_COUNTER"
+base="$FAKE_DATE_BASE"
+epoch_to_iso() {
+  "$real" -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || "$real" -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+if [ "$#" -eq 1 ] && [ "$1" = '+%s' ]; then
+  n=$(($(cat "$counter_file") + 1))
+  printf '%s\n' "$n" > "$counter_file"
+  printf '%s\n' "$((base + n))"
+elif [ "$#" -eq 2 ] && [ "$1" = '-u' ] && [ "$2" = '+%Y-%m-%dT%H:%M:%SZ' ]; then
+  n=$(($(cat "$counter_file") + 1))
+  printf '%s\n' "$n" > "$counter_file"
+  epoch_to_iso "$((base + n))"
+elif [ "$#" -eq 4 ] && [ "$1" = '-u' ] && [ "$2" = '-r' ] && [ "$4" = '+%Y-%m-%dT%H:%M:%SZ' ]; then
+  epoch_to_iso "$3"
+elif [ "$#" -eq 4 ] && [ "$1" = '-u' ] && [ "$2" = '-d' ] && [ "$4" = '+%Y-%m-%dT%H:%M:%SZ' ]; then
+  epoch_to_iso "${3#@}"
+else
+  exec "$real" "$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+  printf '%s\n' "$fakebin"
+}
+
+ref_epoch_to_iso() {  # <epoch> - independent of the contract script's own conversion
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+test_second_boundary_tick_never_desyncs_entered_fields() {
+  local dir fakebin entered entered_epoch expected out
+  dir="$TMP_ROOT/second-boundary-tick"
+  install_runner "$dir"
+  fakebin=$(install_clock_tick_stub "$dir")
+  FAKE_DATE_REAL=$(command -v date)
+  FAKE_DATE_COUNTER="$dir/date-counter"
+  FAKE_DATE_BASE=1700000000
+  printf '0\n' > "$FAKE_DATE_COUNTER"
+  export FAKE_DATE_REAL FAKE_DATE_COUNTER FAKE_DATE_BASE
+
+  PATH="$fakebin:$PATH" contract_in "$dir" propose --words 'captain words survive' \
+    --action merge --object 'task restored PR' --when 'checks green' >/dev/null \
+    || fail "could not propose the posture record under a ticking clock"
+  PATH="$fakebin:$PATH" contract_in "$dir" confirm >/dev/null \
+    || fail "could not confirm the posture record under a ticking clock"
+
+  [ "$(cat "$FAKE_DATE_COUNTER")" -ge 2 ] \
+    || fail "the clock stub never advanced past one simulated second; the boundary was not exercised"
+
+  entered=$(contract_in "$dir" field entered)
+  entered_epoch=$(contract_in "$dir" field entered_epoch)
+  expected=$(ref_epoch_to_iso "$entered_epoch")
+  unset FAKE_DATE_REAL FAKE_DATE_COUNTER FAKE_DATE_BASE
+
+  [ "$entered" = "$expected" ] \
+    || fail "entered ($entered) disagreed with entered_epoch ($entered_epoch -> $expected) across a forced clock tick"
+
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || true
+  assert_contains "$out" "=== Return brief (away $entered ->" \
+    "the return brief did not render the away window from the same entered value across a forced clock tick"
+
+  pass "a clock tick between the epoch and ISO reads never desyncs entered from entered_epoch, or the return brief's window from either"
+}
+
+# MUTANT: two separate clock reads restored.
+# Reverting confirm's derived `confirmed=$(fm_afk_contract_epoch_to_iso ...)`
+# to an independent `date -u +%Y-%m-%dT%H:%M:%SZ` read brings back the exact
+# 2026-09-23 CI race (PR 88): a tick between the two reads desyncs entered
+# from entered_epoch on a fresh record, and the return brief would render a
+# window one second off from what tests/fm-afk-return.test.sh recorded.
+test_mutant_two_clock_reads_restored_is_red() {
+  local dir mdir fakebin f entered entered_epoch expected
+  dir="$TMP_ROOT/second-boundary-tick-mutant"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
+  mdir="$TMP_ROOT/mutants/two-clock-reads"
+  mkdir -p "$mdir"
+  # The whole of bin/ so the mutant's siblings resolve exactly as they do in
+  # the real tree, matching the mutant_answer pattern in
+  # tests/fm-awaiting-landing.test.sh.
+  for f in "$ROOT"/bin/*; do
+    ln -sf "$f" "$mdir/${f##*/}"
+  done
+  # Replace the LINK before writing, or the redirection below would follow it
+  # and overwrite the real script in the repository.
+  rm -f "$mdir/fm-afk-contract.sh"
+  perl -0pe 'BEGIN{$o=shift;$n=shift} s/\Q$o\E/$n/' \
+    'confirmed_epoch=$(date +%s)
+  confirmed=$(fm_afk_contract_epoch_to_iso "$confirmed_epoch")' \
+    'confirmed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  confirmed_epoch=$(date +%s)' \
+    "$ROOT/bin/fm-afk-contract.sh" > "$mdir/fm-afk-contract.sh"
+  chmod +x "$mdir/fm-afk-contract.sh"
+  if cmp -s "$mdir/fm-afk-contract.sh" "$ROOT/bin/fm-afk-contract.sh"; then
+    fail "mutant two-clock-reads changed nothing: its operator no longer matches bin/fm-afk-contract.sh, so this proof is vacuous"
+  fi
+  if [ -L "$mdir/fm-afk-contract.sh" ]; then
+    fail "mutant two-clock-reads was written through a link, which would have modified the repository"
+  fi
+
+  fakebin=$(install_clock_tick_stub "$dir")
+  FAKE_DATE_REAL=$(command -v date)
+  FAKE_DATE_COUNTER="$dir/date-counter"
+  FAKE_DATE_BASE=1700000000
+  printf '0\n' > "$FAKE_DATE_COUNTER"
+  export FAKE_DATE_REAL FAKE_DATE_COUNTER FAKE_DATE_BASE
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$mdir/fm-afk-contract.sh" propose --words 'captain words survive' \
+    --action merge --object 'task restored PR' --when 'checks green' >/dev/null \
+    || fail "the mutant could not propose the posture record"
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$mdir/fm-afk-contract.sh" confirm >/dev/null \
+    || fail "the mutant could not confirm the posture record"
+
+  [ "$(cat "$FAKE_DATE_COUNTER")" -ge 2 ] \
+    || fail "the clock stub never advanced past one simulated second; the boundary was not exercised"
+
+  entered=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$mdir/fm-afk-contract.sh" field entered)
+  entered_epoch=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$mdir/fm-afk-contract.sh" field entered_epoch)
+  expected=$(ref_epoch_to_iso "$entered_epoch")
+  unset FAKE_DATE_REAL FAKE_DATE_COUNTER FAKE_DATE_BASE
+
+  [ "$entered" != "$expected" ] \
+    || fail "mutant two-clock-reads-restored was not red: entered ($entered) still agreed with entered_epoch across the forced tick"
+
+  pass "MUTANT two-clock-reads-restored is red: two independent date reads desync entered from entered_epoch across the tick this fix closes"
+}
+
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
@@ -848,3 +999,5 @@ test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
 test_truncated_input_is_recorded_without_a_return_and_reported_at_return
+test_second_boundary_tick_never_desyncs_entered_fields
+test_mutant_two_clock_reads_restored_is_red
