@@ -34,8 +34,8 @@
 #      and nothing short of that shared proof flips an agy pane to agent-free.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
 # from inside another harness inherits those markers, which outrank the fake
@@ -498,7 +498,7 @@ case "${1:-}" in
     literal=
     prev=
     for arg in "$@"; do
-      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      if [ "$prev" = -l ]; then literal=$(fm_fake_sourced_launch "$arg"); break; fi
       prev=$arg
     done
     if [ -n "$literal" ]; then
@@ -536,6 +536,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   cat > "$fakebin/agy" <<'SH'
 #!/usr/bin/env bash

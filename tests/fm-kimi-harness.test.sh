@@ -2,8 +2,8 @@
 # Behavior tests for the verified Kimi Code CLI crewmate adapter.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # bin/fm-harness.sh answers from environment markers and process ancestry. A
 # suite run from inside Cursor, Claude, Pi, or Grok inherits those markers and
@@ -79,7 +79,7 @@ case "${1:-}" in
     prev=
     literal=
     for arg in "$@"; do
-      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      if [ "$prev" = -l ]; then literal=$(fm_fake_sourced_launch "$arg"); break; fi
       prev=$arg
     done
     if [ -n "$literal" ]; then
@@ -139,6 +139,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi

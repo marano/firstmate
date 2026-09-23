@@ -10,8 +10,8 @@
 # fixture without it would let a naive implementation pass.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. Muse is
 # markerless, so an inherited Cursor/Claude/Pi/Grok marker would outrank the
@@ -96,6 +96,7 @@ case "${1:-}" in
     prev=
     for arg in "$@"; do
       if [ "$prev" = -l ]; then
+        arg=$(fm_fake_sourced_launch "$arg")
         printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
         if [ "${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" = 1 ]; then
           case "$arg" in
@@ -111,6 +112,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'

@@ -4,8 +4,8 @@
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -89,7 +89,7 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *) a=$(fm_fake_sourced_launch "$a"); printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
         case "$a" in
           *'encode launch-brief'*) : > "$FM_FAKE_LAUNCH_LOG.launched" ;;
@@ -101,6 +101,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
   fm_fake_harness_clis "$fakebin"
