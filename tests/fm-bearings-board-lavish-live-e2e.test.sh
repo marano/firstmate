@@ -38,11 +38,22 @@ cleanup() {
   [ -z "$LAB" ] || {
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
-    rm -rf "$LAB"
+    rm -rf "$LAB" || note "cleanup could not remove $LAB; it is left in place"
   }
 }
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
-trap cleanup EXIT
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# The cases own the verdict, never the cleanup. From the ended-session read
+# below, errexit stays on, so without this a failing cleanup command would end
+# the script with its own status: the lab's rm can lose a race with the board's
+# process-event runner, which writes its result into the lab as the session
+# ends. The trap keeps the status the script was already exiting with.
+on_exit() {
+  local rc=$?
+  set +e
+  cleanup
+  exit "$rc"
+}
+trap on_exit EXIT
 
 VERSION=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
 note "lavish-axi ${VERSION:-version-unknown}"
