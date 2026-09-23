@@ -262,7 +262,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     while [ "$full" -gt 0 ] && fm_tmux_composer_held_text_var held "$target" "$text" \
-      && [ "$held" -gt "$taken" ] && { [ "$held" -lt "$full" ] || [ "$taken" -gt 0 ]; }; do
+      && [ "$held" -gt "$taken" ] && [ "$taken" -lt "$full" ]; do
       taken=$held
       sleep "$sleep_s"
     done
