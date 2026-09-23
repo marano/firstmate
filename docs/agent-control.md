@@ -90,6 +90,8 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
+   A recorded endpoint that reads `missing` - its window or its whole tmux server gone, as after a reboot - has no agent to stop, so relaunch rebuilds it instead: under the recorded session and window name, in the recorded worktree, through the backend's own create path, and proceeds once it reads agent-free.
+   That path is chosen before the checkpoint, and it refuses, changing nothing, when the backend cannot rebuild its endpoint under the recorded identity (only tmux can) or when anything else could still own the task: the task's window name in another session, or any pane inside the recorded worktree.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    It clears any input the adopted shell still holds before typing, so a launch that never landed there cannot swallow the replacement's, and its header owns how it confirms the replacement actually started.
 
@@ -98,6 +100,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 ### Failure and rollback
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
+- A failed rebuild of a missing endpoint restores the instructions byte-exact too, since no agent was running or started, and reports what the endpoint now reads.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
@@ -123,6 +126,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Only a positively classified state acts.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free, so a replacement can never join a live agent.
+  A missing endpoint refuses there too, naming `relaunch` on this plane as the recovery that rebuilds it.
   It also requires the shell to be in the recorded worktree: tmux refuses immediately when it is not, while Herdr sends one `cd` to the recorded path and refuses unless a subsequent path read confirms the move.
 
 ## Capability matrix
@@ -146,5 +150,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-crew-state.test.sh` - that the intentional-stop record converts a terminal status event and nothing else.
 - `tests/fm-awaiting-landing.test.sh` - that `bin/fm-awaiting-landing-lib.sh` reads the intentional-stop record as one proof (alongside a recorded `pr=` and a `done` outcome) that finished work is awaiting landing rather than a wedge, and that a diverged recorded landing target is surfaced as blocked rather than read as healthy or gone quiet.
 - `tests/fm-fleet-snapshot-view.test.sh` - the `capacity` projection: finished work frees its slot, an unreadable task does not, and queued-ready excludes blocked and held items.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and rebuilding a missing endpoint or refusing to when its worktree is gone or something else could own the task.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

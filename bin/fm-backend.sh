@@ -951,6 +951,47 @@ fm_backend_launch_confirmable() {  # <backend>
   return 1
 }
 
+# fm_backend_endpoint_recreatable: 0 when <backend> can rebuild a task's
+# recorded endpoint after fm_backend_agent_state reads it `missing` - its
+# window or whole server gone, as after a reboot - under the same recorded
+# identity, so the task record stays valid. Only tmux: its endpoint is a
+# session and window name the task record already holds, while a Herdr
+# endpoint is a server-assigned pane id a rebuild could not reproduce.
+fm_backend_endpoint_recreatable() {  # <backend>
+  case "${1-}" in
+    tmux) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_endpoint_claimants: whatever could still own a task whose recorded
+# endpoint reads `missing`, one per line; 0 nothing, 1 something (printed),
+# 2 unreadable or a backend that cannot tell. The tmux adapter's
+# fm_backend_tmux_endpoint_claimants owns what counts as a claimant.
+fm_backend_endpoint_claimants() {  # <backend> <target> <worktree>
+  fm_backend_endpoint_recreatable "$1" || return 2
+  fm_backend_source "$1" || return 2
+  case "$1" in
+    tmux) fm_backend_tmux_endpoint_claimants "$2" "$3" ;;
+    *) return 2 ;;
+  esac
+}
+
+# fm_backend_recreate_task_endpoint: rebuild a `missing` recorded endpoint in
+# <worktree> through the backend's own create path, re-proving what licenses
+# it immediately before creating anything; prints the new endpoint handle.
+fm_backend_recreate_task_endpoint() {  # <backend> <target> <worktree>
+  fm_backend_endpoint_recreatable "$1" || {
+    echo "error: the $1 backend cannot recreate a missing task endpoint" >&2
+    return 1
+  }
+  fm_backend_source "$1" || return 1
+  case "$1" in
+    tmux) fm_backend_tmux_recreate_task "$2" "$3" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

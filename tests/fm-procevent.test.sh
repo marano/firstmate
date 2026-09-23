@@ -666,6 +666,7 @@ renum_recorded=$(sed -n '6p' "$RENUM_CLAIM")
 [ "${renum_recorded%%:*}" != "${renum_live%%:*}" ] && [ "${renum_recorded#*:}" = "${renum_live#*:}" ] \
   || fail "the renumbering fixture did not leave a stale device over the same inode ($renum_recorded vs $renum_live)"
 out=$(pe_adapter "$HRENUM" reconcile)
+assert_contains "$out" "stopped=1" "a renumbered volume did not finish a pending retirement"
 assert_contains "$out" "started=0" "a renumbered volume restarted a source whose retirement was pending"
 assert_absent "$RENUM_SOURCE" "a renumbered volume left a pending retirement's registration in place"
 assert_absent "$RENUM_CLAIM" "a renumbered volume left a pending retirement's claim in place"
@@ -691,8 +692,11 @@ repl_recorded=$(sed -n '6p' "$FM_PROCEVENT_CLAIM_ROOT/renum-repl-src.claim")
 repl_live=$(renum_identity "$REPL_SOURCE")
 [ "${repl_recorded#*:}" != "${repl_live#*:}" ] \
   || fail "the replacement fixture kept the claimed registration's inode, so this case proves nothing"
-out=$(pe_adapter "$HREPL" reconcile)
-assert_contains "$out" "started=1" "a replaced registration was retired on a finished generation's claim instead of launched"
+# A generous confirmation window keeps a runner slow to start under load from
+# reading as a failed launch; confirmation still ends as soon as it claims.
+out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=60 pe_adapter "$HREPL" reconcile)
+assert_contains "$out" "stopped=0" "a replaced registration was retired on a finished generation's claim"
+assert_contains "$out" "started=1" "a replaced registration was not launched as the new generation it is"
 pass "a pending terminal retirement survives a volume renumbering and never reruns its source"
 
 # --- end-user-aligned regression: one Send & End, one captured result -------

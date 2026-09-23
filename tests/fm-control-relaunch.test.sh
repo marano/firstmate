@@ -120,7 +120,47 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows|list-panes)
+    # A server-gone marker models a reboot: tmux answers every read with its
+    # own definitive no-server error, which is what classifies an endpoint
+    # `missing` rather than unreadable.
+    if [ -e "$D/server-gone" ]; then
+      echo "no server running on /private/tmp/tmux-fake/default" >&2
+      exit 1
+    fi
+    if [ "$1" = list-windows ]; then
+      [ -f "$D/windows" ] && cat "$D/windows"
+    else
+      [ -f "$D/panes" ] && cat "$D/panes"
+    fi
+    exit 0 ;;
+  new-session)
+    printf '%s\n' "$*" >> "$D/created"
+    rm -f "$D/server-gone"
+    exit 0 ;;
+  new-window)
+    # A rebuilt endpoint: its window joins the inventory, and its pane holds a
+    # bare shell in the directory it was created in. rebuild-fail refuses the
+    # create; rebuild-cwd names where a shell whose startup moved it sits.
+    [ ! -e "$D/rebuild-fail" ] || exit 1
+    printf '%s\n' "$*" >> "$D/created"
+    shift
+    name=
+    cwd=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) name=$2; shift 2 ;;
+        -c) cwd=$2; shift 2 ;;
+        -t|-F) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$name" >> "$D/windows"
+    [ ! -f "$D/rebuild-cwd" ] || cwd=$(cat "$D/rebuild-cwd")
+    printf '%s' "$cwd" > "$D/cwd"
+    printf 'zsh' > "$D/command"
+    printf '@9\n'
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -1539,6 +1579,194 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   pass "fm-promote: promotion participates in lifecycle serialization"
 }
 
+# --- a missing endpoint, as after a reboot -----------------------------------
+#
+# A reboot takes the tmux server, and every task window in it, down with the
+# machine, while each task's record and worktree survive. Relaunch rebuilds the
+# recorded endpoint in the recorded worktree and proceeds, and refuses whenever
+# the worktree is gone or something else could still own the task. Mutants these
+# cases red by name:
+#   recreate-skipped - recreate_endpoint (bin/fm-control.sh) skipping the
+#     backend's create path: nothing is rebuilt, the relaunch refuses, and both
+#     rebuild cases go red.
+#   claimants-ignored - fm_backend_tmux_endpoint_claimants (bin/backends/tmux.sh)
+#     reporting that nothing ever claims the task: both ownership cases go red,
+#     because the relaunch proceeds beside a possible owner.
+#   worktree-unguarded - every worktree proof on this path removed together
+#     (safe_checkpoint for a missing endpoint, the claimant read's worktree
+#     resolution, and fm_backend_tmux_recreate_task's own check): the
+#     missing-worktree case goes red, because an endpoint is created for a copy
+#     that does not exist before fm-spawn --relaunch refuses the launch. The
+#     proofs are layered on purpose: removing the claimant read's or the
+#     adapter's alone stays green, and removing safe_checkpoint's alone changes
+#     the refusal to one that no longer names the missing copy, which reds.
+
+# mark_endpoint_missing <case-dir> <window|server>: the recorded window is gone,
+# or the whole tmux server is, and the pane that held the agent with it.
+mark_endpoint_missing() {
+  : > "$1/fake/windows"
+  printf '%s' "$1/elsewhere" > "$1/fake/cwd"
+  printf 'zsh' > "$1/fake/command"
+  [ "$2" != server ] || : > "$1/fake/server-gone"
+}
+
+assert_missing_endpoint_rebuilt() {  # <case-dir> <id> <out>
+  local dir=$1 id=$2 out=$3
+  assert_contains "$out" "relaunched $id harness=claude from=claude" "the outcome should name the transition"
+  assert_contains "$out" "endpoint_recreated=yes" "the outcome should say the endpoint was rebuilt"
+  assert_grep "-n fm-$id -c $dir/wt" "$dir/fake/created" \
+    "the endpoint should be rebuilt under its recorded name in the recorded worktree"
+  [ "$(meta_field "$dir" "$id" window)" = "fmses:fm-$id" ] \
+    || fail "the rebuilt endpoint must keep the recorded identity"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] \
+    || fail "the worktree must be reused, not reallocated"
+  [ "$(journal_field "$dir" "$id" phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-recreated ] \
+    || fail "the journal should record that the endpoint was rebuilt rather than an agent stopped"
+  assert_no_grep "/exit" "$dir/fake/literal" "there was no agent to exit"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "stopped by the reboot" "$dir/home/data/$id/brief.md" \
+    "the progress note should reach the instructions the replacement reads"
+}
+
+test_relaunch_rebuilds_a_missing_window_in_the_recorded_worktree() {
+  local dir out rc
+  dir=$(new_case gone-window rl60)
+  add_ship_task "$dir" rl60 claude
+  mark_endpoint_missing "$dir" window
+  out=$(run_control "$dir" rl60 relaunch --note "stopped by the reboot mid-task"); rc=$?
+  expect_code 0 "$rc" "a relaunch should rebuild a missing window"$'\n'"$out"
+  assert_missing_endpoint_rebuilt "$dir" rl60 "$out"
+  assert_no_grep "new-session" "$dir/fake/created" "a surviving session should be reused, not recreated"
+  pass "fm-control relaunch: a missing window is rebuilt in the recorded worktree and the replacement launched there"
+}
+
+test_relaunch_rebuilds_the_session_when_the_whole_server_is_gone() {
+  local dir out rc
+  dir=$(new_case gone-server rl61)
+  add_ship_task "$dir" rl61 claude
+  mark_endpoint_missing "$dir" server
+  out=$(run_control "$dir" rl61 relaunch --note "stopped by the reboot mid-task"); rc=$?
+  expect_code 0 "$rc" "a relaunch should rebuild an endpoint whose whole server is gone"$'\n'"$out"
+  assert_grep "new-session -d -s fmses" "$dir/fake/created" "the recorded session should be started again"
+  assert_missing_endpoint_rebuilt "$dir" rl61 "$out"
+  pass "fm-control relaunch: an endpoint whose tmux server died is rebuilt under its recorded session"
+}
+
+# A refusal on this path must change nothing at all: no endpoint created, no
+# journal, and the record and instructions byte-identical.
+assert_missing_endpoint_refused_cleanly() {  # <case-dir> <id> <meta-before> <brief-before>
+  local dir=$1 id=$2
+  [ ! -s "$dir/fake/created" ] || fail "a refused relaunch created an endpoint: $(cat "$dir/fake/created")"
+  [ ! -e "$dir/home/state/$id.control-relaunch" ] || fail "a refused relaunch opened a transaction"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$3" ] || fail "a refused relaunch changed the durable record"
+  [ "$(cat "$dir/home/data/$id/brief.md")" = "$4" ] || fail "a refused relaunch changed the instructions"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch typed into an endpoint"
+}
+
+test_relaunch_refuses_a_missing_endpoint_whose_worktree_is_gone() {
+  local dir out rc meta_before brief_before
+  dir=$(new_case gone-worktree rl62)
+  add_ship_task "$dir" rl62 claude
+  mark_endpoint_missing "$dir" server
+  rm -rf "$dir/wt"
+  meta_before=$(cat "$dir/home/state/rl62.meta")
+  brief_before=$(cat "$dir/home/data/rl62/brief.md")
+  out=$(run_control "$dir" rl62 relaunch --note "stopped by the reboot"); rc=$?
+  expect_code 1 "$rc" "a missing endpoint with no worktree should refuse"
+  assert_contains "$out" "recorded worktree $dir/wt is missing" "the refusal should name the missing local copy"
+  assert_missing_endpoint_refused_cleanly "$dir" rl62 "$meta_before" "$brief_before"
+  pass "fm-control relaunch: a missing endpoint is never rebuilt without the worktree its work lives in"
+}
+
+test_relaunch_refuses_a_missing_endpoint_something_else_may_own() {
+  local dir out rc meta_before brief_before
+  # A pane anywhere on the server sitting in the task's worktree could be an
+  # agent still working that copy.
+  dir=$(new_case owned-worktree rl63)
+  add_ship_task "$dir" rl63 claude
+  mark_endpoint_missing "$dir" window
+  printf 'scratch:notes\t%s\n' "$dir/wt" > "$dir/fake/panes"
+  meta_before=$(cat "$dir/home/state/rl63.meta")
+  brief_before=$(cat "$dir/home/data/rl63/brief.md")
+  out=$(run_control "$dir" rl63 relaunch --note "stopped by the reboot"); rc=$?
+  expect_code 1 "$rc" "a missing endpoint whose worktree another pane is in should refuse"
+  assert_contains "$out" "pane in window scratch:notes at $dir/wt could still own the task" \
+    "the refusal should name what could still own the task"
+  assert_missing_endpoint_refused_cleanly "$dir" rl63 "$meta_before" "$brief_before"
+
+  # The task's own window name in a session it was never recorded in could be
+  # its endpoint, moved.
+  dir=$(new_case owned-name rl64)
+  add_ship_task "$dir" rl64 claude
+  mark_endpoint_missing "$dir" window
+  printf 'othersession:fm-rl64\t%s\n' "$dir/elsewhere" > "$dir/fake/panes"
+  meta_before=$(cat "$dir/home/state/rl64.meta")
+  brief_before=$(cat "$dir/home/data/rl64/brief.md")
+  out=$(run_control "$dir" rl64 relaunch --note "stopped by the reboot"); rc=$?
+  expect_code 1 "$rc" "a missing endpoint whose window name lives in another session should refuse"
+  assert_contains "$out" "window othersession:fm-rl64 could still own the task" \
+    "the refusal should name the same-named window"
+  assert_missing_endpoint_refused_cleanly "$dir" rl64 "$meta_before" "$brief_before"
+  pass "fm-control relaunch: a missing endpoint is never rebuilt while anything else could own its task"
+}
+
+test_failed_rebuild_restores_the_instructions() {
+  local dir out rc brief_before
+  dir=$(new_case rebuild-fails rl66)
+  add_ship_task "$dir" rl66 claude
+  mark_endpoint_missing "$dir" window
+  : > "$dir/fake/rebuild-fail"
+  brief_before=$(cat "$dir/home/data/rl66/brief.md")
+  out=$(run_control "$dir" rl66 relaunch --note "stopped by the reboot"); rc=$?
+  expect_code 1 "$rc" "a rebuild the backend refuses should fail the relaunch"
+  assert_contains "$out" "could not recreate its missing endpoint, which now reads 'missing'" \
+    "the failure should say the endpoint is still missing"
+  assert_contains "$out" "original instructions were restored" "the failure should say the instructions were restored"
+  [ "$(cat "$dir/home/data/rl66/brief.md")" = "$brief_before" ] \
+    || fail "a failed rebuild must restore the instructions byte-exact"
+  [ "$(journal_field "$dir" rl66 phase)" = "failed:recreating" ] \
+    || fail "the journal should record the failed rebuild, got '$(journal_field "$dir" rl66 phase)'"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a failed rebuild must type nothing"
+  pass "fm-control relaunch: a failed rebuild of a missing endpoint restores the instructions and says so"
+}
+
+test_launch_failure_after_a_rebuild_reports_the_rebuild() {
+  local dir out rc before
+  dir=$(new_case rebuild-then-fail rl67)
+  add_ship_task "$dir" rl67 claude
+  mark_endpoint_missing "$dir" window
+  # The rebuilt shell's startup moved it out of the worktree, so the launch
+  # owner refuses after the endpoint exists again.
+  printf '%s' "$dir/proj" > "$dir/fake/rebuild-cwd"
+  before=$(cat "$dir/home/state/rl67.meta")
+  out=$(run_control "$dir" rl67 relaunch --note "carry this forward"); rc=$?
+  expect_code 1 "$rc" "a launch refused after the rebuild should fail the relaunch"
+  assert_contains "$out" "missing endpoint was recreated but the replacement did not launch" \
+    "the failure should say the endpoint was rebuilt rather than an agent stopped"
+  assert_not_contains "$out" "agent was stopped" "no agent was stopped, so the failure must not claim one was"
+  [ "$(cat "$dir/home/state/rl67.meta")" = "$before" ] || fail "a failed launch must keep the prior durable record"
+  [ "$(journal_field "$dir" rl67 phase)" = "failed:launching" ] \
+    || fail "the journal should record the failed launch, got '$(journal_field "$dir" rl67 phase)'"
+  assert_grep "carry this forward" "$dir/home/data/rl67/brief.md" \
+    "the progress note must survive so a later recovery still has it"
+  pass "fm-control relaunch: a launch failure after a rebuild reports the rebuild, not a stopped agent"
+}
+
+test_spawn_relaunch_names_the_recovery_for_a_missing_endpoint() {
+  local dir out rc
+  dir=$(new_case gone-direct rl65)
+  add_ship_task "$dir" rl65 claude
+  mark_endpoint_missing "$dir" server
+  out=$(run_spawn "$dir" rl65 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "fm-spawn --relaunch should not adopt a missing endpoint"
+  assert_contains "$out" "bin/fm-control.sh rl65 relaunch rebuilds a missing endpoint" \
+    "the refusal should name the recovery"
+  [ ! -s "$dir/fake/created" ] || fail "fm-spawn --relaunch must not rebuild an endpoint itself"
+  pass "fm-spawn --relaunch: a missing endpoint refuses and names fm-control relaunch as its recovery"
+}
+
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
 
 test_spawn_relaunch_refuses_a_live_agent() {
@@ -1813,6 +2041,13 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
+test_relaunch_rebuilds_a_missing_window_in_the_recorded_worktree
+test_relaunch_rebuilds_the_session_when_the_whole_server_is_gone
+test_relaunch_refuses_a_missing_endpoint_whose_worktree_is_gone
+test_relaunch_refuses_a_missing_endpoint_something_else_may_own
+test_failed_rebuild_restores_the_instructions
+test_launch_failure_after_a_rebuild_reports_the_rebuild
+test_spawn_relaunch_names_the_recovery_for_a_missing_endpoint
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent

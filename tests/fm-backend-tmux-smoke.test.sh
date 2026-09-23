@@ -169,5 +169,85 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- rebuilding a missing endpoint -------------------------------------------
+# A reboot takes the server and every task window down while the task's record
+# and worktree survive. The rebuild must land under the exact recorded session
+# and window name, in the worktree, and must refuse beside anything that could
+# still own the task. This is where the exact-session target syntax, the pane
+# listing, and tmux's own no-server error text are proven against real tmux.
+
+WT="$SHIM_DIR/wt"
+mkdir -p "$WT"
+WT_REAL=$(cd "$WT" && pwd -P)
+
+wait_for_pane_path() {  # <target> <path>
+  local i=0 seen
+  while [ "$i" -lt 100 ]; do
+    seen=$(fm_backend_tmux_current_path "$1")
+    [ -n "$seen" ] && [ "$(cd "$seen" 2>/dev/null && pwd -P)" = "$2" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+window_count() {  # <session> <window>
+  tmux list-windows -t "=$1" -F '#{window_name}' 2>/dev/null | grep -cx "$2" || true
+}
+
+fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" >/dev/null \
+  || fail "a missing window in a live session was not rebuilt"
+[ "$(window_count "$SESSION" "$WINDOW")" = 1 ] || fail "the rebuilt window is not in the recorded session"
+[ "$(tmux show-window-options -v -t "=$SESSION:=$WINDOW" automatic-rename 2>/dev/null)" = off ] \
+  || fail "the rebuilt window's name is not pinned"
+wait_for_pane_path "$TARGET" "$WT_REAL" || fail "the rebuilt window's pane is not in the recorded worktree"
+if fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" 2>/dev/null; then
+  fail "an endpoint that is no longer missing was rebuilt a second time"
+fi
+[ "$(window_count "$SESSION" "$WINDOW")" = 1 ] || fail "a refused rebuild added a second window"
+pass "real tmux: a missing window is rebuilt pinned and in the worktree, and never twice"
+
+fm_backend_tmux_kill "$TARGET"
+tmux new-window -d -t "=$SESSION:" -n bystander -c "$WT" || fail "could not open a pane in the worktree"
+if fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" 2>/dev/null; then
+  fail "an endpoint was rebuilt while another pane sat in its worktree"
+fi
+[ "$(window_count "$SESSION" "$WINDOW")" = 0 ] || fail "a refused rebuild created the window anyway"
+tmux kill-window -t "=$SESSION:=bystander"
+tmux new-session -d -s elsewhere -n "$WINDOW" -c "$HOME" || fail "could not open a same-named window elsewhere"
+if fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" 2>/dev/null; then
+  fail "an endpoint was rebuilt while its window name lived in another session"
+fi
+[ "$(window_count "$SESSION" "$WINDOW")" = 0 ] || fail "a refused rebuild created the window anyway"
+tmux kill-session -t "=elsewhere"
+pass "real tmux: a missing endpoint is never rebuilt beside a pane in its worktree or a same-named window"
+
+# The whole server gone, with a session whose name the recorded one prefixes
+# started afterwards: tmux resolves a bare session name by prefix, so only an
+# exact-session rebuild lands in the recorded session.
+tmux kill-server
+[ "$(fm_backend_agent_state tmux "$TARGET")" = missing ] || fail "an endpoint on a dead server is not missing"
+fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" >/dev/null \
+  || fail "an endpoint whose whole server is gone was not rebuilt"
+[ "$(window_count "$SESSION" "$WINDOW")" = 1 ] || fail "the server-gone rebuild missed the recorded session"
+wait_for_pane_path "$TARGET" "$WT_REAL" || fail "the server-gone rebuild's pane is not in the recorded worktree"
+tmux new-session -d -s "${SESSION}2" -c "$HOME" || fail "could not start a prefix-sibling session"
+tmux kill-session -t "=$SESSION"
+fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" >/dev/null \
+  || fail "an endpoint whose session is gone was not rebuilt beside a prefix sibling"
+[ "$(window_count "$SESSION" "$WINDOW")" = 1 ] || fail "the rebuild did not recreate the exact recorded session"
+[ "$(window_count "${SESSION}2" "$WINDOW")" = 0 ] || fail "the rebuild landed in a prefix-sibling session"
+pass "real tmux: a missing server or session is rebuilt under the exact recorded session"
+
+tmux kill-server
+rm -rf "$WT"
+if fm_backend_recreate_task_endpoint tmux "$TARGET" "$WT" 2>/dev/null; then
+  fail "an endpoint was rebuilt for a worktree that no longer exists"
+fi
+if tmux list-sessions >/dev/null 2>&1; then
+  fail "a refused rebuild started a tmux server"
+fi
+pass "real tmux: a missing endpoint is never rebuilt without its worktree"
+
 cleanup_all
 trap - EXIT
