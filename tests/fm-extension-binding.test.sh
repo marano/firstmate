@@ -18,7 +18,7 @@ fi
 
 extension_segment=${FM_EXTENSION_BINDING_SEGMENT:-all}
 case "$extension_segment" in
-  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
+  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|install-recovery|matrix|matrix-runtime|lifecycle-flow|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
   *) printf 'unknown extension-binding segment: %s\n' "$extension_segment" >&2; exit 64 ;;
 esac
 
@@ -29,6 +29,11 @@ TMP_ROOT=$(cd "$TMP_ROOT_RAW" && pwd -P)
 first_bind_pid=
 second_bind_pid=
 handshake_orphan_pid=
+killed_install_bind_pid=
+killed_install_release=
+install_race_first_pid=
+install_race_second_pid=
+install_race_release=
 concurrent_release=
 race_register_pid=
 race_retire_pid=
@@ -62,6 +67,11 @@ override_crash_runner_pid=
 section_coordinator_pid=
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
+  [ -z "$install_race_release" ] || touch "$install_race_release" 2>/dev/null || true
+  [ -z "$killed_install_release" ] || touch "$killed_install_release" 2>/dev/null || true
+  [ -z "$killed_install_bind_pid" ] || kill -TERM "$killed_install_bind_pid" 2>/dev/null || true
+  [ -z "$install_race_first_pid" ] || kill -TERM "$install_race_first_pid" 2>/dev/null || true
+  [ -z "$install_race_second_pid" ] || kill -TERM "$install_race_second_pid" 2>/dev/null || true
   [ -z "$race_release" ] || touch "$race_release" 2>/dev/null || true
   [ -z "$process_race_release" ] || touch "$process_race_release" 2>/dev/null || true
   [ -z "$registry_race_release" ] || touch "$registry_race_release" 2>/dev/null || true
@@ -444,8 +454,9 @@ run_extension_section_lanes() {
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
-  # required end-to-end bind/invoke/capture/retirement, remote, and shipped
-  # example lanes; the other conformance cuts remain independently selectable.
+  # required end-to-end bind/invoke/capture/retirement, remote, shipped
+  # example, and interrupted-install recovery lanes; the other conformance cuts
+  # remain independently selectable.
   maximum_sections=16
   maximum_concurrent=12
   [ "$total" -le "$maximum_sections" ] || return 64
@@ -557,7 +568,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow remote-lifecycle example
+      run_extension_section_lanes lifecycle-flow remote-lifecycle example install-recovery
     ) &
     section_coordinator_pid=$!
   fi
@@ -863,6 +874,102 @@ printf '\n# changed identity\n' >> "$identity_root/entrypoint.py"
 chmod 0555 "$identity_root/entrypoint.py" "$identity_root"
 expect_failure "tree digest" env FM_HOME="$H_IDENTITY" "$HOST" verify org.example.identity
 pass "the exact executable identity cannot change underneath a binding"
+fi
+
+# --- an install interrupted between publishing and sealing its package --------
+# FM_EXTENSION_TEST_PUBLISH_PAUSE holds the installer at the point where its
+# package is already renamed into the content-addressed store but not yet sealed
+# 0555, and records the installer's pid, so these checks kill or race it there.
+if section_enabled install-recovery; then
+package_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+wait_for_publish_pause() {  # <pause-dir> <bind-pid>
+  for _ in $(seq 1 400); do
+    [ -s "$1/published" ] && return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.05
+  done
+  return 1
+}
+
+P_KILLED="$PACKAGES/killed-install"
+make_package "$P_KILLED" org.example.killed-install ext-killed-install
+H_KILLED="$HOMES/killed-install"; new_home "$H_KILLED"
+killed_pause="$TMP_ROOT/killed-install.pause"; mkdir -p "$killed_pause"
+# Released only by cleanup, so a failure before the kill cannot strand the installer.
+killed_install_release="$killed_pause/release"
+FM_EXTENSION_TEST_PUBLISH_PAUSE="$killed_pause" bind_package "$H_KILLED" "$P_KILLED" ext-killed-install \
+  > "$TMP_ROOT/killed-install-first.out" 2>&1 &
+killed_install_bind_pid=$!
+wait_for_publish_pause "$killed_pause" "$killed_install_bind_pid" \
+  || fail "a bind never reached the window between publishing and sealing its package: $(cat "$TMP_ROOT/killed-install-first.out")"
+kill -KILL "$(cat "$killed_pause/published")" || fail "the installer paused inside its publish-to-seal window could not be killed"
+killed_bind_rc=0
+wait "$killed_install_bind_pid" || killed_bind_rc=$?
+killed_install_bind_pid=
+killed_install_release=
+[ "$killed_bind_rc" -ne 0 ] || fail "a bind whose installer was killed before sealing its package reported success"
+killed_root=
+for candidate in "$H_KILLED/data/extensions/packages/org.example.killed-install/1.2.3"/*; do
+  [ -d "$candidate" ] || continue
+  [ -z "$killed_root" ] || fail "a killed install left more than one published package directory"
+  killed_root=$candidate
+done
+[ -n "$killed_root" ] || fail "a kill between publishing and sealing left no published package directory"
+[ "$(package_mode "$killed_root")" != 555 ] \
+  || fail "the kill landed after sealing, so it never exercised the unsealed publish-to-seal window"
+assert_present "$H_KILLED/state/procevent/.extension-binding-lifecycle.lock" \
+  "the killed installer did not leave its lifecycle lock for the next bind to recover"
+assert_absent "$H_KILLED/config/extensions.d/org.example.killed-install.json" "a bind killed before sealing its package published a binding"
+killed_rebind_rc=0
+killed_rebind=$(bind_package "$H_KILLED" "$P_KILLED" ext-killed-install 2>&1) || killed_rebind_rc=$?
+[ "$killed_rebind_rc" -eq 0 ] \
+  || fail "a bind after an install killed between publishing and sealing refused the package: $killed_rebind"
+assert_contains "$killed_rebind" "verified: process-event-adapter/1" "a bind reclaiming a killed install did not finish its handshake"
+[ "$(binding_value "$H_KILLED" org.example.killed-install package_root)" = "$killed_root" ] \
+  || fail "a bind reclaiming a killed install did not reuse its content-addressed package path"
+[ "$(package_mode "$killed_root")" = 555 ] || fail "a bind reclaiming a killed install left the package unsealed"
+assert_contains "$(FM_HOME="$H_KILLED" "$HOST" verify org.example.killed-install)" "verified: org.example.killed-install@1.2.3" \
+  "a package reinstalled over a killed install does not verify"
+pass "a bind killed between publishing and sealing its package leaves a slot the next bind reclaims"
+
+P_INSTALL_RACE="$PACKAGES/install-race"
+make_package "$P_INSTALL_RACE" org.example.install-race ext-install-race
+H_INSTALL_RACE="$HOMES/install-race"; new_home "$H_INSTALL_RACE"
+race_pause="$TMP_ROOT/install-race.pause"; mkdir -p "$race_pause"
+install_race_release="$race_pause/release"
+FM_EXTENSION_TEST_PUBLISH_PAUSE="$race_pause" bind_package "$H_INSTALL_RACE" "$P_INSTALL_RACE" ext-install-race \
+  > "$TMP_ROOT/install-race-first.out" 2>&1 &
+install_race_first_pid=$!
+wait_for_publish_pause "$race_pause" "$install_race_first_pid" \
+  || fail "the first of two same-package binds never reached its publish-to-seal window: $(cat "$TMP_ROOT/install-race-first.out")"
+bind_package "$H_INSTALL_RACE" "$P_INSTALL_RACE" ext-install-race > "$TMP_ROOT/install-race-second.out" 2>&1 &
+install_race_second_pid=$!
+sleep 0.5
+kill -0 "$install_race_second_pid" 2>/dev/null \
+  || fail "a second bind of the same package finished while the first was still unsealed: $(cat "$TMP_ROOT/install-race-second.out")"
+touch "$install_race_release"
+install_race_first_rc=0
+wait "$install_race_first_pid" || install_race_first_rc=$?
+install_race_first_pid=
+install_race_second_rc=0
+wait "$install_race_second_pid" || install_race_second_rc=$?
+install_race_second_pid=
+install_race_release=
+[ "$install_race_first_rc" -eq 0 ] \
+  || fail "the first of two same-package binds failed: $(cat "$TMP_ROOT/install-race-first.out")"
+[ "$install_race_second_rc" -ne 0 ] || fail "both binds of one extension unexpectedly succeeded"
+assert_not_contains "$(cat "$TMP_ROOT/install-race-second.out")" "mode is unsafe" \
+  "a second bind of the same package saw the first one's unsealed directory"
+assert_contains "$(cat "$TMP_ROOT/install-race-second.out")" "binding already exists for extension: org.example.install-race" \
+  "a second bind of the same package did not wait for the first to finish"
+race_root=$(binding_value "$H_INSTALL_RACE" org.example.install-race package_root)
+[ "$(package_mode "$race_root")" = 555 ] || fail "the winning same-package bind left its package unsealed"
+assert_contains "$(FM_HOME="$H_INSTALL_RACE" "$HOST" verify org.example.install-race)" "verified: org.example.install-race@1.2.3" \
+  "the winning same-package bind does not verify"
+pass "a second install of the same package waits out the first one's unsealed window instead of refusing it"
 fi
 
 # --- strict invocation matrix, replay, timeout, and process cleanup ----------

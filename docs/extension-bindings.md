@@ -39,6 +39,8 @@ It bounds the tree to 4,096 entries and 64 MiB, includes every directory, relati
 
 After validation, the host copies the complete package into `data/extensions/packages/<id>/<version>/<tree-digest>/` under the active home.
 Installed directories are mode `0555`, installed executable files are mode `0555`, and other installed files are mode `0444`.
+An install renames its complete copy into place and seals the package root `0555` last, so one killed between those two steps leaves an unsealed directory at that path.
+Every install holds the home's extension lifecycle lock, so the next bind knows no install still owns an unsealed directory there and reinstalls over it instead of refusing the package.
 Every invocation revalidates canonical confinement, owner, modes, links, the complete tree digest, manifest digest, and entrypoint digest before executing anything.
 The enabled binding points only at that content-addressed home-local copy, so two local or remote homes install the same package identity at independent absolute paths.
 

@@ -649,12 +649,37 @@ async function removeManagedTree(root) {
   await rm(root, { recursive: true, force: true });
 }
 
+// Test-only rendezvous inside installPackage's publish-to-seal window. When
+// FM_EXTENSION_TEST_PUBLISH_PAUSE names a directory, the installer records its
+// pid in <dir>/published once the package is renamed into place unsealed, then
+// waits for <dir>/release, so tests/fm-extension-binding.test.sh can kill or
+// race it at exactly that point instead of racing the clock.
+async function pauseAfterPublishForTest() {
+  const directory = process.env.FM_EXTENSION_TEST_PUBLISH_PAUSE;
+  if (!directory) return;
+  const marker = path.join(directory, "published");
+  await writeFile(`${marker}.tmp`, `${process.pid}\n`, { flag: "wx" });
+  await rename(`${marker}.tmp`, marker);
+  while (!await maybeLstat(path.join(directory, "release"))) await sleep(INVOCATION_POLL_MS);
+}
+
 async function installPackage(home, sourceInfo) {
   const digestHex = sourceInfo.tree.digest.slice("sha256:".length);
   const parent = await ensureHomePrivatePath(home, ["data", "extensions", "packages", sourceInfo.manifest.id, sourceInfo.manifest.version]);
   const destination = path.join(parent, digestHex);
   const existing = await maybeLstat(destination);
-  if (existing) {
+  if (existing?.isDirectory() && existing.uid === currentUid() && modeOf(existing) !== 0o555) {
+    // Sealing the root 0555 completes a publication (see the rename below), so
+    // an unsealed directory here was published by an install that never sealed
+    // it - one killed, OOM-killed, or cut off by power loss inside that window.
+    // Installs run only while holding the home's extension lifecycle lock, which
+    // this process now holds, so the install that published it is no longer
+    // running, and bind refuses an extension that already has a binding before
+    // installing, so nothing references it. Reinstall over it rather than
+    // refusing a sound package at this path on every later bind.
+    await assertLifecycleLockOwned();
+    await removeManagedTree(destination);
+  } else if (existing) {
     const installed = await validatePackage(destination, { installed: true });
     if (installed.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "existing content-addressed package directory has different bytes");
     return { packageInfo: installed };
@@ -691,13 +716,11 @@ async function installPackage(home, sourceInfo) {
     // write on the staging root for the rename alone - it stays owner-only, and
     // it lives inside the home-private package parent - then seal the published
     // directory. The validation below still proves the published tree is 0555.
-    // This rename publishes an unsealed 0700 directory at `destination` for the
-    // window between here and the chmod(0o555) below. A concurrent installPackage
-    // for the same digest that hits the EEXIST/ENOTEMPTY branch just below, or a
-    // SIGKILL/OOM/power loss inside this window, can leave that directory behind;
-    // every later install or bind then refuses it with "package root mode is
-    // unsafe: 700" until it is removed by hand. That residual risk is knowingly
-    // accepted here and tracked separately - it is not closed by this change.
+    // The rename publishes an unsealed 0700 directory at `destination` until the
+    // chmod(0o555) below seals it. Installs run one at a time under the home's
+    // extension lifecycle lock, so no other install observes that window, and a
+    // process killed inside it leaves a directory the next install reclaims at
+    // the top of this function. Never seal before this rename.
     await chmod(temporary, 0o700);
     try {
       await rename(temporary, destination);
@@ -708,13 +731,14 @@ async function installPackage(home, sourceInfo) {
       if (winner.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "concurrent package install produced a different tree");
       return { packageInfo: winner };
     }
+    await pauseAfterPublishForTest();
     try {
       await chmod(destination, 0o555);
       return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
-      // Our rename created this directory, so we own its cleanup. Leaving an
-      // unsealed or unvalidated tree behind would make the content-addressed
-      // path fail every later bind instead of letting one retry.
+      // Our rename created this directory, so we own its cleanup. Leaving a
+      // sealed tree that failed validation behind would make the
+      // content-addressed path fail every later bind instead of letting one retry.
       await removeManagedTree(destination).catch(() => {});
       throw error;
     }
@@ -2350,6 +2374,7 @@ async function runLifecycleBinding(commandName, args) {
   if (process.env.FM_STATE_OVERRIDE) env.FM_STATE_OVERRIDE = process.env.FM_STATE_OVERRIDE;
   if (process.env.XDG_STATE_HOME) env.XDG_STATE_HOME = process.env.XDG_STATE_HOME;
   if (process.env.FM_PROCEVENT_CLAIM_ROOT) env.FM_PROCEVENT_CLAIM_ROOT = process.env.FM_PROCEVENT_CLAIM_ROOT;
+  if (process.env.FM_EXTENSION_TEST_PUBLISH_PAUSE) env.FM_EXTENSION_TEST_PUBLISH_PAUSE = process.env.FM_EXTENSION_TEST_PUBLISH_PAUSE;
   const child = spawn(command, ["extension-bind", commandName, ...args], {
     cwd: CODE_ROOT,
     env,
