@@ -46,6 +46,9 @@
 #       (state/<id>.agent-stopped) reads its TERMINAL status event as that
 #       terminal state instead of unknown, and nothing else: open work, and a
 #       cleared record, both keep the ordinary unreadable-agent reading.
+#   (n) pipeline branch custody: a done lane whose branch a FAILED run still
+#       owns carries a custody segment a plain done lane lacks; an absent,
+#       unreadable, malformed, or other-branch answer stays silent.
 #   (l) coarse runs-ledger fallback: a terminal failed record with the daemon
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
@@ -2748,6 +2751,117 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
+# --- Pipeline branch custody on the state line -------------------------------
+# The 2026-09 PR-13 incident shape: a finished lane (done, agent deliberately
+# stopped, PR checks green) whose branch a DIFFERENT, later FAILED run still
+# owned. That run's head was never fetched into the task copy, so attribution
+# rejects it and the line falls through to the status log - which said only
+# "done", and the supervisor directed a rebase the pipeline then refused.
+run_failed_pipeline_owned() {  # <branch> [<sync-state>] [<next-code>]
+  cat <<EOF
+run:
+  id: "01RUNOWNER"
+  branch: $1
+  status: failed
+  head: "f1f1f1f1"
+  pr: "https://github.com/o/r/pull/13"
+  findings: none
+outcome: failed
+branch_sync:
+  state: ${2:-pipeline_owned}
+  changed: false
+  local:
+    branch: $1
+    head: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+    clean: true
+  next_action:
+    code: ${3:-recover_custody}
+    command: no-mistakes axi sync --recover --keep-local
+EOF
+}
+
+# A done, deliberately stopped crew in a readable pane with no busy record,
+# which is the exact reading the incident lane produced.
+make_stopped_done_crew() {  # <case-dir> <id>
+  make_repo_on_branch "$1/wt" "fm/$2"
+  make_fakebin "$1" >/dev/null
+  fm_write_meta "$1/state/$2.meta" "window=fm:fm-$2" \
+    "worktree=$1/wt" "kind=ship" "backend=tmux" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/13 checks green\n' > "$1/state/$2.status"
+  printf 'stopped_at=2026-09-22T02:00:00Z\nverb=exit\nresult=stopped\n' > "$1/state/$2.agent-stopped"
+}
+
+# Named mutants: dropping the custody segment from emit, or narrowing it to
+# ACTIVE runs only, both red the terminal-owner assertions below.
+test_pipeline_owned_by_failed_run_reads_differently_from_plain_done() {
+  reset_fakes
+  local d plain owned; d=$(new_case custody-failed-owner)
+  make_stopped_done_crew "$d" custody-a
+
+  # Control: the same lane with custody returned reads as plain done.
+  FM_FAKE_AXI_STATUS="$(run_failed_pipeline_owned fm/custody-a user_owned none)"
+  plain=$(run_crew_state "$d" custody-a)
+  assert_contains "$plain" "state: done" "a done lane with custody returned reads done"
+  assert_contains "$plain" "agent stopped" "the control takes the stopped-agent reading"
+  assert_not_contains "$plain" "owns branch" "custody returned carries no custody segment"
+
+  FM_FAKE_AXI_STATUS="$(run_failed_pipeline_owned fm/custody-a)"
+  owned=$(run_crew_state "$d" custody-a)
+  assert_contains "$owned" "state: done" "custody is reported alongside the state, never instead of it"
+  assert_contains "$owned" "agent stopped" "the crew's own reading is preserved"
+  assert_contains "$owned" "pipeline still owns branch: run 01RUNOWNER failed without returning custody" \
+    "a terminal run still holding the branch is named, with its status"
+  assert_contains "$owned" "(next_action: recover_custody)" "the pipeline's own next action is carried"
+  [ "$owned" != "$plain" ] || fail "a pipeline-owned done lane must read differently from a plain done lane"
+
+  # An active owner is reported as plain ownership, not as unreturned custody.
+  reset_fakes
+  d=$(new_case custody-active-owner)
+  make_repo_on_branch "$d/wt" fm/custody-live
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/custody-live.meta" "window=fm:fm-custody-live" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/custody-live f0f0f0f0)"
+  owned=$(run_crew_state "$d" custody-live)
+  assert_contains "$owned" "state: working" "the active owner is still the attributed run"
+  assert_contains "$owned" "pipeline owns branch: run 01RUNLIVE running (next_action: continue_active_run)" \
+    "an active owner reads as ownership"
+  assert_not_contains "$owned" "without returning custody" "an active run is not reported as unreturned custody"
+  pass "a done lane whose branch a failed run still owns reads differently from plain done"
+}
+
+# Silence, never an alarm: no answer, no run on this branch, a malformed
+# branch_sync block, or another branch's answer all leave the line byte-equal
+# to the plain done reading. Named mutants: dropping the branch-equality guard
+# reds the other-branch case; reporting custody from anything but an exact
+# pipeline_owned state reds the malformed and absent cases.
+test_absent_or_unreadable_custody_is_silent() {
+  reset_fakes
+  local d plain out status; d=$(new_case custody-silent)
+  make_stopped_done_crew "$d" custody-b
+  FM_FAKE_AXI_STATUS=""
+  plain=$(run_crew_state "$d" custody-b)
+  assert_contains "$plain" "state: done" "an unreadable status still reads the crew's own done"
+  assert_not_contains "$plain" "owns branch" "an unreadable status produces no custody text"
+
+  for status in \
+    "$(printf 'current_branch: fm/custody-b\nruns_on_current_branch: 0\ncount: 0 of 0 total')" \
+    "$(run_failed_pipeline_owned fm/custody-b | sed '/^branch_sync:/,$d')" \
+    "$(run_failed_pipeline_owned fm/custody-b | sed 's/^  state: pipeline_owned$/  state:/')" \
+    "$(run_failed_pipeline_owned fm/custody-b pipeline_owned_garbled)" \
+    "$(run_failed_pipeline_owned fm/other-crew)"; do
+    FM_FAKE_AXI_STATUS=$status
+    out=$(run_crew_state "$d" custody-b)
+    [ "$out" = "$plain" ] || fail "custody must stay silent without an exact pipeline_owned answer for this branch; got: $out"
+  done
+
+  # Divergence: the same crew with an owning answer does speak, so the loop
+  # above cannot pass by custody never being read at all.
+  FM_FAKE_AXI_STATUS="$(run_failed_pipeline_owned fm/custody-b)"
+  out=$(run_crew_state "$d" custody-b)
+  assert_contains "$out" "pipeline still owns branch" "the same crew with an owning answer reports custody"
+  pass "absent or unreadable custody stays silent"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2843,5 +2957,7 @@ test_stopped_agent_with_done_event_reads_done
 test_stopped_agent_with_open_work_stays_unknown
 test_stopped_record_removed_restores_ordinary_reading
 test_stopped_record_not_needed_while_the_agent_is_alive
+test_pipeline_owned_by_failed_run_reads_differently_from_plain_done
+test_absent_or_unreadable_custody_is_silent
 
 echo "all fm-crew-state tests passed"
