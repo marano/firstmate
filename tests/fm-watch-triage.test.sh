@@ -5037,8 +5037,11 @@ test_status_declared_line_classifier() {
 #   - the whole log's signature, or any identity that reads past the declared
 #     line: the build lock's lines change it.
 #   - the declared line's text alone: an identical replacement wait keeps it.
-#   - let an open keyed wait replace the declaration beneath it: the queued
-#     lock changes it.
+#   - drop the skip of the build lock's open queue wait: the queued lock
+#     changes it (the build lock's keyed wait case).
+#   - widen the skip back to any open keyed wait: a worker's own replacement
+#     keyed wait, and a keyed pause after a blocked or needs-decision, keep the
+#     earlier identity (the worker's keyed wait cases).
 test_status_declared_identity_classifier() {
   local dir f base got
   dir="$TMP_ROOT/status-declared-identity"; mkdir -p "$dir"; f="$dir/task.status"
@@ -5064,6 +5067,14 @@ test_status_declared_identity_classifier() {
   [ "$got" != "$base" ] || fail "a different wait in the same position kept the old wait's identity"
   got=$(identity_of 'paused [key=build-lock-7-1700000000]: waiting 10m00s for the lock')
   [ -n "$got" ] || fail "a keyed wait with nothing declared beneath it had no identity"
+  got=$(identity_of 'working: rebasing' 'paused: waiting on CI' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a worker's own replacement keyed wait kept the old wait's identity"
+  base=$(identity_of 'blocked: need the schema')
+  got=$(identity_of 'blocked: need the schema' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a keyed pause after a blocked line kept the blocker's identity"
+  base=$(identity_of 'needs-decision: which schema')
+  got=$(identity_of 'needs-decision: which schema' 'paused [key=ci]: waiting on CI')
+  [ "$got" != "$base" ] || fail "a keyed pause after a needs-decision line kept the decision's identity"
   unset -f identity_of
   pass "status_declared_identity names the declaration, not the lines logged after it"
 }

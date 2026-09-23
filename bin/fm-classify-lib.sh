@@ -61,6 +61,8 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-build-lock-key-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-build-lock-key-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -235,12 +237,12 @@ status_declared_line() {  # <status-file>
 # log's non-blank lines and a checksum of its text - or the empty string when
 # the log declares nothing. Lines appended after the declaration that the fold
 # above sets aside leave it unchanged; a new declaration of any kind changes it.
-# One more thing is set aside here and only here: an OPEN keyed wait opened on
-# top of an earlier declaration is a wait inside it, not a replacement for it,
-# so it neither starts a new window nor, once resolved, ends the one it was
-# opened in. The build lock opens exactly such a wait whenever a worker's run
-# queues for it. With nothing declared beneath it, the keyed wait is the
-# declaration. 2026-09-23: the watcher bound its throttle to the whole log's
+# One more thing is set aside here and only here: the build lock's own OPEN
+# queue wait (a keyed `paused:` whose key carries FM_BUILD_LOCK_WAIT_KEY_PREFIX)
+# opened on top of an earlier declaration is a wait inside it, not a replacement
+# for it, so it neither starts a new window nor, once resolved, ends the one it
+# was opened in. A worker's own keyed wait is a declaration and changes the
+# identity. With nothing declared beneath it, the lock's wait is the declaration. 2026-09-23: the watcher bound its throttle to the whole log's
 # signature, so each of the lock's lines re-surfaced a wait already surfaced
 # inside its cadence.
 status_declared_identity() {  # <status-file>
@@ -257,7 +259,7 @@ _status_line_states_key() {  # <status-line>
 
 # The one fold behind status_declared_line and status_declared_identity. <mode>
 # `line` prints the declared line; `identity` prints `<ordinal><TAB><line>` and
-# also passes over an open keyed wait, as status_declared_identity documents.
+# also passes over the build lock's open queue wait, as status_declared_identity documents.
 _status_declared_scan() {  # <status-file> <line|identity>
   local f=$1 mode=$2 rec n line key resolve held paused closed=$'\n' bare=0 waits_ended=0 inner=''
   [ -e "$f" ] || return 0
@@ -293,7 +295,7 @@ _status_declared_scan() {  # <status-file> <line|identity>
           if key=$(_fm_decision_key "$line") \
             && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
             case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
-            if [ "$mode" = identity ]; then
+            if [ "$mode" = identity ] && [ "${key#"$FM_BUILD_LOCK_WAIT_KEY_PREFIX"}" != "$key" ]; then
               [ -n "$inner" ] || inner="$n"$'\t'"$line"
               continue
             fi

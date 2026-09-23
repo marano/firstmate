@@ -27,7 +27,7 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-build-lock-key-lib.sh" "$dir/bin/"
   # The return brief's durable sources: the posture-record owner, the outcome
   # store owner, and the backlog reader with its tasks-axi probe.
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/"
