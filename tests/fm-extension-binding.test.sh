@@ -476,19 +476,25 @@ run_extension_section_lanes() {
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  # A hang tripwire for the whole aggregate, not a performance budget: every
+  # section runs under it, the slowest alone takes tens of seconds, and a
+  # section's own waits are individually bounded.
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-300}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -le 600 ] || return 64
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
-  # Sixteen selectors are validated here. The bounded aggregate keeps its
-  # required end-to-end bind/invoke/capture/retirement, remote, shipped
-  # example, and interrupted-install recovery lanes; the other conformance cuts
-  # remain independently selectable.
-  maximum_sections=16
-  maximum_concurrent=12
+  # The aggregate runs every conformance section: a section only selectable by
+  # hand went unrun by CI and rotted red unnoticed, so none is left out. The
+  # bound is that full set, and a longer list is refused. The slowest section
+  # sets the aggregate's wall time whatever the concurrency, so concurrency stays
+  # low enough that sections' own bounded waits are not starved on a small
+  # runner; six still lets the scheduler probe below start a fifth lane beside
+  # four blocked ones.
+  maximum_sections=17
+  maximum_concurrent=6
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
@@ -598,7 +604,11 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow remote-lifecycle example install-recovery
+      # Longest first, so the slowest sections start in the first wave.
+      run_extension_section_lanes lifecycle-state lifecycle-lock lifecycle-runner matrix \
+        matrix-runtime remote-activation remote-retirement lifecycle-flow remote-lifecycle \
+        example install-recovery remote-envelope early-bind early-handshake early-validation \
+        early-integrity lifecycle-invocation-cleanup
     ) &
     section_coordinator_pid=$!
   fi
@@ -651,7 +661,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
   if run_extension_section_lanes coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
     coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
     coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
-    coordinator-pass; then
+    coordinator-pass coordinator-pass; then
     fail "the section coordinator accepted more than its bounded allowlist"
   fi
   if FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS=2 \

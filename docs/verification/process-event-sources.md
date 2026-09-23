@@ -9,6 +9,7 @@ Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 install
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
+The external evidence write confinement, static launch and interruption recovery, and registration against a live source rows were re-verified on 2026-09-23 on macOS (Darwin 25.3.0) with Node v24.18.1, when the default extension-binding run began to include every segment that proves them.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -165,7 +166,6 @@ Run the focused external-binding evidence and the live Bearings session guard wi
 ```sh
 node --version
 bin/fm-test-run.sh tests/fm-extension-binding.test.sh
-FM_EXTENSION_BINDING_SEGMENT=lifecycle-invocation-cleanup bin/fm-test-run.sh tests/fm-extension-binding.test.sh
 bin/fm-test-run.sh tests/fm-procevent.test.sh
 FM_BEARINGS_LAVISH_LIVE=1 bin/fm-test-run.sh tests/fm-bearings-board-lavish-live-e2e.test.sh
 bin/fm-doc-audience-check.sh
