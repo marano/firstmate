@@ -187,6 +187,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# The one owner of "awaiting landing" (finished work firstmate holds, including
+# behind a deliberate fm-control.sh stop). The stale-persistence recheck asks it
+# rather than reading the stop record itself, exactly as the watcher does.
+# shellcheck source=bin/fm-awaiting-landing-lib.sh
+. "$FM_DAEMON_DIR/fm-awaiting-landing-lib.sh"
 # The away-posture record owner: while state/.afk-contract exists an item held
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh
@@ -383,9 +388,13 @@ _collapse_newlines() {  # <text>
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
-# last_status_line, status_is_captain_relevant, window_to_task, and the
-# status-span reader come from bin/fm-classify-lib.sh (sourced above),
-# the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
+# last_status_line, status_declared_line, status_is_captain_relevant,
+# window_to_task, and the status-span reader come from bin/fm-classify-lib.sh
+# (sourced above), the single classifier shared with bin/fm-watch.sh. Every
+# declared-wait read on the stale path asks status_declared_line, the worker's
+# current declaration, never the last line: a `resolved` line appended after a
+# `paused:` wait is firstmate's answer, not the worker's word, and the owner
+# explains why that wait still stands. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
@@ -456,7 +465,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
       "$(status_seen_offset "$state" "$task")")
     rc=$?
   fi
-  last=$(last_status_line "$state/$task.status")
+  last=$(status_declared_line "$state/$task.status")
   if [ "$rc" -eq 2 ]; then
     printf 'escalate|unreadable status span for %s' "$task"
     return
@@ -590,7 +599,7 @@ migrate_watcher_pause_markers() {  # <state>
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
@@ -604,7 +613,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
   for f in "${files[@]}"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
+    last=$(status_declared_line "$f")
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
@@ -1295,7 +1304,15 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    # Awaiting landing (bin/fm-awaiting-landing-lib.sh owns it): finished work
+    # firstmate holds, whether behind a recorded PR or a deliberate stop, has no
+    # worker action outstanding, so it holds no wedge timer here, as the watcher
+    # skips its stale triage. The stop record alone licenses nothing: open work
+    # behind a stop is not awaiting landing and keeps aging below.
+    if fm_awaiting_landing "$task" "$state"; then
+      rm -f "$marker"; continue
+    fi
+    last=$(status_declared_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1324,9 +1341,9 @@ housekeeping() {  # <state>
   # Pane busy state does NOT end the wait. A declared wait can legitimately hold a
   # pane busy - a worker parked on a long foreground call it keeps live for as long
   # as the wait lasts - so reading busy as "the crew resumed" retires the window of
-  # exactly the declaration that needs it. The crew's own latest status line is the
-  # authority, and the loop head above already drops the marker the moment that line
-  # stops declaring the wait.
+  # exactly the declaration that needs it. The crew's own current declaration is the
+  # authority, and the loop head above already drops the marker the moment it stops
+  # declaring the wait.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1336,7 +1353,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1371,7 +1388,7 @@ housekeeping() {  # <state>
     case "$?" in
       2) rm -f "$marker" ;;
       *)
-        last=$(last_status_line "$state/$task.status")
+        last=$(status_declared_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
@@ -1652,7 +1669,7 @@ handle_wake() {  # <reason> <state>
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       last=$(last_status_line "$state/$task.status")
+                       last=$(status_declared_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
                          || decision="escalate|${reason#stale: }"
                        ;;
@@ -1667,7 +1684,7 @@ handle_wake() {  # <reason> <state>
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_line "$state/$task.status")
     reconcile_pause_tracking "$arg" "$state" "$last"
   fi
   case "$action" in
@@ -1701,7 +1718,7 @@ handle_wake() {  # <reason> <state>
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
-        last=$(last_status_line "$state/$task.status")
+        last=$(status_declared_line "$state/$task.status")
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.

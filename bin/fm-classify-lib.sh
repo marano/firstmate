@@ -198,14 +198,17 @@ status_outcome_line() {  # <status-file>
 # Only what a LATER resolution closed is folded. An open needs-decision or
 # blocked is the worker's current word and is printed as-is, and a resolution
 # closes only the key it names, under the key grammar and transition guard
-# status_open_decisions uses. The durable-transfer verb is not folded, for the
-# reason status_outcome_line gives.
+# status_open_decisions uses. A durable transfer is folded on the same terms and
+# no others: once the captain's answer resolves its key the hold is settled, but
+# an unanswered one stays the declaration, for the reason status_outcome_line
+# gives for never folding past it.
 #
 # Prints that line, or the empty string when the log holds none.
 status_declared_line() {  # <status-file>
-  local f=$1 line key resolve closed=$'\n'
+  local f=$1 line key resolve held closed=$'\n'
   [ -e "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line; do
     case "$(status_line_verb "$line")" in
       "$resolve")
@@ -215,7 +218,7 @@ status_declared_line() {  # <status-file>
         fi
         continue
         ;;
-      needs-decision|blocked)
+      needs-decision|blocked|"$held")
         if key=$(_fm_decision_key "$line") \
           && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
           case "$closed" in *$'\n'"$key"$'\n'*) continue ;; esac
