@@ -14,7 +14,9 @@
 # By default the canonical snapshot performs bounded concurrent remote-ledger reads
 # for registered remote homes under one shared collection budget and may atomically
 # refresh its parent-side ledger cache. It MAY surface PR URLs already recorded in
-# task meta (recorded_prs), but performs no live GitHub discovery or checks. Live PR
+# task meta (recorded_prs), each with held_because: the canonical snapshot's
+# merge_hold reasons joined into one line, or null when nothing on record holds
+# the PR. It performs no live GitHub discovery or checks. Live PR
 # discovery/checks happen ONLY under --include-prs; all gh coupling lives in that
 # branch and never in the canonical snapshot. The default output states explicitly
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
@@ -147,7 +149,8 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path},
+  recorded_prs{id,url,held_because},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -577,7 +580,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta")
+       | {id, url:.pr.url,
+          held_because:(if (.merge_hold.held // false) == true
+                        then ([.merge_hold.reasons[].text] | join("; ")) else null end)} ]) as $recorded_prs_all
   | def filed_epoch:
       (.filed // null) as $filed
       | if ($filed | type) != "string" then null

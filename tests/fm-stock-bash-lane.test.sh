@@ -115,7 +115,7 @@ stock-bash
 --require-ok-count
 tests/fm-fleet-snapshot-view.test.sh=21
 --require-ok-count
-tests/fm-bearings-snapshot.test.sh=59
+tests/fm-bearings-snapshot.test.sh=60
 --json
 $fx/log/timing.json" "$args" "lane did not run the runner's stock-bash selection with its pins"
   case "$(cat "$fx/log/run-bash")" in

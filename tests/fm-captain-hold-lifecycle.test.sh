@@ -3234,6 +3234,8 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
     "the PR merge entrypoint reached the irreversible forge call for a held task"
   assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
     "the PR merge refusal did not name the held task"
+  assert_grep "held because: held for the captain: captain merge approval pending" "$home/pr.err" \
+    "the PR merge refusal did not name the recorded hold reason"
   assert_absent "$home/state/.control-$pr_id.lock" \
     "the refused PR merge left its task control lock held"
   pass "the PR merge entrypoint refuses a captain-held task before merging"

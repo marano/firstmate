@@ -3334,6 +3334,76 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+# A PR waiting on the captain names WHY from structured records only: the
+# project's registered merge posture, the task's recorded authority and its
+# recorded downgrade reason, and any structured backlog hold. The two holds
+# below are the real 2026-09-23 cases, a docs PR held for its ticket's owner
+# review and a terraform PR held until it is applied per environment, recorded
+# as structured holds rather than left in prose.
+write_merge_hold_task() {  # <home> <id> <project> <yolo> <pr-number> [extra meta...]
+  local home=$1 id=$2 project=$3 yolo=$4 number=$5
+  shift 5
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/wt" "project=/src/$project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=$yolo" "$@" \
+    "pr=https://github.com/acme/$project/pull/$number"
+  record_claude_state "$home/state" "$id" idle
+  printf 'done: PR https://github.com/acme/%s/pull/%s checks green\n' "$project" "$number" > "$home/state/$id.status"
+}
+
+test_recorded_pr_names_why_it_is_held() {
+  local home fakebin json toon canon
+  home=$(make_home merge-hold)
+  mkdir -p "$home/projects/wt"
+  printf '%s\n' '# Projects' \
+    '- help-content [no-mistakes] - help articles (added 2026-09-19)' \
+    '- app [no-mistakes +yolo] - the product (added 2026-09-01)' > "$home/data/projects.md"
+  printf '%s\n' '## In flight' \
+    '- [ ] help-pr - Help article (repo: help-content) (kind: ship) (since 2026-07-11)' \
+    '- [ ] app-pr - App fix (repo: app) (kind: ship) (since 2026-07-11)' \
+    '- [ ] docs-pr - Docs change (repo: app) (kind: ship) (since 2026-07-11) (hold: ticket requires owner review) (hold-kind: external)' \
+    '- [ ] tf-pr - Terraform change (repo: app) (kind: ship) (since 2026-07-11) (hold: held until applied per environment) (hold-kind: captain)' \
+    '- [ ] down-pr - Downgraded fix (repo: app) (kind: ship) (since 2026-07-11)' \
+    '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  write_merge_hold_task "$home" help-pr help-content off 16
+  write_merge_hold_task "$home" app-pr app on 20
+  write_merge_hold_task "$home" docs-pr app on 21
+  write_merge_hold_task "$home" tf-pr app on 22
+  write_merge_hold_task "$home" down-pr app off 23 "yolo_downgrade_reason=touches billing"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --json) || fail "merge-hold: bearings snapshot failed"
+  toon=$(run "$home" "$fakebin") || fail "merge-hold: bearings TOON failed"
+
+  # (a) No standing authority is a posture nobody has ruled on, never an approval request.
+  printf '%s' "$json" | jq -e '
+    (.recorded_prs[] | select(.id == "help-pr") | .held_because) as $why
+    | ($why | type) == "string"
+      and ($why | startswith("no standing merge authority on this project; nobody has ruled"))
+      and ($why | test("approv|your word"; "i") | not)
+  ' >/dev/null || fail "merge-hold: a project without standing authority must say nobody has ruled: $json"
+  # (b) A yolo project's green PR that nothing holds renders no hold reason.
+  printf '%s' "$json" | jq -e '.recorded_prs[] | select(.id == "app-pr") | .held_because == null' >/dev/null \
+    || fail "merge-hold: an unheld yolo PR must carry no hold reason: $json"
+  printf '%s' "$json" | jq -e '
+    (.recorded_prs | map({(.id): .held_because}) | add) as $why
+    | $why["docs-pr"] == "held on an outside party: ticket requires owner review"
+      and $why["tf-pr"] == "held for the captain: held until applied per environment"
+      and ($why["down-pr"] | contains("touches billing"))
+  ' >/dev/null || fail "merge-hold: recorded holds and the recorded downgrade reason must be quoted: $json"
+  assert_contains "$toon" "recorded_prs[5]{id,url,held_because}:" "merge-hold: TOON must carry the hold reason column"
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "merge-hold: canonical snapshot failed"
+  printf '%s' "$canon" | jq -e '
+    (.tasks | map({(.id): .merge_hold}) | add) as $m
+    | $m["help-pr"].held == true
+      and ($m["help-pr"].reasons | map(.kind)) == ["no_standing_authority"]
+      and $m["app-pr"] == {held:false, reasons:[]}
+      and ($m["tf-pr"].reasons | map(.kind)) == ["recorded_hold"]
+      and ($m["down-pr"].reasons | map(.kind)) == ["task_downgrade"]
+  ' >/dev/null || fail "merge-hold: canonical merge_hold must classify each reason: $canon"
+  pass "a held PR names its recorded reason, and an unheld yolo PR names none"
+}
+
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
@@ -3393,3 +3463,4 @@ test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_recorded_pr_names_why_it_is_held

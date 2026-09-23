@@ -2732,6 +2732,62 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
+# Registration prints why the PR waits for the captain, from structured records
+# only, so whoever reports it relays a reason rather than a bare request for the
+# captain's word.
+write_posture_meta() {  # <dir> <yolo>
+  local dir=$1 yolo=$2
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/help-content" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=$yolo"
+}
+
+test_registration_names_why_the_pr_waits() {
+  local dir url tasks_axi_dir
+  url=https://github.com/o/r/pull/16
+
+  # (a) Registered without merge authority: a posture nobody has ruled on.
+  dir=$(make_case hold-no-authority)
+  write_posture_meta "$dir" off
+  printf '%s\n' '- help-content [no-mistakes] - help articles (added 2026-09-19)' > "$dir/home/data/projects.md"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "hold-no-authority: registration failed: $(cat "$dir/stderr")"
+  assert_grep "merge-hold: no standing merge authority on this project; nobody has ruled" "$dir/stdout" \
+    "hold-no-authority: registration did not name the unruled posture"
+  ! grep -qiE 'approv|your word' "$dir/stdout" \
+    || fail "hold-no-authority: the unruled posture read as an approval request: $(cat "$dir/stdout")"
+  grep -q '^armed:' "$dir/stdout" || fail "hold-no-authority: poll was not armed"
+
+  # (b) Standing authority, nothing held: no hold reason at all.
+  dir=$(make_case hold-none)
+  write_posture_meta "$dir" on
+  printf '%s\n' '- help-content [no-mistakes +yolo] - help articles (added 2026-09-19)' > "$dir/home/data/projects.md"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "hold-none: registration failed: $(cat "$dir/stderr")"
+  assert_no_grep "merge-hold:" "$dir/stdout" "hold-none: an unheld yolo PR printed a hold reason"
+  assert_grep "merge: no hold is recorded" "$dir/stdout" "hold-none: registration did not say nothing holds it"
+
+  # A structured backlog hold is quoted with its kind and recorded reason.
+  tasks_axi_dir=$(dirname "$(command -v tasks-axi)") || fail "these cases read a real backlog with tasks-axi, which was not found"
+  dir=$(make_case hold-recorded)
+  write_posture_meta "$dir" on
+  printf '%s\n' '- help-content [no-mistakes +yolo] - help articles (added 2026-09-19)' > "$dir/home/data/projects.md"
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  printf '%s\n' '# Backlog' '' '## In flight' \
+    '- [ ] task-a - Docs change (since 2026-09-23) (hold: ticket requires owner review) (hold-kind: external)' \
+    '' '## Queued' '' '## Done' > "$dir/home/data/backlog.md"
+  BASE_PATH="$tasks_axi_dir:$BASE_PATH" run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "hold-recorded: registration failed: $(cat "$dir/stderr")"
+  assert_grep "merge-hold: held on an outside party: ticket requires owner review" "$dir/stdout" \
+    "hold-recorded: registration did not quote the recorded hold"
+  pass "registration names why the PR waits, and names nothing when nothing holds it"
+}
+
 test_valid_recording_and_merge_derivation
 test_registering_a_second_pr_never_drops_a_live_merge_watch
 test_a_merged_pr_may_be_followed_by_the_next
@@ -2747,3 +2803,4 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_registration_names_why_the_pr_waits

@@ -19,6 +19,11 @@
 # always allowed. --replace records the new PR anyway, for a recorded PR that
 # was superseded (closed without merging) or that cannot be read. The refusal
 # happens under the record lock and before any poll artifact or record changes.
+# After arming, every registration prints why the PR waits for the captain, one
+# `merge-hold: <reason>` line per reason bin/fm-merge-hold-lib.sh derives from
+# the task's structured records, or a single `merge: no hold is recorded ...`
+# line when nothing on record holds it. Whoever reports the PR relays that
+# reason rather than composing one.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--replace]
 set -eu
 
@@ -26,6 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -35,6 +41,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-merge-hold-lib.sh
+. "$SCRIPT_DIR/fm-merge-hold-lib.sh"
 
 REPLACE=0
 if [ "$#" -eq 3 ] && [ "$3" = --replace ]; then
@@ -126,11 +134,13 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 # Read under the record lock, so no other recording can slip in between this
 # verdict and the rewrite below.
 RECORDED_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+RECORDED_SAME=0
 if [ -n "$RECORDED_URL" ] && [ "$REPLACE" = 0 ]; then
   RECORDED_REPORTED=0
   if fm_pr_url_parse "$RECORDED_URL"; then
     if [ "$FM_PR_URL" = "$URL" ]; then
       RECORDED_REPORTED=same
+      RECORDED_SAME=1
     elif fm_pr_poll_merge_already_notified "$STATE" "$ID" \
       "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; then
       RECORDED_REPORTED=1
@@ -223,22 +233,47 @@ CANDIDATES
 }
 capture_validation_receipt || true
 
+# Why this PR waits for the captain, from structured records only
+# (bin/fm-merge-hold-lib.sh). An unreadable task record at this point is not a
+# reason to fail an armed watch, so it is reported as unexplained instead.
+MERGE_HOLD_REASONS=
+if fm_merge_hold_task "$FM_HOME" "$STATE" "$DATA" "$ID"; then
+  MERGE_HOLD_REASONS=$FM_MERGE_HOLD_REASONS
+else
+  MERGE_HOLD_REASONS="hold_unreadable	the task record could not be read to explain whether this PR is held"
+fi
+MERGE_HOLD_SUMMARY=$(fm_merge_hold_summary "$MERGE_HOLD_REASONS")
+
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
 # (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
 # silent no-op there. The poll is armed either way; a channel that cannot be
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still
-# delivers the child's own ready line on the next supervision poll.
+# delivers the child's own ready line on the next supervision poll. The line
+# carries the hold reason, which can change between registrations, so
+# re-registering the PR already recorded does not publish it again: the parent
+# was told once, and a second ready line for one PR would read as new work.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
-READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
-case "$READY_RC" in
-  0|1) ;;
-  *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
-esac
+[ -z "$MERGE_HOLD_SUMMARY" ] || READY_LINE="$READY_LINE held: $(fm_parent_channel_clean_note "$MERGE_HOLD_SUMMARY")"
+if [ "$RECORDED_SAME" = 0 ]; then
+  READY_RC=0
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+  case "$READY_RC" in
+    0|1) ;;
+    *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
+  esac
+fi
+if [ -n "$MERGE_HOLD_REASONS" ]; then
+  printf '%s\n' "$MERGE_HOLD_REASONS" | while IFS='	' read -r _kind text; do
+    [ -n "$text" ] || continue
+    printf 'merge-hold: %s\n' "$text"
+  done
+else
+  printf 'merge: no hold is recorded; standing merge authority covers this PR once it is green and validated\n'
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

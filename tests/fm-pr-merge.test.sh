@@ -3652,6 +3652,8 @@ test_away_grant_and_yolo_and_hold_for_return() {
   expect_code 1 "$rc" "away-held: ungranted merge must refuse"
   assert_grep 'task task-x1 is held for the captain return' "$case_dir/stderr" \
     "away-held: refusal did not name hold-for-return"
+  assert_grep 'held because: no standing merge authority on this project; nobody has ruled' "$case_dir/stderr" \
+    "away-held: refusal did not name why the task carries no merge authority"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "away-held: gh pr merge ran without a grant"
 
