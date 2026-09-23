@@ -3364,12 +3364,14 @@ test_recorded_pr_names_why_it_is_held() {
     '- [ ] docs-pr - Docs change (repo: app) (kind: ship) (since 2026-07-11) (hold: ticket requires owner review) (hold-kind: external)' \
     '- [ ] tf-pr - Terraform change (repo: app) (kind: ship) (since 2026-07-11) (hold: held until applied per environment) (hold-kind: captain)' \
     '- [ ] down-pr - Downgraded fix (repo: app) (kind: ship) (since 2026-07-11)' \
+    '- [ ] expired-pr - Expired-date hold (repo: app) (kind: ship) (since 2026-07-11) (hold: wait until the migration window opens) (hold-kind: captain) (hold-until: 2026-06-01)' \
     '' '## Queued' '' '## Done' > "$home/data/backlog.md"
   write_merge_hold_task "$home" help-pr help-content off 16
   write_merge_hold_task "$home" app-pr app on 20
   write_merge_hold_task "$home" docs-pr app on 21
   write_merge_hold_task "$home" tf-pr app on 22
   write_merge_hold_task "$home" down-pr app off 23 "yolo_downgrade_reason=touches billing"
+  write_merge_hold_task "$home" expired-pr app on 24
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(run "$home" "$fakebin" --json) || fail "merge-hold: bearings snapshot failed"
   toon=$(run "$home" "$fakebin") || fail "merge-hold: bearings TOON failed"
@@ -3389,8 +3391,9 @@ test_recorded_pr_names_why_it_is_held() {
     | $why["docs-pr"] == "held on an outside party: ticket requires owner review"
       and $why["tf-pr"] == "held for the captain: held until applied per environment"
       and ($why["down-pr"] | contains("touches billing"))
+      and $why["expired-pr"] == "held for the captain: wait until the migration window opens"
   ' >/dev/null || fail "merge-hold: recorded holds and the recorded downgrade reason must be quoted: $json"
-  assert_contains "$toon" "recorded_prs[5]{id,url,held_because}:" "merge-hold: TOON must carry the hold reason column"
+  assert_contains "$toon" "recorded_prs[6]{id,url,held_because}:" "merge-hold: TOON must carry the hold reason column"
   canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
     || fail "merge-hold: canonical snapshot failed"
   printf '%s' "$canon" | jq -e '
@@ -3400,6 +3403,8 @@ test_recorded_pr_names_why_it_is_held() {
       and $m["app-pr"] == {held:false, reasons:[]}
       and ($m["tf-pr"].reasons | map(.kind)) == ["recorded_hold"]
       and ($m["down-pr"].reasons | map(.kind)) == ["task_downgrade"]
+      and $m["expired-pr"].held == true
+      and ($m["expired-pr"].reasons | map(.kind)) == ["recorded_hold"]
   ' >/dev/null || fail "merge-hold: canonical merge_hold must classify each reason: $canon"
   pass "a held PR names its recorded reason, and an unheld yolo PR names none"
 }

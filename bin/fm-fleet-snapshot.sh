@@ -764,15 +764,15 @@ prefetch_task_current_states() {
 }
 
 # The active structured backlog holds, by task id, for merge_hold below: a hold
-# counts while its row is open and any hold-until date is still ahead, the same
-# date rule hold_bucket applies. Built once from the already-parsed backlog.
+# counts while its row is open, regardless of whether its hold-until date has
+# passed - the same as hold_bucket, which never treats an expired date as no
+# longer held. Built once from the already-parsed backlog.
 MERGE_HOLD_ACTIVE_HOLDS='{}'
 merge_hold_active_holds() {  # <backlog-json>
-  printf '%s' "$1" | jq -c --arg today "$SNAPSHOT_TODAY" '
+  printf '%s' "$1" | jq -c '
     [ (.records // [])[]
       | select(.structured == true and .state != "done"
-               and .hold_reason != null and .hold_kind != null
-               and (.hold_until == null or .hold_until > $today))
+               and .hold_reason != null and .hold_kind != null)
       | {key:.id, value:{kind:.hold_kind, reason:.hold_reason}} ]
     | from_entries'
 }
