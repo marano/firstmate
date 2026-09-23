@@ -17,6 +17,7 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
+TMUX_KEEPER_SESSION="fm-calm-keeper"
 # Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
 # known-good evidence, not a support ceiling: the fixtures below run against whatever
 # Pi is actually installed, and record_pi_version_evidence never rejects a newer
@@ -35,6 +36,26 @@ cleanup() {
   fm_test_cleanup
 }
 trap cleanup EXIT
+
+# Start the Pi session under test: start_pi_tmux_session <new-session args...>.
+# Every restart here kills the Pi session and creates a new one on the same
+# socket. Killing a server's last session makes that server exit, and a
+# new-session that reaches it while it is still exiting is dropped: tmux prints
+# "server exited unexpectedly", no session exists, and the next wait used to
+# report that Pi had not restored the session. A keeper session that lives as
+# long as this test keeps the server from ever emptying, so a restart cannot
+# race its exit, and a new-session that fails anyway is reported as tmux's
+# failure rather than as Pi's.
+start_pi_tmux_session() {
+  local err="$TMP_ROOT/tmux-new-session.err"
+  if ! tmux -L "$TMUX_SOCKET" has-session -t "=$TMUX_KEEPER_SESSION" 2>/dev/null; then
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_KEEPER_SESSION" \
+      "while kill -0 $$ 2>/dev/null; do sleep 1; done" 2>"$err" \
+      || fail "tmux could not start the session that keeps its server up: $(cat "$err")"
+  fi
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$@" 2>"$err" \
+    || fail "tmux could not start the Pi session: $(cat "$err")"
+}
 
 wait_for_text() {
   local file=$1 text=$2 i=0
@@ -1882,7 +1903,7 @@ TS
       session_arg="--session '$session_arg'"
     fi
 
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+    start_pi_tmux_session -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
@@ -2021,7 +2042,7 @@ JS
   replay_exact_case() {
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     printf '%s\n' on >"$home/config/calm"
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+    start_pi_tmux_session -x 160 -y 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
@@ -2183,7 +2204,7 @@ TS
     # tmux never answers Pi's terminal-background query, so Pi saves no theme
     # and each /reload waits up to 100ms on that query with keys going to its
     # reload box, which discards them.
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
+    start_pi_tmux_session -x 100 -y 44 \
       "cd '$project' && env -u COLORFGBG FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
@@ -3597,7 +3618,7 @@ TS
 {"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}
 JSON
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  start_pi_tmux_session -x 180 -y 44 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
@@ -4210,7 +4231,7 @@ JS
     || fail "Pi did not exit cleanly before the Calm persistence restart"
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  start_pi_tmux_session -x 180 -y 44 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$restarted_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "Pi did not restore the persisted session after restart"
