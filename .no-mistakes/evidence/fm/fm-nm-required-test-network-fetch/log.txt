@@ -1,0 +1,14 @@
+== 1 normal, network blocked via proxy env
+ok - vendored shared action verifier matches the pinned revision hash and the workflow pin
+ok - shared action accepts a matching head_sha with completed required steps
+ok - shared action rejects a mismatched head_sha and names both SHAs
+ok - shared action rejects an attestation with no head_sha
+rc=0
+== 2 drifted vendored copy
+not ok - vendored shared action verifier drifted from the pinned revision 32d396ac0f29135daf7fcb9964aba9d5f4e796d6: sha256 772981d1964c2fc57d6219b646fe2740301ffc28f48ad8515ac372d19f3ac5d4, expected cd27df75b702ba34240b681b13dbaef51e84948cd4a61a6e654894fcec1a08d2
+rc=
+Updated 1 path from the index
+== 3 stale workflow pin
+not ok - the workflow pins the shared action at '0000000000000000000000000000000000000000' but the vendored verifier is for 32d396ac0f29135daf7fcb9964aba9d5f4e796d6; re-vendor the verifier and update ACTION_REF and its hash
+rc=
+Updated 1 path from the index
