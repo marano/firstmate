@@ -214,18 +214,17 @@ status_outcome_line() {  # <status-file>
 # `paused:` at the very moment the worker's long run began and its pane went
 # quiet, and the quiet pane was alarmed as a wedge.
 #
-# An UNKEYED `paused:` is ended by a bare `resolved:` - one that states no key -
-# because that is exactly how the worker contract says to end it: bin/fm-brief.sh
-# tells a worker whose wait clears without a reply to append `resolved: {how it
-# cleared}`, keyed only if the wait was. Until 2026-09-23 such a wait read as
-# standing forever after, so its worker was rechecked as waiting on something it
-# had already said was over. A bare resolution also closes the default decision,
-# and one line cannot say which of the two it answered, so each unkeyed decision,
-# blocker or hold opened after the wait takes one of the bare resolutions logged
-# after it, and the wait ends only on one left over; a case that cannot be told
-# apart keeps the wait. A stated `[key=default]`, which is how firstmate answers
-# an unkeyed decision, never ends a wait. Unkeyed waits are one record, as
-# unkeyed decisions are, so every earlier one ends with it.
+# An UNKEYED `paused:` is ended by a bare `resolved:` (one that states no key),
+# which is how bin/fm-brief.sh tells a worker to end a wait that clears without a
+# reply. Until 2026-09-23 such a wait read as standing forever, so its worker was
+# rechecked as waiting on something it had already said was over.
+#
+# The rule: a bare resolution answers the default decision if one was opened
+# after the wait, and otherwise ends the wait. Each unkeyed decision, blocker or
+# hold logged after the wait consumes one later bare resolution; the wait ends
+# only on a bare resolution left over. A stated `[key=default]`, which is how
+# firstmate answers an unkeyed decision, never ends a wait. Unkeyed waits are
+# one record, so a later one supersedes every earlier one.
 #
 # Prints that line, or the empty string when the log holds none.
 status_declared_line() {  # <status-file>
