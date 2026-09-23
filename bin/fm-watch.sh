@@ -1912,9 +1912,9 @@ task_captain_call_open() {  # <task>
 # owns. A new declaration - a replacement wait, a fresh delivery, a blocker -
 # changes it and so starts its own window instead of inheriting the silence of
 # the one before it, while the lines that declare nothing (a resolution, a note,
-# the build lock's own queue wait, and only that) leave the window alone. Bound to the whole
-# log's signature until 2026-09-23, every one of those lines re-surfaced a wait
-# already surfaced inside its cadence.
+# the build lock's own queue wait, and only that) leave the window alone. Bound
+# to the whole log's signature until 2026-09-23, every one of those lines
+# re-surfaced a wait already surfaced inside its cadence.
 stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(status_declared_identity "$STATE/$1.status")"
 }

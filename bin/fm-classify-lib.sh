@@ -242,7 +242,8 @@ status_declared_line() {  # <status-file>
 # opened on top of an earlier declaration is a wait inside it, not a replacement
 # for it, so it neither starts a new window nor, once resolved, ends the one it
 # was opened in. A worker's own keyed wait is a declaration and changes the
-# identity. With nothing declared beneath it, the lock's wait is the declaration. 2026-09-23: the watcher bound its throttle to the whole log's
+# identity. With nothing declared beneath it, the lock's wait is the
+# declaration. 2026-09-23: the watcher bound its throttle to the whole log's
 # signature, so each of the lock's lines re-surfaced a wait already surfaced
 # inside its cadence.
 status_declared_identity() {  # <status-file>
@@ -259,7 +260,8 @@ _status_line_states_key() {  # <status-line>
 
 # The one fold behind status_declared_line and status_declared_identity. <mode>
 # `line` prints the declared line; `identity` prints `<ordinal><TAB><line>` and
-# also passes over the build lock's open queue wait, as status_declared_identity documents.
+# also passes over the build lock's open queue wait, as status_declared_identity
+# documents.
 _status_declared_scan() {  # <status-file> <line|identity>
   local f=$1 mode=$2 rec n line key resolve held paused closed=$'\n' bare=0 waits_ended=0 inner=''
   [ -e "$f" ] || return 0
