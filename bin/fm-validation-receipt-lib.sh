@@ -30,6 +30,14 @@
 # the one the cap discards. The number of candidates read is capped
 # (_FM_VALIDATION_CANDIDATE_CAP) so a long log cannot turn one merge into an
 # unbounded number of bounded pipeline reads.
+# A status line is prose, so the ready line's `run=<id>` token routinely sits
+# right up against trailing text with no space, as in the worker's own
+# `run=<id>; loaded slow-composer 15/15 ...`. _fm_validation_strip_trailing_punct
+# strips exactly one trailing sentence-punctuation character before an id is
+# validated, so that token still yields the id instead of an invalid one that
+# fm_validation_run_id_valid rejects outright - PR 88 (2026-09-23) was refused
+# for exactly this reason, with the newer run's id dropped from BOTH tiers
+# because both read it through the same extraction.
 #
 # Widening the candidate list cannot widen what counts as proof. A candidate id
 # is only a POINTER: fm_validation_run_record_proves below independently
@@ -223,10 +231,21 @@ ROWS
   FM_VALIDATION_PROOF_BRANCH=$run_branch
 }
 
+# The canonical form of one whitespace-delimited status-log token, with any
+# single trailing sentence-punctuation character removed, because a status
+# line is prose and a token routinely sits right before a comma, semicolon,
+# colon, period, or closing paren with no space - the worker's mandated ready
+# line `done: PR <url> checks green run=<id>; loaded slow-composer 15/15 ...`
+# is exactly this shape. The one owner for that stripping, shared by the URL
+# and run-id readers below so trailing prose is handled identically for both.
+_fm_validation_strip_trailing_punct() {  # <token>
+  printf '%s' "${1%%[.,;:)]}"
+}
+
 # The canonical form of one whitespace-delimited status-log field, or nothing.
-# Trailing sentence punctuation is stripped because a status line is prose.
 _fm_validation_field_url() {  # <field> <canonical-url>
-  local field=${1%%[.,;:)]} url=$2
+  local field url=$2
+  field=$(_fm_validation_strip_trailing_punct "$1")
   [ "$field" != "$url" ] || { printf '%s' "$url"; return 0; }
   case "$field" in
     https://*/pull/*|https://*/-/merge_requests/*) ;;
@@ -237,9 +256,12 @@ _fm_validation_field_url() {  # <field> <canonical-url>
 
 # Run ids the task's status log names, newest first, in two tiers printed one
 # per line: ids reported on a line that also names this pull request, then
-# every other id. The header above owns why that tiering is the fix.
-_fm_validation_status_run_ids() {  # <status-log> <canonical-url>
-  local log=$1 url=$2 line field id names_pr ids i
+# every other id. The header above owns why that tiering is the fix. Optional
+# $3 "bound-only" prints only the first tier, so a same-URL re-registration
+# can ask what the log reports beside THIS pull request without paying for a
+# scan of every other id in the log.
+_fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only]
+  local log=$1 url=$2 bound_only=${3:-} line field id names_pr ids i
   local bound='' other=''
   local -a lines=() fields=()
   [ -f "$log" ] && [ ! -L "$log" ] || return 0
@@ -255,7 +277,7 @@ _fm_validation_status_run_ids() {  # <status-log> <canonical-url>
     for field in ${fields[@]+"${fields[@]}"}; do
       case "$field" in
         run=*)
-          id=${field#run=}
+          id=$(_fm_validation_strip_trailing_punct "${field#run=}")
           fm_validation_run_id_valid "$id" || continue
           ids="${ids:+$ids }$id"
           ;;
@@ -271,9 +293,21 @@ _fm_validation_status_run_ids() {  # <status-log> <canonical-url>
       other="${other:+$other }$ids"
     fi
   done
-  for id in $bound $other; do
+  for id in $bound; do
     printf '%s\n' "$id"
   done
+  [ -z "$bound_only" ] || return 0
+  for id in $other; do
+    printf '%s\n' "$id"
+  done
+}
+
+# The single freshest run id the status log reports on a line that also names
+# pull request $2, or nothing when no such line exists. This is what a
+# same-URL re-registration treats as "a newer run reported beside the PR",
+# for fm-pr-check.sh's receipt refresh below.
+fm_validation_status_freshest_bound_run() {  # <status-log> <canonical-url>
+  _fm_validation_status_run_ids "$1" "$2" bound-only | head -1
 }
 
 # The run no-mistakes reports for the task's recorded local copy, or nothing.
