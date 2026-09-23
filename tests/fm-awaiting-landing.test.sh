@@ -455,6 +455,147 @@ test_a_receipt_never_rescues_a_behind_or_unrelated_head() {
   pass "a validation receipt never rescues an unpushed-work or rewritten-history head"
 }
 
+# Replay the branch in <worktree> the way the pipeline's rebase step does when
+# the base branch moved while the ship was validating: the base gains a commit
+# the branch lacks, the branch's own commits are cherry-picked onto it, and the
+# pipeline adds a fix commit of its own. The worktree is returned to its branch
+# head untouched, because the pipeline never advances the worker's local branch.
+# Prints the rebased PR head. <replay> `changed` alters the replayed content, as
+# a conflict resolved differently from the branch would.
+pipeline_rebase() {  # <worktree> <replay: clean|changed>
+  local wt=$1 replay=$2 branch head base
+  branch=$(git -C "$wt" symbolic-ref --short HEAD)
+  head=$(git -C "$wt" rev-parse HEAD)
+  base=$(git -C "$wt" merge-base "$head" main)
+  git -C "$wt" checkout -q --detach "$base"
+  printf 'the base moved on\n' > "$wt/base.txt"
+  git -C "$wt" add base.txt
+  git -C "$wt" "${GIT_ID[@]}" commit -qm "the base branch moved on during validation"
+  # Linearized as a rebase does: a merge on the branch is dropped and the
+  # commits it brought in are replayed on their own.
+  git -C "$wt" rev-list --reverse --no-merges "$base..$head" | while IFS= read -r c; do
+    git -C "$wt" "${GIT_ID[@]}" cherry-pick "$c" > /dev/null || exit 1
+  done || fail "the rebase fixture could not replay the branch"
+  if [ "$replay" = changed ]; then
+    printf 'resolved differently\n' >> "$wt/work.txt"
+    git -C "$wt" add work.txt
+    git -C "$wt" "${GIT_ID[@]}" commit -q --amend --no-edit
+  fi
+  printf 'a pipeline fix\n' > "$wt/pipeline.txt"
+  git -C "$wt" add pipeline.txt
+  git -C "$wt" "${GIT_ID[@]}" commit -qm "no-mistakes(review): a pipeline fix commit"
+  git -C "$wt" rev-parse HEAD
+  git -C "$wt" checkout -q "$branch"
+}
+
+# The fixture must really be the shape under test, or every assertion below
+# passes over the ahead path instead: neither head may contain the other.
+assert_rebased_shape() {  # <worktree> <branch-head> <pr-head>
+  [ "$(git -C "$1" rev-parse HEAD)" = "$2" ] || fail "the rebase fixture moved the worker's branch"
+  if git -C "$1" merge-base --is-ancestor "$2" "$3" || git -C "$1" merge-base --is-ancestor "$3" "$2"; then
+    fail "the rebase fixture is not a rebase: one head contains the other"
+  fi
+}
+
+# THE 2026-09-23 false alarms. With several lanes landing at once the base branch
+# routinely moves while a ship validates, and the pipeline's rebase step then
+# replays the worker's commits onto the new base before it pushes. The PR head
+# holds this branch's work as NEW commits on a newer base, so neither head is an
+# ancestor of the other, and a stopped worker whose validated PR sat green and
+# open alarmed as landing-blocked. The receipt vouches for the head; that every
+# branch commit has a patch-equivalent commit in it is what proves the head
+# still carries this branch's work.
+test_a_validated_rebased_head_is_awaiting_landing() {
+  local dir work pr_head
+  dir=$(make_git_task validated-rebased)
+  wt_commit "$dir/wt" "the worker's first commit" > /dev/null
+  work=$(wt_commit "$dir/wt" "the worker's second commit")
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  assert_rebased_shape "$dir/wt" "$work" "$pr_head"
+
+  status_line "$dir" validated-rebased 'done: PR https://github.com/o/r/pull/37 checks green run=r-37'
+  task_meta "$dir" validated-rebased "pr=https://github.com/o/r/pull/37" "pr_head=$pr_head"
+  stop_agent "$dir" validated-rebased
+  receipt_for "$dir" validated-rebased 37 "$pr_head"
+
+  assert_class "a validated PR the pipeline rebased" awaiting-landing "$dir" validated-rebased
+  assert_quiet "a validated PR the pipeline rebased" "$dir" validated-rebased
+  assert_target "a validated PR the pipeline rebased" validated "$dir" validated-rebased
+  assert_detail_mentions "a validated PR the pipeline rebased" "rebased" "$dir" validated-rebased
+
+  # Nothing vouches for the same head without a receipt that names it.
+  receipt_for "$dir" validated-rebased 37 "$work"
+  assert_class "a rebased head whose receipt names the branch head" landing-blocked "$dir" validated-rebased
+  rm -f "$(fm_validation_receipt_path "$dir/state" validated-rebased)"
+  assert_class "a rebased head with no receipt" landing-blocked "$dir" validated-rebased
+
+  pass "a PR head the pipeline validated after rebasing this branch onto a newer base is awaiting landing"
+}
+
+# A receipt on a rebased head must not rescue the two things landing-blocked is
+# for: work the PR does not carry, and work the PR carries differently.
+test_a_receipt_never_rescues_a_rebased_head_missing_the_branch_work() {
+  local dir work pr_head
+  # The replay changed the content: the PR holds different work than the branch.
+  dir=$(make_git_task rebased-changed)
+  work=$(wt_commit "$dir/wt" "the worker's commit")
+  pr_head=$(pipeline_rebase "$dir/wt" changed)
+  assert_rebased_shape "$dir/wt" "$work" "$pr_head"
+  status_line "$dir" rebased-changed 'done: PR https://github.com/o/r/pull/38 checks green run=r-38'
+  task_meta "$dir" rebased-changed "pr=https://github.com/o/r/pull/38" "pr_head=$pr_head"
+  stop_agent "$dir" rebased-changed
+  receipt_for "$dir" rebased-changed 38 "$pr_head"
+  assert_class "a validated rebase whose replay changed the work" landing-blocked "$dir" rebased-changed
+  assert_watched "a validated rebase whose replay changed the work" "$dir" rebased-changed
+
+  # The branch gained a commit after the pipeline rebased it: never pushed.
+  dir=$(make_git_task rebased-then-advanced)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  work=$(wt_commit "$dir/wt" "a later commit that was never pushed")
+  assert_rebased_shape "$dir/wt" "$work" "$pr_head"
+  status_line "$dir" rebased-then-advanced 'done: PR https://github.com/o/r/pull/39 checks green run=r-39'
+  task_meta "$dir" rebased-then-advanced "pr=https://github.com/o/r/pull/39" "pr_head=$pr_head"
+  stop_agent "$dir" rebased-then-advanced
+  receipt_for "$dir" rebased-then-advanced 39 "$pr_head"
+  assert_class "a validated rebase the branch then advanced past" landing-blocked "$dir" rebased-then-advanced
+  assert_watched "a validated rebase the branch then advanced past" "$dir" rebased-then-advanced
+
+  # A merge on the branch carried a change of its own, which the rebase dropped.
+  dir=$(make_git_task rebased-merge)
+  work=$(branch_with_evil_merge "$dir/wt")
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  assert_rebased_shape "$dir/wt" "$work" "$pr_head"
+  git -C "$dir/wt" cat-file -e "$pr_head:evil.txt" 2>/dev/null \
+    && fail "the merge fixture's rebased head still carries the merge's own change"
+  status_line "$dir" rebased-merge 'done: PR https://github.com/o/r/pull/40 checks green run=r-40'
+  task_meta "$dir" rebased-merge "pr=https://github.com/o/r/pull/40" "pr_head=$pr_head"
+  stop_agent "$dir" rebased-merge
+  receipt_for "$dir" rebased-merge 40 "$pr_head"
+  assert_class "a validated rebase that dropped a merge's own change" landing-blocked "$dir" rebased-merge
+
+  pass "a validation receipt never rescues a rebased head that lacks or alters this branch's work"
+}
+
+# A branch whose history holds one ordinary commit and a merge of a side commit,
+# where the merge itself adds a change neither parent has. Prints the head.
+branch_with_evil_merge() {  # <worktree>
+  local wt=$1 branch side
+  branch=$(git -C "$wt" symbolic-ref --short HEAD)
+  wt_commit "$wt" "the worker's commit" > /dev/null
+  git -C "$wt" checkout -q --detach "$(git -C "$wt" merge-base HEAD main)"
+  printf 'side\n' > "$wt/side.txt"
+  git -C "$wt" add side.txt
+  git -C "$wt" "${GIT_ID[@]}" commit -qm "a side commit"
+  side=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" checkout -q "$branch"
+  git -C "$wt" "${GIT_ID[@]}" merge -q --no-ff --no-edit "$side"
+  printf 'resolved only in the merge\n' > "$wt/evil.txt"
+  git -C "$wt" add evil.txt
+  git -C "$wt" "${GIT_ID[@]}" commit -q --amend --no-edit
+  git -C "$wt" rev-parse HEAD
+}
+
 # The check can only move a task OUT of quiet, never into it. bin/fm-pr-check.sh
 # records pr_head only when the forge CLI supplies it - a GitLab task records
 # none BY DESIGN - so an unverifiable target is not evidence of a problem and
@@ -741,6 +882,97 @@ test_mutant_last_status_line_decides_is_red() {
   pass "MUTANT last-status-line-decides is red: recording a resolution would re-arm the alarm on landed work"
 }
 
+# MUTANT: no rebase exception - the library as it shipped before 2026-09-23.
+# The validated head the pipeline rebased reads landing-blocked again, which is
+# the verdict that raised the stale wake on two stopped workers with green PRs.
+test_mutant_no_rebase_exception_is_red() {
+  local dir pr_head got
+  dir=$(make_git_task mutant-rebased)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  status_line "$dir" mutant-rebased 'done: PR https://github.com/o/r/pull/41 checks green run=r-41'
+  task_meta "$dir" mutant-rebased "pr=https://github.com/o/r/pull/41" "pr_head=$pr_head"
+  stop_agent "$dir" mutant-rebased
+  receipt_for "$dir" mutant-rebased 41 "$pr_head"
+
+  assert_class "the real library" awaiting-landing "$dir" mutant-rebased
+  # shellcheck disable=SC2016
+  got=$(mutant_answer no-rebase-exception \
+    'if [ "$shape" = unrelated ] && _fm_awaiting' 'if false && _fm_awaiting' \
+    "$dir" mutant-rebased class)
+  [ "$got" = landing-blocked ] \
+    || fail "mutant no-rebase-exception was not red: it answered '$got' for a validated rebased head"
+
+  pass "MUTANT no-rebase-exception is red: a stopped worker's validated, rebased PR would alarm again"
+}
+
+# MUTANT: the rebase exception without the patch proof. A validated head whose
+# replay changed the work would read as ready to land.
+test_mutant_rebase_without_patch_proof_is_red() {
+  local dir pr_head got
+  dir=$(make_git_task mutant-rebase-changed)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  pr_head=$(pipeline_rebase "$dir/wt" changed)
+  status_line "$dir" mutant-rebase-changed 'done: PR https://github.com/o/r/pull/42 checks green run=r-42'
+  task_meta "$dir" mutant-rebase-changed "pr=https://github.com/o/r/pull/42" "pr_head=$pr_head"
+  stop_agent "$dir" mutant-rebase-changed
+  receipt_for "$dir" mutant-rebase-changed 42 "$pr_head"
+
+  assert_class "the real library" landing-blocked "$dir" mutant-rebase-changed
+  # shellcheck disable=SC2016
+  got=$(mutant_answer rebase-without-patch-proof \
+    '&& _fm_awaiting_landing_carries_branch "$worktree" "$pr_head" "$branch_head"; then' '; then' \
+    "$dir" mutant-rebase-changed class)
+  [ "$got" = awaiting-landing ] \
+    || fail "mutant rebase-without-patch-proof was not red: it answered '$got' for a rebase that changed the work"
+
+  pass "MUTANT rebase-without-patch-proof is red: a PR holding different work would read as ready to land"
+}
+
+# MUTANT: the rebase exception without the receipt. A rebased head nothing
+# validated would read as ready to land.
+test_mutant_rebase_without_receipt_is_red() {
+  local dir pr_head got
+  dir=$(make_git_task mutant-rebase-unvouched)
+  wt_commit "$dir/wt" "the worker's commit" > /dev/null
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  status_line "$dir" mutant-rebase-unvouched 'done: PR https://github.com/o/r/pull/43 checks green run=r-43'
+  task_meta "$dir" mutant-rebase-unvouched "pr=https://github.com/o/r/pull/43" "pr_head=$pr_head"
+  stop_agent "$dir" mutant-rebase-unvouched
+
+  assert_class "the real library" landing-blocked "$dir" mutant-rebase-unvouched
+  # shellcheck disable=SC2016
+  got=$(mutant_answer rebase-without-receipt \
+    'if [ "$shape" = unrelated ] && _fm_awaiting_landing_head_validated "$state" "$id" "$pr" "$pr_head"' \
+    'if [ "$shape" = unrelated ]' "$dir" mutant-rebase-unvouched class)
+  [ "$got" = awaiting-landing ] \
+    || fail "mutant rebase-without-receipt was not red: it answered '$got' for an unvouched rebased head"
+
+  pass "MUTANT rebase-without-receipt is red: a rebased head nothing validated would read as ready to land"
+}
+
+# MUTANT: merges admitted to the patch proof. A merge's own change is invisible
+# to patch equivalence, so a rebase that dropped it would read as ready to land.
+test_mutant_patch_proof_admits_merges_is_red() {
+  local dir pr_head got
+  dir=$(make_git_task mutant-merge)
+  branch_with_evil_merge "$dir/wt" > /dev/null
+  pr_head=$(pipeline_rebase "$dir/wt" clean)
+  status_line "$dir" mutant-merge 'done: PR https://github.com/o/r/pull/44 checks green run=r-44'
+  task_meta "$dir" mutant-merge "pr=https://github.com/o/r/pull/44" "pr_head=$pr_head"
+  stop_agent "$dir" mutant-merge
+  receipt_for "$dir" mutant-merge 44 "$pr_head"
+
+  assert_class "the real library" landing-blocked "$dir" mutant-merge
+  # shellcheck disable=SC2016
+  got=$(mutant_answer patch-proof-admits-merges \
+    '[ -z "$merges" ] || return 1' ':' "$dir" mutant-merge class)
+  [ "$got" = awaiting-landing ] \
+    || fail "mutant patch-proof-admits-merges was not red: it answered '$got' for a rebase that dropped a merge's change"
+
+  pass "MUTANT patch-proof-admits-merges is red: a change made only in a merge could be dropped unseen"
+}
+
 test_finished_work_whose_agent_is_still_alive_is_awaiting_landing
 test_a_deliberately_stopped_agent_on_finished_work_is_awaiting_landing
 test_a_stopped_agent_with_a_recorded_pr_is_awaiting_landing
@@ -755,6 +987,8 @@ test_a_pr_head_left_behind_by_the_branch_is_landing_blocked
 test_an_unvalidated_pr_head_ahead_of_the_branch_is_landing_blocked
 test_a_validated_ahead_head_is_awaiting_landing
 test_a_receipt_never_rescues_a_behind_or_unrelated_head
+test_a_validated_rebased_head_is_awaiting_landing
+test_a_receipt_never_rescues_a_rebased_head_missing_the_branch_work
 test_an_unverifiable_landing_target_stays_awaiting_landing
 test_absent_records_read_as_none
 test_every_entry_point_is_safe_under_set_eu
@@ -765,3 +999,7 @@ test_mutant_recorded_pr_is_sufficient_is_red
 test_mutant_ahead_without_receipt_is_red
 test_mutant_receipt_ignores_shape_is_red
 test_mutant_last_status_line_decides_is_red
+test_mutant_no_rebase_exception_is_red
+test_mutant_rebase_without_patch_proof_is_red
+test_mutant_rebase_without_receipt_is_red
+test_mutant_patch_proof_admits_merges_is_red

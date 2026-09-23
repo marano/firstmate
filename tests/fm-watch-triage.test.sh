@@ -4531,18 +4531,22 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
 # receipt: a validated ahead head with a dead endpoint raises NO stale wake, while
 # the same task with an unvouched ahead head, or a behind head, STILL does - and the
 # alarm that fires leaves a triage-log line naming the landing class that decided it.
-landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind> -> key
+landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead|behind|rebased> -> key
   local case_dir=$1 task_id=$2 num=$3 receipt=$4 shape=$5 base pr_head
   local state_dir="$case_dir/state" win="test:fm-$task_id"
   fm_git_worktree "$case_dir/repo" "$case_dir/wt" "fm/$task_id" >/dev/null 2>&1 \
     || fail "could not build $task_id's worktree"
   base=$(git -C "$case_dir/wt" rev-parse HEAD)
-  git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
-  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  if [ "$shape" = rebased ]; then
+    pr_head=$(landing_rebased_head "$case_dir/wt" "fm/$task_id") || fail "could not rebase $task_id's branch"
+  else
+    git -C "$case_dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || fail "could not commit for $task_id"
+    pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fi
   if [ "$shape" = ahead ]; then
     git -C "$case_dir/wt" reset --hard -q "$base"
-  else
+  elif [ "$shape" = behind ]; then
     pr_head=$base
   fi
   if [ "$receipt" = yes ]; then
@@ -4554,6 +4558,30 @@ landing_ahead_task() {  # <dir> <id> <pr-number> <receipt: yes|no> <shape: ahead
     "done: PR https://github.com/o/r/pull/$num checks green run=r$num" "worktree=$case_dir/wt" \
     "pr=https://github.com/o/r/pull/$num" "pr_head=$pr_head"
   landing_stop_agent "$state_dir" "$task_id"
+}
+
+# The worker commits its work, the base branch moves on, and the pipeline's rebase
+# step replays the work onto the new base and adds a fix commit, leaving the
+# worker's branch where it was. Prints the rebased PR head, which neither
+# contains nor is contained by the branch head.
+landing_rebased_head() {  # <worktree> <branch>
+  local wt=$1 branch=$2 base work pr_head
+  local -a rebase_git_id=(-c user.name='Firstmate Tests' -c user.email='tests@example.invalid')
+  base=$(git -C "$wt" rev-parse HEAD)
+  printf 'the work\n' > "$wt/work.txt"
+  git -C "$wt" add work.txt && git -C "$wt" "${rebase_git_id[@]}" commit -qm "the worker's commit" || return 1
+  work=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" checkout -q --detach "$base" || return 1
+  printf 'the base moved on\n' > "$wt/base.txt"
+  git -C "$wt" add base.txt && git -C "$wt" "${rebase_git_id[@]}" commit -qm 'the base branch moved on' || return 1
+  git -C "$wt" "${rebase_git_id[@]}" cherry-pick "$work" > /dev/null || return 1
+  git -C "$wt" "${rebase_git_id[@]}" commit -q --allow-empty -m 'no-mistakes(review): a pipeline fix commit' || return 1
+  pr_head=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" checkout -q "$branch" || return 1
+  if git -C "$wt" merge-base --is-ancestor "$work" "$pr_head" || git -C "$wt" merge-base --is-ancestor "$pr_head" "$work"; then
+    return 1
+  fi
+  printf '%s' "$pr_head"
 }
 
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
@@ -4590,6 +4618,52 @@ test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
   grep -Fx "stale: $window" "$out" >/dev/null || fail "the behind head printed the wrong wake: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the behind leg's watcher stop"
   pass "a validated ahead head on a stopped worker raises no stale wake; an unvouched or behind head still does, with a log line"
+}
+
+# THE 2026-09-23 false alarms. The base branch moved while each ship validated,
+# so the pipeline's rebase step replayed the worker's commits onto the new base
+# before pushing, and the PR head was neither ahead nor behind the local branch.
+# Two workers stopped with their PRs green and open alarmed with a bare
+# "stale: <window>" as landing-blocked, within minutes of the stop. A validated
+# rebased head on a stopped worker raises NO stale wake, while the same records
+# without the receipt, and a genuinely wedged worker - no stop record, work still
+# open - behind those very records, STILL do.
+test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms() {
+  local dir state fakebin out capture window key pid
+  # QUIET: validated rebased head, agent stopped, dead endpoint (a bare shell).
+  dir=$(make_case landing-rebased-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-rebased-ok"
+  key=$(landing_ahead_task "$dir" rebased-ok 44 yes rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 3 "a stopped worker whose PR head the pipeline validated after rebasing it"
+
+  # LOUD 1: the same task with no receipt vouching for the rebased head.
+  dir=$(make_case landing-rebased-unvouched); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-rebased-unvouched"
+  key=$(landing_ahead_task "$dir" rebased-unvouched 45 no rebased)
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an unvouched rebased head on a stopped worker never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the unvouched rebased head printed the wrong wake: $(cat "$out")"
+  grep -F "surfaced stale" "$state/.watch-triage.log" | grep -F "landing=landing-blocked" | grep -F "$window" >/dev/null \
+    || fail "the unvouched rebased alarm left no triage-log line naming the landing class: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unvouched rebased leg's watcher stop"
+
+  # LOUD 2: a genuine wedge behind the same validated records - no stop record,
+  # and the worker's last word is open work, not done.
+  dir=$(make_case landing-rebased-wedged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-rebased-wedged"
+  key=$(landing_ahead_task "$dir" rebased-wedged 46 yes rebased)
+  rm -f "$state/rebased-wedged.agent-stopped"
+  printf 'working: still addressing review feedback\n' > "$state/rebased-wedged.status"
+  printf '%s' "$(seen_sig "$state/rebased-wedged.status")" > "$state/.seen-rebased-wedged_status"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a wedged worker behind a validated rebased head never alarmed"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the wedged worker printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the wedged leg's watcher stop"
+  pass "a validated rebased head on a stopped worker raises no stale wake; an unvouched one and a real wedge still do"
 }
 
 # --- a declared wait survives the resolutions logged after it ----------------
@@ -6574,6 +6648,7 @@ test_status_declared_line_classifier
 test_a_declared_wait_survives_the_resolutions_logged_after_it
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
+test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
