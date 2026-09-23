@@ -86,7 +86,7 @@ The supervisor guard selects only the detected primary harness's signature rathe
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
-Text still arriving is not a swallowed Enter: while the composer provably holds a growing leading part of the typed text, the harness is still taking the keystrokes with the Enter queued behind them, so the core waits instead of pressing Enter again, which would submit a second time.
+Text still arriving is not a swallowed Enter: while the composer provably holds a growing leading part of the typed text, the harness is still taking the keystrokes with the Enter queued behind them, so the core waits instead of pressing Enter again, which would submit a second time. A read that shows no more of that text - a harness repainting its composer mid-arrival - gets one re-read before the wait ends, so a transient repaint cannot be mistaken for arrival having stopped.
 Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).
