@@ -4305,6 +4305,7 @@ test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm() {
 #   - fold resolutions alone (status_outcome_line): the answered decision.
 #   - fold a decision whatever key the resolution names: the other-key case.
 #   - fold back to the last paused line: the other-key and superseded cases.
+#   - never fold a captain-held line: both answered-hold cases.
 test_status_declared_line_classifier() {
   local dir f got
   dir="$TMP_ROOT/status-declared-line"; mkdir -p "$dir"; f="$dir/task.status"
@@ -4337,6 +4338,14 @@ test_status_declared_line_classifier() {
     'needs-decision [key=shape]: asked again'
   declared_is 'captain-held [key=shape]: held for the captain' 'a captain-held transfer' \
     'needs-decision [key=shape]: which way' 'captain-held [key=shape]: held for the captain'
+  declared_is 'working: dispatched the audit' 'a captain hold the captain answered' \
+    'working: dispatched the audit' 'captain-held [key=route]: tracked by task-decision-route' \
+    'resolved [key=route]: captain chose the direct path'
+  declared_is 'paused: waiting on CI' 'a held decision the captain answered after the wait' \
+    'paused: waiting on CI' 'needs-decision [key=shape]: which way' \
+    'captain-held [key=shape]: held for the captain' 'resolved [key=shape]: this way'
+  declared_is 'captain-held [key=shape]: held for the captain' 'a captain hold answered under another key' \
+    'captain-held [key=shape]: held for the captain' 'resolved [key=other-call]: done'
   unset -f declared_is
   pass "status_declared_line folds resolutions and the decisions they closed, and nothing else"
 }
