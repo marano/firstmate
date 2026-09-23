@@ -2792,25 +2792,38 @@ test_registration_names_why_the_pr_waits() {
 # failure, or bin/fm-pr-merge.sh re-binding an already-recorded head) must still
 # publish the ready line: the hold reason it carries can have changed since the
 # first registration, and the captain is never told twice for the same reason.
-test_same_url_reregistration_still_publishes_the_ready_line() {
-  local dir state replies url
+test_same_url_reregistration_retries_a_failed_ready_line() {
+  local dir state replies url line
   url=https://github.com/o/r/pull/1
   dir=$(make_case same-url-reregistration)
   state="$dir/home/state"
   replies="$state/parent-replies.status"
-  seed_secondmate_home "$dir"
+  line="done [key=child-pr-task-a]: child task-a PR ready: $url"
   write_task_meta "$dir" task-a
 
+  # The parent binding is unusable on the first registration (a stand-in for
+  # any transient publish failure), so the ready line never reaches the
+  # channel even though the PR itself records fine.
+  printf '%s\n' mate-x > "$dir/home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=bogus\n' \
+    > "$dir/home/.fm-secondmate-parent"
   run_check_entry "$dir" task-a "$url" > /dev/null 2> "$dir/first.err" \
     || fail "same-url-reregistration: first registration failed: $(cat "$dir/first.err")"
-  [ "$(grep -c -F "done [key=child-pr-task-a]: child task-a PR ready: $url" "$replies")" -eq 1 ] \
-    || fail "same-url-reregistration: first registration did not publish the ready line"
+  grep -q 'actionable:' "$dir/first.err" \
+    || fail "same-url-reregistration: an unusable parent binding was not reported actionable"
+  [ ! -e "$replies" ] \
+    || fail "same-url-reregistration: the ready line reached the channel despite an unusable binding"
 
+  # The binding is repaired, and re-registering the same URL - a natural retry
+  # after the captain notices the actionable failure - must still deliver the
+  # ready line: the earlier RECORDED_URL match must never stand in for proof
+  # that this line was actually delivered.
+  seed_secondmate_home "$dir"
   run_check_entry "$dir" task-a "$url" > /dev/null 2> "$dir/second.err" \
     || fail "same-url-reregistration: re-registering the same URL failed: $(cat "$dir/second.err")"
-  [ "$(grep -c -F "done [key=child-pr-task-a]: child task-a PR ready: $url" "$replies")" -eq 2 ] \
-    || fail "same-url-reregistration: re-registering the same URL did not publish the ready line again: $(cat "$replies")"
-  pass "re-registering the same PR URL still publishes the ready line"
+  [ "$(grep -c -F "$line" "$replies")" -eq 1 ] \
+    || fail "same-url-reregistration: the repaired retry did not publish the ready line: $(cat "$replies" 2>/dev/null)"
+  pass "re-registering the same PR URL retries a ready line that failed to publish"
 }
 
 test_valid_recording_and_merge_derivation
@@ -2829,4 +2842,4 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_registration_names_why_the_pr_waits
-test_same_url_reregistration_still_publishes_the_ready_line
+test_same_url_reregistration_retries_a_failed_ready_line

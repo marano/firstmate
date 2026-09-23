@@ -249,8 +249,10 @@ MERGE_HOLD_SUMMARY=$(fm_merge_hold_summary "$MERGE_HOLD_REASONS")
 # silent no-op there. The poll is armed either way; a channel that cannot be
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still
 # delivers the child's own ready line on the next supervision poll. The line
-# carries the hold reason, which can change between registrations, so
-# every registration call publishes it again.
+# carries the hold reason, which can change between registrations; every
+# registration call publishes it, and the channel's own at-most-once-by-
+# content dedup absorbs an unchanged repeat while still delivering a retry
+# after a publish that failed to land.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -258,7 +260,7 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 [ -z "$MERGE_HOLD_SUMMARY" ] || READY_LINE="$READY_LINE held: $(fm_parent_channel_clean_note "$MERGE_HOLD_SUMMARY")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" always || READY_RC=$?
+fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
