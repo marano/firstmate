@@ -143,6 +143,10 @@ make_case() {
 # every existing fixture builder call site having to name one.
 GH_TEST_HEAD_BRANCH=fm/example-branch
 
+# The merge commit every merged GitHub fixture reports, which keys the base
+# branch CI watch a confirmed merge arms.
+GH_TEST_MERGE_COMMIT=c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00
+
 # Live GitHub JSON for the pre-merge verify, plus gh-axi for the
 # post-merge fallback view. Merge itself is `gh pr merge --match-head-commit`.
 # Args: case_dir head_sha
@@ -295,6 +299,12 @@ case "${1:-} ${2:-}" in
         : > "${FM_TEST_GH_DELETE_ATTEMPTED:-/dev/null}"
         [ ! -f "${FM_TEST_GH_DELETE_BRANCH_FAILS:-}" ] || exit 1
         : > "${FM_TEST_GH_DELETE_BRANCH_CALLED:-/dev/null}"
+        exit 0
+        ;;
+      # The merged pull request's merge commit and base branch, read by
+      # bin/fm-main-ci.sh to arm the base branch CI watch after a merge.
+      *"/pulls/"*merge_commit_sha*)
+        printf 'true\t%s\tmain\n' "$FM_TEST_GH_MERGE_COMMIT"
         exit 0
         ;;
       *"/pulls?"*)
@@ -609,6 +619,7 @@ run_pr_merge() {
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
+  FM_TEST_GH_MERGE_COMMIT="$GH_TEST_MERGE_COMMIT" \
   FM_TEST_AWAY_MUTATE_AT_MERGE="${FM_TEST_AWAY_MUTATE_AT_MERGE:-}" \
   FM_TEST_AWAY_MUTATE_OUT="$case_dir/away-mutate-output" \
   FM_TEST_AWAY_MUTATE_RC="$case_dir/away-mutate-rc" \
@@ -804,6 +815,57 @@ test_github_merged_outcome_is_verified() {
   assert_grep 'api graphql' "$case_dir/gh.log" \
     "github-verified-merged: the PR outcome was not read back after merging"
   pass "fm-pr-merge verifies a genuinely merged GitHub pull request"
+}
+
+# Mutant: arm-not-called. Only a merge the forge confirmed arms the base branch
+# CI watch; tests/fm-main-ci.test.sh owns what the watch then does.
+test_github_confirmed_merge_arms_the_base_branch_ci_watch() {
+  local case_dir rc watch="main-ci-$GH_TEST_MERGE_COMMIT"
+  case_dir=$(make_case github-arms-main-ci)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1212121212121212121212121212121212121212
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "github-arms-main-ci: a merged PR should succeed"
+  assert_present "$case_dir/state/$watch.check.sh" \
+    "github-arms-main-ci: the confirmed merge armed no base branch CI watch"
+  assert_present "$case_dir/state/$watch.check-trust" \
+    "github-arms-main-ci: the base branch CI watch was not registered"
+  assert_grep "armed: main CI watch on example/repo at $GH_TEST_MERGE_COMMIT" "$case_dir/stdout" \
+    "github-arms-main-ci: arming the watch was not reported"
+
+  case_dir=$(make_case github-failed-merge-arms-nothing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir"
+  write_github_outcome "$case_dir" OPEN false false main
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-failed-merge-arms-nothing: the failed merge should fail"
+  assert_absent "$case_dir/state/$watch.check.sh" \
+    "github-failed-merge-arms-nothing: a failed merge armed a base branch CI watch"
+
+  case_dir=$(make_case github-queued-merge-arms-nothing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1313131313131313131313131313131313131313
+  write_github_outcome "$case_dir" OPEN false true main
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/64 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "github-queued-merge-arms-nothing: a queued merge should succeed"
+  assert_absent "$case_dir/state/$watch.check.sh" \
+    "github-queued-merge-arms-nothing: a merge still in the queue armed a base branch CI watch"
+  pass "only a confirmed GitHub merge arms the base branch CI watch on its merge commit"
 }
 
 test_github_verified_merge_requires_poll_recording() {
@@ -3095,6 +3157,7 @@ test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
 test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
+test_github_confirmed_merge_arms_the_base_branch_ci_watch
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
 test_github_queue_required_refusal_names_retry_flags

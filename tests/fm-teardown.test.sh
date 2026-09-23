@@ -881,6 +881,79 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+# The base branch CI watch a merge arms (bin/fm-main-ci.sh) must outlive the
+# cleanup of the task that merged, because firstmate cleans up a merged task
+# within minutes and the base branch run it watches takes longer than that.
+# Mutant: task-scoped-watch - the watch is named after the task, so this
+# cleanup removes it and the later red run wakes nobody.
+test_main_ci_watch_survives_teardown_and_wakes_on_red() {
+  local case_dir rc pr_head cibin armed check out
+  local merge_sha=f902a5ff000000000000000000000000000000aa
+  local red_url=https://github.com/example/repo/actions/runs/401
+  case_dir=$(make_case main-ci-survives-teardown)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  # The forge the watch reads, kept off teardown's own PATH so its stubs stay
+  # exactly those the other cases use: the merged pull request, and the run
+  # list filtered by head_sha the way the REST API filters it.
+  cibin="$case_dir/cibin"
+  mkdir -p "$cibin"
+  printf '{"merged":true,"merge_commit_sha":"%s","base":{"ref":"main"}}\n' "$merge_sha" > "$case_dir/pull.json"
+  printf '[]\n' > "$case_dir/runs.json"
+  cat > "$cibin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = api ] || exit 1
+shift
+path= jq_expr=. head_sha=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -X) shift 2 ;;
+    -f|-F) case "$2" in head_sha=*) head_sha=${2#head_sha=} ;; esac; shift 2 ;;
+    --jq) jq_expr=$2; shift 2 ;;
+    *) path=$1; shift ;;
+  esac
+done
+case "$path" in
+  repos/example/repo/pulls/7) jq -r "$jq_expr" "$FM_TEST_CI_DIR/pull.json" ;;
+  repos/example/repo/actions/runs)
+    jq --arg sha "$head_sha" '[.[] | select($sha == "" or .head_sha == $sha)] | {workflow_runs: .}' \
+      "$FM_TEST_CI_DIR/runs.json" | jq -r "$jq_expr" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$cibin/gh"
+
+  PATH="$cibin:$PATH" FM_TEST_CI_DIR="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-main-ci.sh" arm https://github.com/example/repo/pull/7 \
+    > "$case_dir/arm.out" 2> "$case_dir/arm.err" || fail "main-ci-survives-teardown: arm failed"
+  armed=$(sed -n 's/^armed: .* (state\/\(.*\)\.check\.sh)$/\1/p' "$case_dir/arm.out")
+  [ -n "$armed" ] || fail "main-ci-survives-teardown: no watch was armed: $(cat "$case_dir/arm.out" "$case_dir/arm.err")"
+  check="$case_dir/state/$armed.check.sh"
+  assert_present "$check" "main-ci-survives-teardown: the armed watch is missing before cleanup"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "main-ci-survives-teardown: cleanup of the merged task should succeed"
+  assert_absent "$case_dir/state/task-x1.meta" "main-ci-survives-teardown: the task record survived its cleanup"
+  assert_present "$check" "main-ci-survives-teardown: cleaning up the merged task removed its base branch CI watch"
+  assert_present "$case_dir/state/$armed.check-trust" \
+    "main-ci-survives-teardown: cleaning up the merged task removed the watch's registration"
+
+  printf '[{"head_sha":"%s","head_branch":"main","event":"push","status":"completed","conclusion":"failure","html_url":"%s","name":"CI"}]\n' \
+    "$merge_sha" "$red_url" > "$case_dir/runs.json"
+  out=$(PATH="$cibin:$PATH" FM_TEST_CI_DIR="$case_dir" bash "$check" 2>/dev/null)
+  assert_contains "$out" "main CI red after merge" "main-ci-survives-teardown: the red run after cleanup did not wake"
+  assert_contains "$out" "$red_url" "main-ci-survives-teardown: the wake did not name the failing run"
+  assert_absent "$check" "main-ci-survives-teardown: the watch did not retire after reporting red"
+  pass "the base branch CI watch survives cleanup of the merged task and still wakes on a red run"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -3811,6 +3884,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_main_ci_watch_survives_teardown_and_wakes_on_red
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
