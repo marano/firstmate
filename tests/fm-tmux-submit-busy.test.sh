@@ -379,13 +379,26 @@ take() {
   printf '%s' "$buf" > "$D/buf"
 }
 capture() { printf '❯ %s\n' "$(cat "$D/buf")"; }
+torn_capture() {
+  local n buf
+  n=0
+  [ ! -f "$D/chained-reads" ] || n=$(cat "$D/chained-reads")
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$D/chained-reads"
+  buf=$(cat "$D/buf")
+  if [ -n "${FM_FAKE_TEAR_READ:-}" ] && [ "$n" -eq "$FM_FAKE_TEAR_READ" ]; then
+    printf '❯ %s\n' "${buf:0:5}"
+  else
+    printf '❯ %s\n' "$buf"
+  fi
+}
 case "${1:-}" in
   __tick) take; exit 0 ;;
   display-message)
     chained=0
     for a in "$@"; do [ "$a" != ';' ] || chained=1; done
     printf '0\n'
-    [ "$chained" = 0 ] || capture
+    [ "$chained" = 0 ] || torn_capture
     exit 0 ;;
   capture-pane) capture; exit 0 ;;
   send-keys)
@@ -452,6 +465,27 @@ test_text_still_arriving_is_not_a_swallowed_enter() {
   pass "fm_tmux_submit_core: a composer still taking the typed text gets one Enter, and the submit is confirmed"
 }
 
+test_repaint_mid_arrival_does_not_end_the_wait() {
+  local dir vfile text i
+  dir="$TMP_ROOT/repaint-mid-arrival"
+  mkdir -p "$dir"
+  make_arriving_mock "$dir" >/dev/null
+  vfile="$dir/verdict"
+  text="fm steer: review the pending PR and report it ok"
+  [ "${#text}" -eq 48 ] || fail "fixture: the steer text must be 48 characters, is ${#text}"
+  FM_FAKE_TEAR_READ=3 arriving_submit "$dir" 4 "$vfile" "win" "$text" 3 0.01 0.01
+  i=0
+  while [ "$i" -lt 16 ]; do
+    FM_FAKE_ARRIVE_DIR="$dir" FM_FAKE_TAKE=4 "$dir/fakebin/tmux" __tick
+    i=$((i + 1))
+  done
+  [ "$(wc -l < "$dir/submitted" | tr -d ' ')" -eq 1 ] && [ "$(cat "$dir/submitted")" = "$text" ] \
+    || fail "a repaint mid-arrival must not end the wait; it submitted: $(sed 's/^/[/; s/$/]/' "$dir/submitted" | tr '\n' ' ')"
+  [ "$(grep -c '^Enter$' "$dir/sent")" -eq 1 ] \
+    || fail "a repaint mid-arrival must not be answered with another Enter, sent $(grep -c '^Enter$' "$dir/sent")"
+  pass "fm_tmux_submit_core: a repaint mid-arrival does not end the wait"
+}
+
 test_whole_text_with_swallowed_enter_still_retries() {
   local dir vfile
   dir="$TMP_ROOT/text-whole-swallowed"
@@ -468,6 +502,7 @@ test_whole_text_with_swallowed_enter_still_retries() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+test_repaint_mid_arrival_does_not_end_the_wait
 test_text_still_arriving_is_not_a_swallowed_enter
 test_whole_text_with_swallowed_enter_still_retries
 test_wrapped_continuation_retries_swallowed_enter

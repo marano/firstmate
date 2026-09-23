@@ -248,11 +248,15 @@ fm_pane_is_busy() {  # <target> [harness]
 # (fm_composer_held_text_var), the loop waits instead of reading a verdict,
 # and grants one more interval once that text completes, for the Enter queued
 # right behind it. Growth is bounded by the text's length, so the wait ends.
+# A read that shows no more of text still arriving - less of it, or none the
+# proof can read - gets one re-read before the wait ends: a harness repainting
+# its composer shows only part of the text for a moment, and ending the wait
+# on that read pressed a second Enter behind text that was still arriving.
 # The verdict is read only after that proof, never before it: the Enter can
 # land between two reads, and a verdict older than the proof is stale.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [typed-text]
   local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} text=${5:-} i=0 j state busy_state
-  local full=0 taken=0 held=0
+  local full=0 taken=0 held=0 reread=0
   if [ -n "$text" ]; then
     full=$text
     fm_composer_squash_var full
@@ -261,9 +265,17 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    while [ "$full" -gt 0 ] && fm_tmux_composer_held_text_var held "$target" "$text" \
-      && [ "$held" -gt "$taken" ] && [ "$taken" -lt "$full" ]; do
-      taken=$held
+    reread=0
+    while [ "$full" -gt 0 ]; do
+      if fm_tmux_composer_held_text_var held "$target" "$text" \
+        && [ "$held" -gt "$taken" ] && [ "$taken" -lt "$full" ]; then
+        taken=$held
+        reread=0
+      elif [ "$taken" -gt 0 ] && [ "$taken" -lt "$full" ] && [ "$reread" -eq 0 ]; then
+        reread=1
+      else
+        break
+      fi
       sleep "$sleep_s"
     done
     state=$(fm_tmux_composer_state "$target")
