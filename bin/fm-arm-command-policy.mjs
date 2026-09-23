@@ -47,9 +47,19 @@ function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
+// Raw-text fallback for commands the structured analysis could not fully parse.
+// It matches an invocation SHAPE - a kill-family word in command position whose
+// own argument segment names fm-watch - never the two words anywhere in the
+// text, so quoted prose and unrelated compound commands pass.
+const BROAD_KILL_COMMAND_POSITION = String.raw`(?:^|[;&|(){}\n`+"`"+String.raw`]|\$\(|\b(?:do|then|else|elif|if|while|until|time|sudo|exec|command|nohup|xargs|env)[ \t]+)[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*(?:\S*/)?(?:pkill|killall|kill)\b([^;&|\n]*)`;
+
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
-  return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+  if (!/fm-watch/.test(normalized)) return false;
+  for (const match of normalized.matchAll(new RegExp(BROAD_KILL_COMMAND_POSITION, "g"))) {
+    if (/fm-watch/.test(match[1])) return true;
+  }
+  return false;
 }
 
 function normalizeLineContinuations(source) {
