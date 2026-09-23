@@ -221,6 +221,7 @@ test_direct_policy_contract() {
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
   assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
   assert_policy broad-kill-loop-sudo-killall $'deny\tbroad-watcher-kill' 'while true; do sudo killall fm-watch.sh; done'
+  assert_policy broad-kill-loop-pgrep-xargs $'deny\tbroad-watcher-kill' 'while true; do pgrep -f fm-watch | xargs kill -9; done'
   assert_policy broad-kill-loop-kill-second-line $'deny\tbroad-watcher-kill' $'do\nkill -9 $(pgrep -f fm-watch)'
   assert_policy broad-kill-compound-after-unrelated $'deny\tbroad-watcher-kill' 'for i in 1; do echo x; done; pkill -f bin/fm-watch.sh'
   assert_policy compound-unrelated-stop-passes allow 'for i in 1; do echo x; done; kill 1; grep fm-watch f'

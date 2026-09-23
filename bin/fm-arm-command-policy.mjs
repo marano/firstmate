@@ -59,7 +59,7 @@ function rawMentionsBroadKill(command) {
   for (const match of normalized.matchAll(new RegExp(BROAD_KILL_COMMAND_POSITION, "g"))) {
     if (/fm-watch/.test(match[1])) return true;
   }
-  return false;
+  return /(?:^|[;&|(){}\n`]|\b(?:do|then|else|elif|if|while|until)[ \t]+)[ \t]*(?:\S*\/)?pgrep\b[^;&|\n]*fm-watch[^;&|\n]*\|[ \t]*xargs\b[^;&|\n]*\b(?:\S*\/)?kill\b/.test(normalized);
 }
 
 function normalizeLineContinuations(source) {
