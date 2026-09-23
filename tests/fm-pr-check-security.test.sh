@@ -2788,6 +2788,31 @@ test_registration_names_why_the_pr_waits() {
   pass "registration names why the PR waits, and names nothing when nothing holds it"
 }
 
+# A same-URL re-registration (a retry after a transient parent-channel publish
+# failure, or bin/fm-pr-merge.sh re-binding an already-recorded head) must still
+# publish the ready line: the hold reason it carries can have changed since the
+# first registration, and the captain is never told twice for the same reason.
+test_same_url_reregistration_still_publishes_the_ready_line() {
+  local dir state replies url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case same-url-reregistration)
+  state="$dir/home/state"
+  replies="$state/parent-replies.status"
+  seed_secondmate_home "$dir"
+  write_task_meta "$dir" task-a
+
+  run_check_entry "$dir" task-a "$url" > /dev/null 2> "$dir/first.err" \
+    || fail "same-url-reregistration: first registration failed: $(cat "$dir/first.err")"
+  [ "$(grep -c -F "done [key=child-pr-task-a]: child task-a PR ready: $url" "$replies")" -eq 1 ] \
+    || fail "same-url-reregistration: first registration did not publish the ready line"
+
+  run_check_entry "$dir" task-a "$url" > /dev/null 2> "$dir/second.err" \
+    || fail "same-url-reregistration: re-registering the same URL failed: $(cat "$dir/second.err")"
+  [ "$(grep -c -F "done [key=child-pr-task-a]: child task-a PR ready: $url" "$replies")" -eq 2 ] \
+    || fail "same-url-reregistration: re-registering the same URL did not publish the ready line again: $(cat "$replies")"
+  pass "re-registering the same PR URL still publishes the ready line"
+}
+
 test_valid_recording_and_merge_derivation
 test_registering_a_second_pr_never_drops_a_live_merge_watch
 test_a_merged_pr_may_be_followed_by_the_next
@@ -2804,3 +2829,4 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_registration_names_why_the_pr_waits
+test_same_url_reregistration_still_publishes_the_ready_line

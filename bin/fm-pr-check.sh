@@ -134,13 +134,11 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 # Read under the record lock, so no other recording can slip in between this
 # verdict and the rewrite below.
 RECORDED_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-RECORDED_SAME=0
 if [ -n "$RECORDED_URL" ] && [ "$REPLACE" = 0 ]; then
   RECORDED_REPORTED=0
   if fm_pr_url_parse "$RECORDED_URL"; then
     if [ "$FM_PR_URL" = "$URL" ]; then
       RECORDED_REPORTED=same
-      RECORDED_SAME=1
     elif fm_pr_poll_merge_already_notified "$STATE" "$ID" \
       "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; then
       RECORDED_REPORTED=1
@@ -252,22 +250,19 @@ MERGE_HOLD_SUMMARY=$(fm_merge_hold_summary "$MERGE_HOLD_REASONS")
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still
 # delivers the child's own ready line on the next supervision poll. The line
 # carries the hold reason, which can change between registrations, so
-# re-registering the PR already recorded does not publish it again: the parent
-# was told once, and a second ready line for one PR would read as new work.
+# every registration call publishes it again.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 [ -z "$MERGE_HOLD_SUMMARY" ] || READY_LINE="$READY_LINE held: $(fm_parent_channel_clean_note "$MERGE_HOLD_SUMMARY")"
-if [ "$RECORDED_SAME" = 0 ]; then
-  READY_RC=0
-  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
-  case "$READY_RC" in
-    0|1) ;;
-    *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
-  esac
-fi
+READY_RC=0
+fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+case "$READY_RC" in
+  0|1) ;;
+  *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
+esac
 if [ -n "$MERGE_HOLD_REASONS" ]; then
   printf '%s\n' "$MERGE_HOLD_REASONS" | while IFS='	' read -r _kind text; do
     [ -n "$text" ] || continue
