@@ -1128,17 +1128,33 @@ pe_register "$HR" lavish race-src -- "$RACE_BLOCKER" "$RACE_LOG" "$RACE_TRIGGER"
 printf '%s\n%s\nold-token\nold-identity\n' "$TMP_ROOT/gone-home" 999999 > "$FM_PROCEVENT_CLAIM_ROOT/race-src.claim"
 chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/race-src.claim"
 race_pids=()
-for _ in $(seq 1 24); do
-  pe "$HR" start race-src >/dev/null &
+for race_i in $(seq 1 24); do
+  { pe "$HR" start race-src >/dev/null; : > "$TMP_ROOT/race-decided.$race_i"; } &
   race_pids+=("$!")
 done
-# This fixture starts 24 concurrent contenders, unlike this file's other
-# wait_for calls, which start at most a couple. Only one needs to win the
-# reclaim, but on a loaded machine even that one contender's turn can be
-# delayed well past the default 10s budget by CPU contention among the other
-# 23, which is unrelated to how quickly the reclaim itself resolves.
-wait_for "$RACE_LOG" 300 || fail "no contender acquired the stale claim"
-sleep 0.5
+# All 24 contenders queue on one source lock, and the winner takes that lock
+# again to launch after claiming, so its run can wait behind most of the 23
+# refusals. How long that takes grows with the contender count and the load, so
+# no fixed budget holds; the wait follows the contenders' own progress instead.
+# It ends once every loser has decided, reds at once if all 24 decided and none
+# ran, and bounds only a stall in which no contender decides and nothing runs.
+race_progress=-1
+while :; do
+  race_decided=$(find "$TMP_ROOT" -maxdepth 1 -name 'race-decided.*' | wc -l | tr -d ' ')
+  race_runs=0
+  [ ! -f "$RACE_LOG" ] || race_runs=$(wc -l < "$RACE_LOG" | tr -d ' ')
+  [ "$race_runs" -ge 2 ] && break
+  [ "$race_runs" -ge 1 ] && [ "$race_decided" -ge 23 ] && break
+  [ "$race_decided" -lt 24 ] \
+    || fail "no contender acquired the stale claim: all 24 finished and none ran"
+  if [ $((race_decided + race_runs)) -gt "$race_progress" ]; then
+    race_progress=$((race_decided + race_runs))
+    race_stall=$((SECONDS + 30))
+  fi
+  [ "$SECONDS" -lt "$race_stall" ] \
+    || fail "the stale-claim race stalled with $race_decided of 24 contenders decided and $race_runs runs"
+  sleep 0.1
+done
 [ "$(wc -l < "$RACE_LOG" | tr -d ' ')" = 1 ] || fail "stale-claim race started more than one runner"
 : > "$RACE_TRIGGER"
 for race_pid in "${race_pids[@]}"; do wait "$race_pid" 2>/dev/null || true; done
