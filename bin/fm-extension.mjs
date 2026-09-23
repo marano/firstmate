@@ -922,6 +922,7 @@ function childEnvironment(binding, statePath = "") {
 }
 
 let activeInvocation = null;
+let activeProcessEventWorker = null;
 let terminatingForSignal = false;
 let signalCleanupFailureHold = null;
 let activeLifecycleLock = null;
@@ -1452,11 +1453,27 @@ async function runExtensionProcess(home, record, verb, request, timeoutMs, state
   return parseStrictJson(Buffer.concat(stdout), `extension ${verb} response`);
 }
 
+// A public process-event host runs its invocation in a lifecycle-locked worker,
+// so the invocation group belongs to that worker, not to this process. Pass the
+// interruption on and exit only after the worker has finalized its group and
+// exited: exiting first reported an interrupted invocation while its package
+// group, and the home's lifecycle lock, stayed live until the invocation timed
+// out. Retirement and binding workers are deliberately not interrupted; they own
+// the lifecycle lock for their full mutation even when their caller dies.
+async function interruptProcessEventWorker(signal) {
+  const worker = activeProcessEventWorker;
+  if (!worker || worker.exitCode !== null || worker.signalCode !== null) return;
+  const exited = new Promise((resolve) => worker.once("close", resolve));
+  worker.kill(signal);
+  await exited;
+}
+
 async function handleSignal(signal) {
   if (terminatingForSignal) return;
   terminatingForSignal = true;
   try {
     await finalizeInvocation(activeInvocation);
+    await interruptProcessEventWorker(signal);
     process.exit(signal === "SIGTERM" ? 143 : 130);
   } catch (error) {
     const message = error instanceof Error ? error.message : "extension process cleanup failed";
@@ -2342,6 +2359,7 @@ async function runLifecycleProcessEvent(args) {
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  activeProcessEventWorker = child;
   const stdout = [];
   const stderr = [];
   let stdoutBytes = 0;
@@ -2357,7 +2375,8 @@ async function runLifecycleProcessEvent(args) {
   const outcome = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
-  }).catch(() => fail("process-event-failed", "extension lifecycle process-event could not start"));
+  }).catch(() => fail("process-event-failed", "extension lifecycle process-event could not start"))
+    .finally(() => { activeProcessEventWorker = null; });
   if (stdoutBytes > MAX_JSON_BYTES || stderrBytes > MAX_STDERR_BYTES || outcome.signal) {
     const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
     fail("process-event-failed", diagnostic || "extension lifecycle process-event failed");

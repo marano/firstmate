@@ -52,18 +52,24 @@ signal_retire_pid=
 signal_worker_pid=
 active_runner_pid=
 active_runner_release=
+prompt_failure_pid=
+lock_order_release=
+lock_order_register_pid=
+lock_order_reconcile_pid=
 remote_active_release=
 unrelated_daemon_pid=
 unrelated_launcher_pid=
 signal_cleanup_host_pid=
 signal_cleanup_group_pid=
 crash_cleanup_host_pid=
+crash_invocation_host_pid=
 crash_cleanup_group_pid=
 crash_cleanup_release=
 crash_silent_start_pid=
 crash_silent_runner_pid=
 override_crash_start_pid=
 override_crash_runner_pid=
+override_crash_release=
 section_coordinator_pid=
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
@@ -90,17 +96,23 @@ extension_test_cleanup() {
   [ -z "$signal_worker_pid" ] || kill -KILL "$signal_worker_pid" 2>/dev/null || true
   [ -z "$signal_retire_pid" ] || kill -TERM "$signal_retire_pid" 2>/dev/null || true
   [ -z "$active_runner_release" ] || touch "$active_runner_release" 2>/dev/null || true
+  [ -z "$lock_order_release" ] || touch "$lock_order_release" 2>/dev/null || true
   [ -z "$active_runner_pid" ] || kill -TERM "$active_runner_pid" 2>/dev/null || true
+  [ -z "$prompt_failure_pid" ] || kill -TERM "$prompt_failure_pid" 2>/dev/null || true
+  [ -z "$lock_order_register_pid" ] || kill -TERM -"$lock_order_register_pid" 2>/dev/null || true
+  [ -z "$lock_order_reconcile_pid" ] || kill -TERM -"$lock_order_reconcile_pid" 2>/dev/null || true
   [ -z "$remote_active_release" ] || touch "$remote_active_release" 2>/dev/null || true
   [ -z "$unrelated_daemon_pid" ] || kill -KILL "$unrelated_daemon_pid" 2>/dev/null || true
   [ -z "$unrelated_launcher_pid" ] || kill -KILL "$unrelated_launcher_pid" 2>/dev/null || true
   [ -z "$signal_cleanup_host_pid" ] || kill -KILL "$signal_cleanup_host_pid" 2>/dev/null || true
   [ -z "$signal_cleanup_group_pid" ] || kill -KILL -"$signal_cleanup_group_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_host_pid" ] || kill -KILL "$crash_cleanup_host_pid" 2>/dev/null || true
+  [ -z "$crash_invocation_host_pid" ] || kill -KILL "$crash_invocation_host_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_group_pid" ] || kill -KILL -"$crash_cleanup_group_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_release" ] || touch "$crash_cleanup_release" 2>/dev/null || true
   [ -z "$crash_silent_start_pid" ] || kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
   [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
+  [ -z "$override_crash_release" ] || touch "$override_crash_release" 2>/dev/null || true
   [ -z "$override_crash_start_pid" ] || kill -TERM "$override_crash_start_pid" 2>/dev/null || true
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
   [ -z "$handshake_orphan_pid" ] || kill -KILL "$handshake_orphan_pid" 2>/dev/null || true
@@ -305,6 +317,24 @@ expect_failure() {  # <needle> <command...>
   assert_contains "$out" "$needle" "failure did not report the expected diagnostic"
 }
 
+# A refusal that must not wait out a live runner. Checked with a bound, because
+# a regression that waits instead would hang this suite rather than fail it.
+expect_prompt_failure() {  # <needle> <command...>
+  local needle=$1 out="$TMP_ROOT/prompt-failure.out" rc=0
+  shift
+  "$@" > "$out" 2>&1 &
+  prompt_failure_pid=$!
+  for _ in $(seq 1 200); do
+    kill -0 "$prompt_failure_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill -0 "$prompt_failure_pid" 2>/dev/null && fail "command waited instead of refusing promptly: $*"
+  wait "$prompt_failure_pid" || rc=$?
+  prompt_failure_pid=
+  [ "$rc" -ne 0 ] || fail "command unexpectedly succeeded: $*"
+  assert_contains "$(cat "$out")" "$needle" "failure did not report the expected diagnostic"
+}
+
 run_owner_check() {
   local package="$PACKAGES/owner" home="$HOMES/owner" foreign_uid=0 transfer
   make_package "$package" org.example.owner ext-owner
@@ -446,19 +476,25 @@ run_extension_section_lanes() {
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  # A hang tripwire for the whole aggregate, not a performance budget: every
+  # section runs under it, the slowest alone takes tens of seconds, and a
+  # section's own waits are individually bounded.
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-300}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -le 600 ] || return 64
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
-  # Sixteen selectors are validated here. The bounded aggregate keeps its
-  # required end-to-end bind/invoke/capture/retirement, remote, shipped
-  # example, and interrupted-install recovery lanes; the other conformance cuts
-  # remain independently selectable.
-  maximum_sections=16
-  maximum_concurrent=12
+  # The aggregate runs every conformance section: a section only selectable by
+  # hand went unrun by CI and rotted red unnoticed, so none is left out. The
+  # bound is that full set, and a longer list is refused. The slowest section
+  # sets the aggregate's wall time whatever the concurrency, so concurrency stays
+  # low enough that sections' own bounded waits are not starved on a small
+  # runner; six still lets the scheduler probe below start a fifth lane beside
+  # four blocked ones.
+  maximum_sections=17
+  maximum_concurrent=6
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
@@ -568,7 +604,11 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow remote-lifecycle example install-recovery
+      # Longest first, so the slowest sections start in the first wave.
+      run_extension_section_lanes lifecycle-state lifecycle-lock lifecycle-runner matrix \
+        matrix-runtime remote-activation remote-retirement lifecycle-flow remote-lifecycle \
+        example install-recovery remote-envelope early-bind early-handshake early-validation \
+        early-integrity lifecycle-invocation-cleanup
     ) &
     section_coordinator_pid=$!
   fi
@@ -621,7 +661,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
   if run_extension_section_lanes coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
     coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
     coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass coordinator-pass \
-    coordinator-pass; then
+    coordinator-pass coordinator-pass; then
     fail "the section coordinator accepted more than its bounded allowlist"
   fi
   if FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS=2 \
@@ -1088,7 +1128,7 @@ pass "the generic runner reuses one request id until that source sequence is dur
 P_TIMEOUT="$PACKAGES/timeout"
 make_package "$P_TIMEOUT" org.example.timeout ext-timeout
 H_TIMEOUT="$HOMES/timeout"; new_home "$H_TIMEOUT"
-bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 500 >/dev/null
+bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 5000 >/dev/null
 timeout_resolution=$(FM_HOME="$H_TIMEOUT" "$HOST" resolve-process-event ext-timeout)
 IFS=$'\t' read -r timeout_schema timeout_id timeout_version timeout_cap timeout_package timeout_binding timeout_extra <<< "$timeout_resolution"
 [ "$timeout_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$timeout_extra" ] \
@@ -1374,7 +1414,10 @@ for _ in $(seq 1 400); do
 done
 [ -n "$signal_worker_pid" ] || fail "signal retirement worker never acquired its lifecycle lock"
 kill -TERM "$signal_worker_pid" 2>/dev/null || fail "cannot signal retirement worker"
-kill -CONT "$signal_worker_pid" 2>/dev/null || fail "cannot resume signalled retirement worker"
+# A stopped process's pending fatal TERM can be reaped by the kernel before
+# this CONT runs, racing it: the exit check just below covers both orders, so
+# CONT failing because the process is already gone is not itself a failure.
+kill -CONT "$signal_worker_pid" 2>/dev/null || true
 for _ in $(seq 1 400); do
   kill -0 "$signal_worker_pid" 2>/dev/null || break
   sleep 0.005
@@ -1404,8 +1447,8 @@ FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-sourc
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source > "$TMP_ROOT/active-runner.out" 2>&1 &
 active_runner_pid=$!
 wait_for_file "$active_runner_marker" || fail "active extension runner never entered its poll"
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
+expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
+expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
 touch "$active_runner_release"
 active_runner_release=
 wait "$active_runner_pid" || fail "active extension runner did not complete"
@@ -1417,6 +1460,66 @@ active_replacement=$(FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension 
 active_replacement_owner=$(printf '%s\n' "$active_replacement" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-owner "$active_replacement_owner" >/dev/null
 pass "all registration owner transitions wait for the prior extension runner"
+
+# A result re-announcement - every reconcile cycle, and a runner right after
+# capture - holds the source lock while it asks the captured owner for a silence
+# verdict, which takes the lifecycle lock. Registering that same source must take
+# the two locks in the same order: in the other order each side holds the lock
+# the other waits for, both owners stay alive, and neither lock is ever recovered.
+P_LOCK_ORDER="$PACKAGES/lock-order"
+lock_order_marker="$TMP_ROOT/lock-order.marker"
+lock_order_release="$TMP_ROOT/lock-order.release"
+make_package "$P_LOCK_ORDER" org.example.lock-order ext-lock-order \
+  "$(printf 'handshake-block\n%s\n%s' "$lock_order_marker" "$lock_order_release")"
+H_LOCK_ORDER="$HOMES/lock-order"; new_home "$H_LOCK_ORDER"
+touch "$lock_order_release"
+bind_package "$H_LOCK_ORDER" "$P_LOCK_ORDER" ext-lock-order >/dev/null
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" register-extension ext-lock-order order-source --config-ref good >/dev/null
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" start order-source > "$TMP_ROOT/lock-order-start.out" 2>&1
+lock_order_result="$H_LOCK_ORDER/state/procevent-inbox/order-source.1.result"
+assert_present "$lock_order_result" "lock-order fixture captured no result to re-announce"
+assert_absent "${lock_order_result%.result}.handled" "lock-order fixture result was not left for re-announcement"
+# The next handshake, the replacement registration's own, now blocks until released.
+rm -f "$lock_order_marker" "$lock_order_release"
+perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
+  "$PROCEVENT" register-extension ext-lock-order order-source --config-ref replacement \
+  > "$TMP_ROOT/lock-order-register.out" 2>&1 &
+lock_order_register_pid=$!
+wait_for_file "$lock_order_marker" || fail "lock-order registration never reached its adapter handshake"
+perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
+  "$PROCEVENT" reconcile > "$TMP_ROOT/lock-order-reconcile.out" 2>&1 &
+lock_order_reconcile_pid=$!
+# Release the handshake only once the source is locked - by the registration
+# itself, or else by the re-announcement - so the contended lock request is
+# certain to happen rather than merely likely.
+lock_order_source_lock="$TMP_ROOT/claims/order-source.lock"
+for _ in $(seq 1 200); do
+  [ -e "$lock_order_source_lock" ] || [ -L "$lock_order_source_lock" ] && break
+  sleep 0.05
+done
+[ -e "$lock_order_source_lock" ] || [ -L "$lock_order_source_lock" ] \
+  || fail "neither the registration nor the re-announcement ever locked the source"
+touch "$lock_order_release"
+lock_order_release=
+for _ in $(seq 1 600); do
+  kill -0 "$lock_order_register_pid" 2>/dev/null || kill -0 "$lock_order_reconcile_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$lock_order_register_pid" 2>/dev/null || kill -0 "$lock_order_reconcile_pid" 2>/dev/null; then
+  fail "registering a source deadlocked with that source's result re-announcement on the source and lifecycle locks"
+fi
+lock_order_register_rc=0
+wait "$lock_order_register_pid" || lock_order_register_rc=$?
+lock_order_register_pid=
+wait "$lock_order_reconcile_pid" 2>/dev/null || true
+lock_order_reconcile_pid=
+[ "$lock_order_register_rc" -eq 0 ] \
+  || fail "registration beside a result re-announcement failed: $(cat "$TMP_ROOT/lock-order-register.out")"
+assert_contains "$(cat "$TMP_ROOT/lock-order-reconcile.out")" "published=1" \
+  "the concurrent re-announcement did not republish the unhandled result"
+lock_order_owner=$(sed -n 's/^owner-token: //p' "$TMP_ROOT/lock-order-register.out")
+FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" retire order-source --if-owner "$lock_order_owner" >/dev/null
+pass "registration and result re-announcement take the source and lifecycle locks in one order"
 fi
 
 # --- owner tokens, overridden state, sweep, and legacy compatibility --------
@@ -1547,16 +1650,26 @@ chmod 0700 "$H_STATE_OVERRIDE/state" "${state_path_decoy%/*}"
 printf 'decoy\n' > "$state_path_decoy"
 chmod 0600 "$state_path_decoy"
 for control_kind in tab newline; do
-  case "$control_kind" in
-    tab) control_state="$TMP_ROOT/control-state"$'\t'"tab" ;;
-    newline) control_state="$TMP_ROOT/control-state"$'\n'"newline" ;;
-  esac
   control_source="control-${control_kind}-state-source"
+  case "$control_kind" in
+    # A tab survives state-root canonicalization, so the claim's own field
+    # check is what refuses it.
+    tab)
+      control_state="$TMP_ROOT/control-state"$'\t'"tab"
+      control_refusal="cannot claim source: $control_source"
+      ;;
+    # A newline already leaves the canonical state root unprovable, so the
+    # runner refuses the root itself before any claim is attempted.
+    newline)
+      control_state="$TMP_ROOT/control-state"$'\n'"newline"
+      control_refusal="process-event state root is not a private directory"
+      ;;
+  esac
   mkdir -p "$control_state"
   chmod 0700 "$control_state"
   FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" register lavish "$control_source" -- /bin/echo control >/dev/null
-  expect_failure "cannot acquire source ownership" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
+  expect_failure "$control_refusal" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" start "$control_source"
   assert_absent "$TMP_ROOT/claims/$control_source.claim" "control-byte state root created a malformed claim"
   assert_absent "$control_state/procevent-capture-reservations" "control-byte state root created reservation state"
@@ -1576,9 +1689,17 @@ override_crash_claim="$TMP_ROOT/claims/override-crash-source.claim"
 assert_present "$override_crash_claim" "overridden-state crash fixture did not retain its claim"
 override_crash_runner_pid=$(sed -n '2p' "$override_crash_claim")
 override_crash_token=$(sed -n '3p' "$override_crash_claim")
+override_crash_entry_pid=$(cat "$override_crash_marker")
+# Capture reserves both result operations at once, and each reservation is a
+# one-shot handoff the host consumes before any package code runs. So with the
+# silent verdict blocked inside the package, the terminal reservation is the one
+# still pending, and it is what the crash below must leave for recovery.
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
-  -name ".extension-capture-$override_crash_token.*" -print | wc -l | tr -d '[:space:]')
-[ "$override_crash_records" -eq 2 ] || fail "overridden-state crash fixture did not create both immediate reservations"
+  -name ".extension-capture-$override_crash_token.*" -print)
+[ "$(printf '%s\n' "$override_crash_records" | grep -c .)" -eq 1 ] \
+  || fail "overridden-state crash fixture did not leave exactly its terminal reservation pending: $override_crash_records"
+assert_grep '"operation":"result.terminal"' "$override_crash_records" \
+  "overridden-state crash fixture left a reservation other than its terminal one pending"
 mkdir -p "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 chmod 0700 "$H_STATE_OVERRIDE/state" "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 override_crash_decoy="$H_STATE_OVERRIDE/state/procevent-capture-reservations/.extension-capture-$override_crash_token.decoy.json"
@@ -1588,12 +1709,30 @@ kill -KILL -"$override_crash_runner_pid" 2>/dev/null || fail "could not terminat
 wait "$override_crash_start_pid" 2>/dev/null || true
 override_crash_start_pid=
 override_crash_runner_pid=
+# A claim belongs to the state root it records. A reconcile of the home's
+# default root must leave it alone: it cannot see this source's registration, so
+# acting on the claim would take a registered source for an unregistered one and
+# stop its runner, live or not.
 FM_HOME="$H_STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
+[ "$(sed -n '3p' "$override_crash_claim" 2>/dev/null)" = "$override_crash_token" ] \
+  || fail "a reconcile of another state root acted on this state root's claim"
+# The owning reconcile reclaims the dead generation and restarts its
+# still-registered source. Wait out that fresh generation's terminal retirement
+# so it cannot overlap the cases below.
+FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
+for _ in $(seq 1 400); do
+  [ ! -e "$STATE_OVERRIDE/procevent/override-crash-source.source" ] && [ ! -e "$override_crash_claim" ] && break
+  sleep 0.05
+done
+assert_absent "$STATE_OVERRIDE/procevent/override-crash-source.source" "the recovered source never completed its restarted generation"
 assert_absent "$override_crash_claim" "reconcile retained a dead overridden-state claim"
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
   -name ".extension-capture-$override_crash_token.*" -print -quit)
 [ -z "$override_crash_records" ] || fail "reconcile left reservations in the recorded overridden state root"
-assert_present "$override_crash_decoy" "reconcile removed reservations from the current default state root"
+assert_present "$override_crash_decoy" "reconcile removed reservations from the home's default state root"
+kill -0 "$override_crash_entry_pid" 2>/dev/null \
+  && fail "crash recovery left the dead generation's blocked extension process alive"
+override_crash_release=
 pass "crash recovery revalidates and cleans only the recorded state root"
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" register-extension ext-flow inbox-swap-source --config-ref good >/dev/null
@@ -1741,7 +1880,7 @@ ln -s "$TMP_ROOT/capture-swap-outside" "$capture_swap_inbox"
 capture_swap=$(perl "$ROOT/bin/fm-procevent-extension-capture.pl" \
   9 8 6 capture-swap-source ext-flow org.example.flow 1.2.3 1 \
   "sha256:$(printf 'a%.0s' {1..64})" "sha256:$(printf 'b%.0s' {1..64})" swap-token \
-  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" 1024 -- /bin/printf 'pinned helper result')
+  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" 1024 -- /bin/echo 'pinned helper result')
 exec 9<&-
 exec 6<&-
 exec 8<&-
@@ -1839,6 +1978,10 @@ owner_group_pid() {  # <owner-file>
   node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(value.phase!=="group"||!Number.isSafeInteger(value.group_pid))process.exit(1);process.stdout.write(String(value.group_pid));' "$1"
 }
 
+owner_host_pid() {  # <owner-file>
+  node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!Number.isSafeInteger(value.host_pid))process.exit(1);process.stdout.write(String(value.host_pid));' "$1"
+}
+
 guarded_out=$(invoke_cleanup guarded node --disallow-code-generation-from-strings "$HOST")
 assert_contains "$guarded_out" "external evidence: guarded" \
   "the tracked static launch barrier failed under Node's no-dynamic-code guard"
@@ -1890,7 +2033,14 @@ crash_owner=$(wait_for_invocation_owner "$H_INVOCATION_CLEANUP") \
 crash_cleanup_group_pid=$(owner_group_pid "$crash_owner") \
   || fail "crash cleanup fixture published no exact process group"
 crash_entry_pid=$(cat "$crash_marker")
-kill -KILL "$crash_cleanup_host_pid" 2>/dev/null || fail "cannot stop the extension host at the crash cut"
+# The public host hands the invocation to a lifecycle-locked worker, and the
+# owner record names that worker as the host that owns the group. The crash cut
+# kills that host: killing only the public process crashes nothing, because the
+# worker goes on to finish or time out on its own.
+crash_invocation_host_pid=$(owner_host_pid "$crash_owner") \
+  || fail "crash cleanup fixture recorded no invocation host"
+kill -KILL "$crash_invocation_host_pid" 2>/dev/null || fail "cannot stop the extension host at the crash cut"
+crash_invocation_host_pid=
 wait "$crash_cleanup_host_pid" 2>/dev/null || true
 crash_cleanup_host_pid=
 kill -0 -"$crash_cleanup_group_pid" 2>/dev/null \
@@ -2081,8 +2231,8 @@ remote_active_config="active-block|$remote_active_marker|$remote_active_release"
 remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref "$remote_active_config" >/dev/null
 remote_direct fm-procevent.sh reconcile >/dev/null
 wait_for_file "$remote_active_marker" || fail "remote active runner never reached its addressed-home poll"
-expect_failure "prior runner remains active" remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement
-expect_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
+expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement
+expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
 touch "$remote_active_release"
 remote_active_release=
 for _ in $(seq 1 400); do

@@ -9,6 +9,7 @@ Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 install
 Generic keyed-answer feed verified on 2026-08-16 on the same platform, against the same published poll response shape.
 Cross-origin keyed-answer feed verified on 2026-08-19 through the real runner and Lavish adapter interface.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
+The external evidence write confinement, static launch and interruption recovery, and registration against a live source rows were re-verified on 2026-09-23 on macOS (Darwin 25.3.0) with Node v24.18.1, when the default extension-binding run began to include every segment that proves them.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -153,10 +154,11 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | strict handshake and negotiation | manifests offering versions 2 and 1 select host protocol 1 and `process-event-adapter/1`, unknown-only versions refuse, and wrong request ids, unknown or duplicate fields, malformed JSON, and nonzero handshake exits publish no binding |
 | strict invocation envelope | malformed UTF-8, a byte-order mark, unescaped controls, malformed or multiple JSON documents, duplicate or unknown fields, oversized stdout, oversized stderr, wrong request ids, crashes, nonzero exits, a successful parent that leaves a foreground descendant in its host-created invocation group, and authority-shaped result fields are rejected; leaked group members are reaped and package diagnostic text is not copied into the bounded host-produced error evidence |
 | extension timeout and process-group cleanup | a bound adapter that ignores `TERM`, spawns a foreground descendant that ignores `TERM`, and exceeds its invocation timeout returns deterministic timeout evidence only after its exact invocation group is gone; deliberate process-group escape is outside this trusted-same-user protocol guarantee |
-| static launch and interruption recovery | the focused extension suite runs the public host under Node's no-dynamic-code guard, interrupts a host with an active TERM-resistant package group and observes host exit only after exact-group extinction, then kills a host at the post-release crash cut and proves identity-safe binding retirement reaps that recorded group before ownership is removed |
+| static launch and interruption recovery | the focused extension suite runs the public host under Node's no-dynamic-code guard, interrupts the public host with an active TERM-resistant package group and observes it exit only after the lifecycle-locked worker it delegated to has proved exact-group extinction, then kills the host the invocation owner record names at the post-release crash cut and proves identity-safe binding retirement reaps that recorded group before ownership is removed |
 | exact replay identity | two public host invocations carrying the same request id return the same result and advance the fixture package's request-id-keyed effect ledger once; two generic-runner starts that produce no capturable result also reuse one registration-and-next-sequence-derived request id and apply that fixture effect once |
 | complete external adapter path | the shipped external `file-signal` package is copied outside the Git project, explicitly bound with its required artifact-reference consent, discovered, verified, registered with one file reference, started through the generic runner, completed by a real file appearance, durably captured, published through the existing bounded event, classified through its immutable package identity, left unhandled, and terminally retired |
 | owner-matched replacement safety | two registrations for the same external source receive distinct owner tokens; unconditional external retirement and the first token cannot retire the replacement, the replacement token can, bounded home sweep derives and uses that exact token, and legacy built-in registrations retain unconditional behavior plus exact `--if-matches` retirement |
+| registration against a live source | while an external runner is mid-poll, a replacement `register-extension` and a built-in `register` for that source both refuse at once naming the prior runner rather than waiting out the poll, and a replacement registration racing a re-announcement of that source's unhandled result completes, because registration takes the source lock before the lifecycle lock just as the re-announcement does; the same refusal holds in an addressed remote home |
 | independent homes | two homes bind the same package id/version to different content-addressed absolute paths and independently capture results and extension state, with no cross-home fallback or result path |
 
 Run the focused external-binding evidence and the live Bearings session guard with:
@@ -164,7 +166,6 @@ Run the focused external-binding evidence and the live Bearings session guard wi
 ```sh
 node --version
 bin/fm-test-run.sh tests/fm-extension-binding.test.sh
-FM_EXTENSION_BINDING_SEGMENT=lifecycle-invocation-cleanup bin/fm-test-run.sh tests/fm-extension-binding.test.sh
 bin/fm-test-run.sh tests/fm-procevent.test.sh
 FM_BEARINGS_LAVISH_LIVE=1 bin/fm-test-run.sh tests/fm-bearings-board-lavish-live-e2e.test.sh
 bin/fm-doc-audience-check.sh

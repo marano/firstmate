@@ -528,8 +528,12 @@ jobs:
     runs-on: macos-latest
     # Budget, not a hang tripwire: the lane's per-script cost rule in
     # bin/fm-test-run.sh is what keeps it inside this wall clock, and macOS
-    # runner minutes bill at ten times the Linux rate.
-    timeout-minutes: 30
+    # runner minutes bill at ten times the Linux rate. Measured: main's lane
+    # took 23 to 25.5 minutes; with this PR's full extension-binding suite
+    # (about 110s in this lane instead of about 21s) one run was cut at the
+    # 30-minute cap with 98 of 99 scripts done, and a re-run that stopped
+    # early on a failure still took 28m17s. Raised to give real headroom.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
       # Pin ONLY Bash. The previous job restricted PATH to /bin:/usr/bin:... to
