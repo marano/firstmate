@@ -69,6 +69,7 @@ crash_silent_start_pid=
 crash_silent_runner_pid=
 override_crash_start_pid=
 override_crash_runner_pid=
+override_crash_release=
 section_coordinator_pid=
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
@@ -111,6 +112,7 @@ extension_test_cleanup() {
   [ -z "$crash_cleanup_release" ] || touch "$crash_cleanup_release" 2>/dev/null || true
   [ -z "$crash_silent_start_pid" ] || kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
   [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
+  [ -z "$override_crash_release" ] || touch "$override_crash_release" 2>/dev/null || true
   [ -z "$override_crash_start_pid" ] || kill -TERM "$override_crash_start_pid" 2>/dev/null || true
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
   [ -z "$handshake_orphan_pid" ] || kill -KILL "$handshake_orphan_pid" 2>/dev/null || true
@@ -1635,16 +1637,26 @@ chmod 0700 "$H_STATE_OVERRIDE/state" "${state_path_decoy%/*}"
 printf 'decoy\n' > "$state_path_decoy"
 chmod 0600 "$state_path_decoy"
 for control_kind in tab newline; do
-  case "$control_kind" in
-    tab) control_state="$TMP_ROOT/control-state"$'\t'"tab" ;;
-    newline) control_state="$TMP_ROOT/control-state"$'\n'"newline" ;;
-  esac
   control_source="control-${control_kind}-state-source"
+  case "$control_kind" in
+    # A tab survives state-root canonicalization, so the claim's own field
+    # check is what refuses it.
+    tab)
+      control_state="$TMP_ROOT/control-state"$'\t'"tab"
+      control_refusal="cannot claim source: $control_source"
+      ;;
+    # A newline already leaves the canonical state root unprovable, so the
+    # runner refuses the root itself before any claim is attempted.
+    newline)
+      control_state="$TMP_ROOT/control-state"$'\n'"newline"
+      control_refusal="process-event state root is not a private directory"
+      ;;
+  esac
   mkdir -p "$control_state"
   chmod 0700 "$control_state"
   FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" register lavish "$control_source" -- /bin/echo control >/dev/null
-  expect_failure "cannot acquire source ownership" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
+  expect_failure "$control_refusal" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" start "$control_source"
   assert_absent "$TMP_ROOT/claims/$control_source.claim" "control-byte state root created a malformed claim"
   assert_absent "$control_state/procevent-capture-reservations" "control-byte state root created reservation state"
@@ -1664,9 +1676,17 @@ override_crash_claim="$TMP_ROOT/claims/override-crash-source.claim"
 assert_present "$override_crash_claim" "overridden-state crash fixture did not retain its claim"
 override_crash_runner_pid=$(sed -n '2p' "$override_crash_claim")
 override_crash_token=$(sed -n '3p' "$override_crash_claim")
+override_crash_entry_pid=$(cat "$override_crash_marker")
+# Capture reserves both result operations at once, and each reservation is a
+# one-shot handoff the host consumes before any package code runs. So with the
+# silent verdict blocked inside the package, the terminal reservation is the one
+# still pending, and it is what the crash below must leave for recovery.
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
-  -name ".extension-capture-$override_crash_token.*" -print | wc -l | tr -d '[:space:]')
-[ "$override_crash_records" -eq 2 ] || fail "overridden-state crash fixture did not create both immediate reservations"
+  -name ".extension-capture-$override_crash_token.*" -print)
+[ "$(printf '%s\n' "$override_crash_records" | grep -c .)" -eq 1 ] \
+  || fail "overridden-state crash fixture did not leave exactly its terminal reservation pending: $override_crash_records"
+assert_grep '"operation":"result.terminal"' "$override_crash_records" \
+  "overridden-state crash fixture left a reservation other than its terminal one pending"
 mkdir -p "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 chmod 0700 "$H_STATE_OVERRIDE/state" "$H_STATE_OVERRIDE/state/procevent-capture-reservations"
 override_crash_decoy="$H_STATE_OVERRIDE/state/procevent-capture-reservations/.extension-capture-$override_crash_token.decoy.json"
@@ -1676,12 +1696,30 @@ kill -KILL -"$override_crash_runner_pid" 2>/dev/null || fail "could not terminat
 wait "$override_crash_start_pid" 2>/dev/null || true
 override_crash_start_pid=
 override_crash_runner_pid=
+# A claim belongs to the state root it records. A reconcile of the home's
+# default root must leave it alone: it cannot see this source's registration, so
+# acting on the claim would take a registered source for an unregistered one and
+# stop its runner, live or not.
 FM_HOME="$H_STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
+[ "$(sed -n '3p' "$override_crash_claim" 2>/dev/null)" = "$override_crash_token" ] \
+  || fail "a reconcile of another state root acted on this state root's claim"
+# The owning reconcile reclaims the dead generation and restarts its
+# still-registered source. Wait out that fresh generation's terminal retirement
+# so it cannot overlap the cases below.
+FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" "$PROCEVENT" reconcile >/dev/null
+for _ in $(seq 1 400); do
+  [ ! -e "$STATE_OVERRIDE/procevent/override-crash-source.source" ] && [ ! -e "$override_crash_claim" ] && break
+  sleep 0.05
+done
+assert_absent "$STATE_OVERRIDE/procevent/override-crash-source.source" "the recovered source never completed its restarted generation"
 assert_absent "$override_crash_claim" "reconcile retained a dead overridden-state claim"
 override_crash_records=$(find "$STATE_OVERRIDE/procevent-capture-reservations" -type f \
   -name ".extension-capture-$override_crash_token.*" -print -quit)
 [ -z "$override_crash_records" ] || fail "reconcile left reservations in the recorded overridden state root"
-assert_present "$override_crash_decoy" "reconcile removed reservations from the current default state root"
+assert_present "$override_crash_decoy" "reconcile removed reservations from the home's default state root"
+kill -0 "$override_crash_entry_pid" 2>/dev/null \
+  && fail "crash recovery left the dead generation's blocked extension process alive"
+override_crash_release=
 pass "crash recovery revalidates and cleans only the recorded state root"
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" register-extension ext-flow inbox-swap-source --config-ref good >/dev/null
@@ -1829,7 +1867,7 @@ ln -s "$TMP_ROOT/capture-swap-outside" "$capture_swap_inbox"
 capture_swap=$(perl "$ROOT/bin/fm-procevent-extension-capture.pl" \
   9 8 6 capture-swap-source ext-flow org.example.flow 1.2.3 1 \
   "sha256:$(printf 'a%.0s' {1..64})" "sha256:$(printf 'b%.0s' {1..64})" swap-token \
-  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" 1024 -- /bin/printf 'pinned helper result')
+  capture-swap-source.runner .capture-swap.output "$$" "$forged_claim_identity" 1024 -- /bin/echo 'pinned helper result')
 exec 9<&-
 exec 6<&-
 exec 8<&-
