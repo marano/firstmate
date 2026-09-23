@@ -1687,7 +1687,7 @@ test_relaunch_refuses_a_missing_endpoint_something_else_may_own() {
   dir=$(new_case owned-worktree rl63)
   add_ship_task "$dir" rl63 claude
   mark_endpoint_missing "$dir" window
-  printf 'scratch:notes\t%s\n' "$dir/wt" > "$dir/fake/panes"
+  printf 'scratch:notes|%s\n' "$dir/wt" > "$dir/fake/panes"
   meta_before=$(cat "$dir/home/state/rl63.meta")
   brief_before=$(cat "$dir/home/data/rl63/brief.md")
   out=$(run_control "$dir" rl63 relaunch --note "stopped by the reboot"); rc=$?
@@ -1701,7 +1701,7 @@ test_relaunch_refuses_a_missing_endpoint_something_else_may_own() {
   dir=$(new_case owned-name rl64)
   add_ship_task "$dir" rl64 claude
   mark_endpoint_missing "$dir" window
-  printf 'othersession:fm-rl64\t%s\n' "$dir/elsewhere" > "$dir/fake/panes"
+  printf 'othersession:fm-rl64|%s\n' "$dir/elsewhere" > "$dir/fake/panes"
   meta_before=$(cat "$dir/home/state/rl64.meta")
   brief_before=$(cat "$dir/home/data/rl64/brief.md")
   out=$(run_control "$dir" rl64 relaunch --note "stopped by the reboot"); rc=$?
