@@ -75,7 +75,7 @@ Job setup is small enough to ignore in that arithmetic but not to assume: on run
 The single longest script, `tests/fm-watch-triage.test.sh` at 708653 ms, is the floor for any shard count.
 It bounds the useful shard count at eight before the split stops buying anything.
 
-Refresh with `bin/fm-test-run.sh --refresh-serial-hints <timing.json...>` over the `fm-test-timing-aggregate` artifacts of several green `main` runs (`gh run download <run-id> -R <owner>/<repo> --name fm-test-timing-aggregate`); it rewrites the table with the slowest completed duration per script.
+Refresh with `bin/fm-test-run.sh --refresh-serial-hints <timing.json...>` over the `fm-test-timing-aggregate` artifacts of several green `main` runs (`gh run download <run-id> -R <owner>/<repo> --name fm-test-timing-aggregate`); it rewrites the table with the slowest completed duration per script, and keeps the existing hint of every member this home excludes by default, because CI never runs those and no artifact can measure them.
 `--derive-serial-hints` prints the same table without writing it.
 
 A timed-out shard uploads no artifact, so pick runs where every serial shard is green or the lane's slowest scripts go unmeasured in exactly the shard that needs them most.
