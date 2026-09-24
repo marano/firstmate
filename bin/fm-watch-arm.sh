@@ -59,8 +59,9 @@
 # watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
-# It sends TERM and waits up to one poll interval for the holder to exit. A holder
-# that survives that wait with a stale beacon is not supervising, and would make
+# It sends TERM, again halfway through because a watcher can lose one, and waits
+# up to one poll interval for the holder to exit. A holder that survives that
+# wait with a stale beacon is not supervising, and would make
 # every restart and arm fail forever, so it gets KILL - by the same recorded pid,
 # only after its lock record, identity, and staleness are re-verified, and never
 # while its beacon is fresh. A plain arm never signals anything.
@@ -442,6 +443,27 @@ kill_stale_restart_holder() {  # <pid>
   done
 }
 
+# Send TERM to watcher <pid> and wait up to <ticks> tenths of a second for it to
+# exit. One TERM is not proof: Bash 5.2 can lose a watcher's trap to a command
+# substitution (bin/fm-wake-lib.sh's "Startup-path substitutions"), and that
+# watcher keeps running. So TERM goes out again halfway through the wait, only
+# while the remaining arguments, run as a command, still confirm <pid> is the
+# watcher to stop. A repeat that lands in an exit already under way can only cut
+# it short, leaving the lock to the successor's stale-lock reclaim, which
+# publishes the same downtime first (docs/watcher-continuity.md).
+term_watcher_and_wait() {  # <pid> <ticks> <still-target-command...>
+  local pid=$1 ticks=$2 i=0
+  shift 2
+  kill -TERM "$pid" 2>/dev/null || return 0
+  while [ "$i" -lt "$ticks" ] && fm_pid_alive "$pid"; do
+    if [ "$i" -eq "$((ticks / 2))" ] && "$@"; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 mode=arm
 handling_generation=
 handling_watcher_pid=
@@ -472,16 +494,11 @@ if [ "$mode" = restart ]; then
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a now-dead-pid stale lock instead
       # of seeing the dying one as a live holder and no-opping.
-      stop_ticks=$(restart_stop_ticks)
-      i=0
-      while [ "$i" -lt "$stop_ticks" ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
+      term_watcher_and_wait "$lock_pid" "$(restart_stop_ticks)" \
+        fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"
       kill_stale_restart_holder "$lock_pid"
     else
       if ! clear_stale_recorded_watcher_lock; then
@@ -510,10 +527,20 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
-cleanup_child() {
+# Stop the child the way --restart stops a holder, then KILL one that outlived
+# the whole wait, so tearing this arm down never waits on its child for good.
+# The caller still reaps it, because a caller may need its exit status.
+stop_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+    term_watcher_and_wait "$child" "$(restart_stop_ticks)" fm_pid_alive "$child"
+    if fm_pid_alive "$child"; then
+      kill -KILL "$child" 2>/dev/null || true
+    fi
   fi
+}
+
+cleanup_child() {
+  stop_child
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
@@ -524,7 +551,7 @@ handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
   if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+    stop_child
     wait "$child" 2>/dev/null || true
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none

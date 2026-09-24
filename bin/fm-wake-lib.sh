@@ -39,9 +39,7 @@ _fm_wake_require_timeout() {
 # Pass a variable name to capture this frame's pid without forking it in $().
 # On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
 # Never as ${BASHPID:-$(...)}: Bash 5.2 parses that unused fallback on every
-# call, and it drops a trap still pending when it starts parsing a command
-# substitution (fixed in 5.3). Every lock operation runs this, so a starting
-# watcher lost the signal it had deferred until its release trap was armed.
+# call, and every lock operation runs this (see "Startup-path substitutions").
 fm_current_pid() {  # [output-variable]
   local fm_pid
   if [ -n "${BASHPID:-}" ]; then
@@ -427,6 +425,19 @@ fm_watcher_supervision_verdict() {
   return 0
 }
 
+# Startup-path substitutions. A starting watcher defers HUP, INT, and TERM in a
+# trap while it takes its singleton lock and runs its recovery-marker
+# transitions, until its release trap is armed (bin/fm-watch.sh). Bash 5.2 runs
+# a trap still pending when expansion parses a $(...), <(...), or $(<file) in
+# the calling shell, in a parser state that cannot parse the trap, so the trap
+# is lost (fixed in 5.3). It never parses a backquoted substitution in the
+# calling shell. So every substitution the lock and recovery-marker functions on
+# that path evaluate in the caller's own shell is backquoted, each such function
+# carrying the SC2006 directive that marks it. Helpers that only ever run inside
+# a substitution (fm_lock_link_owner, fm_lock_owner_dir, fm_lock_abs_path,
+# fm_path_age) keep $(...), since that parse happens in the subshell.
+# A $(...) back on this path fails the startup lock path case in
+# tests/fm-watcher-lock.test.sh on Bash 5.2.
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -470,11 +481,12 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
-  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  back=`cat "$ownerdir/pid" 2>/dev/null || true`
   [ "$back" = "$mypid" ]
 }
 
@@ -488,9 +500,10 @@ fm_lock_link_owner() {
   esac
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
-  actual=$(readlink "$lockdir" 2>/dev/null) || return 1
+  actual=`readlink "$lockdir" 2>/dev/null` || return 1
   [ "$actual" = "$ownerdir" ]
 }
 
@@ -532,11 +545,12 @@ fm_lock_discard_owner() {
 # caller's live owner directory and left its lock dangling. Only the process
 # that minted an owner directory ever links it, before any handoff, so once that
 # process is gone a link seen now is final.
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_reap_stray_owners() {  # <lockdir>
   local lockdir=$1 entry pid
   for entry in "$lockdir".owner.*; do
     [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-    pid=$(cat "$entry/pid" 2>/dev/null || true)
+    pid=`cat "$entry/pid" 2>/dev/null || true`
     case "$pid" in
       ''|*[!0-9]*) fm_lock_mid_acquire_is_fresh "$entry" '' && continue ;;
       *) fm_pid_alive "$pid" && continue ;;
@@ -547,10 +561,11 @@ fm_lock_reap_stray_owners() {  # <lockdir>
   done
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
-  stray="$lockdir/$(basename "$ownerdir")"
-  if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
+  stray="$lockdir/`basename "$ownerdir"`"
+  if [ -L "$stray" ] && [ "`readlink "$stray" 2>/dev/null || true`" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
   fi
 }
@@ -594,6 +609,7 @@ fm_lock_claim() {
   return 0
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -610,7 +626,7 @@ fm_lock_try_create() {
   # On the acquiring path rather than the polling one above, so collecting costs
   # one directory scan per acquisition instead of one per poll of every waiter.
   fm_lock_reap_stray_owners "$lockdir"
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  ownerdir=`fm_lock_owner_dir "$lockdir"` || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -648,10 +664,11 @@ fm_lock_try_create() {
   return 1
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
   if [ -L "$lockdir" ]; then
-    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    ownerdir=`fm_lock_link_owner "$lockdir" 2>/dev/null || true`
     rm -f "$lockdir" 2>/dev/null || return 1
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
@@ -660,19 +677,21 @@ fm_lock_remove_path() {
   rmdir "$lockdir" 2>/dev/null
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_mid_acquire_is_fresh() {
   local lockdir=$1 pid=$2 mid_acquire_stale
   case "$pid" in
     ''|*[!0-9]*)
       mid_acquire_stale=$FM_LOCK_STALE_AFTER
       [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
-      [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]
+      [ "`fm_path_age "$lockdir"`" -lt "$mid_acquire_stale" ]
       return
       ;;
   esac
   return 1
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -680,7 +699,7 @@ fm_lock_recheck_stale_owner() {
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
   fi
-  actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  actual_pid=`cat "$lockdir/pid" 2>/dev/null || true`
   [ "$actual_pid" = "$expected_pid" ] || return 1
   if fm_pid_alive "$actual_pid"; then
     return 1
@@ -697,11 +716,12 @@ FM_RECOVERY_MARKER_ACTION='none'
 # Token grammar (one owner): <pending|announced|acked>:<handling|downtime>:<generation>
 # docs/watcher-continuity.md owns the recovery-episode contract, including the
 # once-per-generation announcement rule for unacknowledged downtime.
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_recovery_marker_read() {
   local marker=$1 line count
   FM_RECOVERY_MARKER_TOKEN=
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  count=$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]') || return 1
+  count=`wc -l < "$marker" 2>/dev/null | tr -d '[:space:]'` || return 1
   [ "$count" = 1 ] || return 1
   IFS= read -r line < "$marker" || return 1
   case "$line" in
@@ -718,12 +738,13 @@ _fm_atomic_replace() {
   mv -f -- "$1" "$2"
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 _fm_recovery_marker_write_locked() {
   local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$status" in pending|announced) ;; *) return 1 ;; esac
-  tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
-  [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
+  tmp=`mktemp "${marker}.tmp.XXXXXX"` || return 1
+  [ -n "$generation" ] || generation="`fm_current_pid`.`date +%s`.${tmp##*.}"
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then
@@ -847,6 +868,7 @@ _fm_recovery_marker_ack() {
   fm_lock_release "$lock"
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 _fm_recovery_marker_arm_check() {
   local marker=$1 lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
@@ -870,7 +892,7 @@ _fm_recovery_marker_arm_check() {
     return 0
   fi
   if ! fm_recovery_marker_read "$marker"; then
-    quarantine=$(mktemp -d "${marker}.invalid.XXXXXX") \
+    quarantine=`mktemp -d "${marker}.invalid.XXXXXX"` \
       || {
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1024,6 +1046,7 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -1035,7 +1058,7 @@ fm_lock_try_acquire() {
   fi
 
   fm_current_pid current || return 1
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  pid=`cat "$lockdir/pid" 2>/dev/null || true`
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
@@ -1049,7 +1072,7 @@ fm_lock_try_acquire() {
     if fm_lock_try_create "$lockdir"; then
       return 0
     fi
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     return 1
   fi
   if fm_pid_alive "$pid"; then
@@ -1074,13 +1097,13 @@ fm_lock_try_acquire() {
 
   steal="$lockdir.steal"
   if ! fm_lock_try_acquire "$steal"; then
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     FM_LOCK_OWNER_DIR=
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
-  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
+  cur=`cat "$lockdir/pid" 2>/dev/null || true`
   if fm_pid_alive "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
@@ -1095,19 +1118,19 @@ fm_lock_try_acquire() {
   fi
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     FM_LOCK_OWNER_DIR=
     return 1
   fi
 
   primary_owner=
   if [ -L "$lockdir" ]; then
-    primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    primary_owner=`fm_lock_link_owner "$lockdir" 2>/dev/null || true`
   fi
-  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
+  cur=`cat "$lockdir/pid" 2>/dev/null || true`
   if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
     fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     FM_LOCK_OWNER_DIR=
     return 1
   fi
@@ -1128,7 +1151,7 @@ fm_lock_try_acquire() {
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     FM_LOCK_OWNER_DIR=
   fi
   fm_lock_release "$steal"
@@ -1267,20 +1290,21 @@ fm_lock_acquire_wait_bounded() {
   return "$rc"
 }
 
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   fm_current_pid current || return 1
   if [ -L "$lockdir" ]; then
-    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    ownerdir=`fm_lock_link_owner "$lockdir" 2>/dev/null || true`
     [ -n "$ownerdir" ] || return 0
-    pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+    pid=`cat "$ownerdir/pid" 2>/dev/null || true`
     [ "$pid" = "$current" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  pid=`cat "$lockdir/pid" 2>/dev/null || true`
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
