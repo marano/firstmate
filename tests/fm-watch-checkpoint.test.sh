@@ -128,9 +128,10 @@ SH
     fail "checkpoint left the stand-in watcher running"
   fi
   case "$status" in
-    124|137) ;;
+    124) ;;
     *) fail "checkpoint that killed its watcher exited $status: $(cat "$out" "$err")" ;;
   esac
+  grep -q 'no actionable wake within 1s' "$out" || fail "killed watcher not reported as quiet checkpoint: $(cat "$out" "$err")"
   pass "checkpoint kills a watcher that survives its deadline TERM and returns"
 }
 

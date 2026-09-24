@@ -14,7 +14,7 @@ Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
 A watcher still running FM_SIGNAL_GRACE seconds (default 5) after the deadline's
-TERM is killed; with timeout or gtimeout that exits 137 instead.
+TERM is killed, and that is still reported as the quiet checkpoint (exit 124).
 EOF
 }
 
@@ -117,6 +117,11 @@ if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   echo "checkpoint: watcher is already running outside this foreground checkpoint" >&2
   exit 1
+fi
+
+if [ "$RC" -eq 137 ]; then
+  echo "checkpoint: watcher survived the deadline TERM and was killed" >&2
+  RC=124
 fi
 
 if [ "$RC" -eq 124 ]; then
