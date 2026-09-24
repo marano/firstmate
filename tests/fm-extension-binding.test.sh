@@ -1344,27 +1344,59 @@ H_PROCESS_RETIRE_RACE="$HOMES/process-retire-race"; new_home "$H_PROCESS_RETIRE_
 touch "$process_race_release"
 process_race_bind=$(bind_package "$H_PROCESS_RETIRE_RACE" "$P_PROCESS_RETIRE_RACE" ext-process-retire-race)
 process_race_binding=$(printf '%s\n' "$process_race_bind" | sed -n 's/^binding-digest: //p')
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race process-race-source --config-ref good >/dev/null
-rm -f "$process_race_marker" "$process_race_release"
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" start process-race-source > "$TMP_ROOT/process-retire-race-start.out" 2>&1 &
-process_race_start_pid=$!
-wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "process-event race fixture never reached binding resolution"
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" > "$TMP_ROOT/process-retire-race-retire.out" 2>&1 &
-process_race_retire_pid=$!
-sleep 0.2
-kill -0 "$process_race_retire_pid" 2>/dev/null || fail "binding retirement bypassed an in-flight process-event resolution"
-touch "$process_race_release"
-wait "$process_race_start_pid" || fail "lifecycle-locked process-event did not complete after release"
-process_race_start_pid=
-process_race_retire_rc=0
-wait "$process_race_retire_pid" || process_race_retire_rc=$?
-process_race_retire_pid=
-[ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved process-event invocation"
-assert_contains "$(cat "$TMP_ROOT/process-retire-race-retire.out")" "still owns process-event registration" "retirement did not observe the reserved process-event registration"
-assert_present "$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result" "reserved process-event did not capture its result"
+# The host abandons a handshake at its own fixed timeout, which legitimately
+# ends the reservation a blocked fixture holds. A loaded runner can stall this
+# suite past that timeout while a window below is open. The host reports the
+# abandonment, so such an attempt proves nothing either way and is repeated,
+# while retirement finishing inside a window the host did not abandon still
+# fails as a bypass. Each race's first attempt forces that stall by holding its
+# window until the host gives up and retirement has finished, so the repeat is
+# exercised on every run.
+process_race_attempts=5
+process_race_hold_past_handshake() {  # <held-process-pid> <retirement-pid>
+  wait_until "$1" false || true
+  ! kill -0 "$1" 2>/dev/null || fail "the host never abandoned a handshake held past its timeout"
+  wait_until "$2" false || true
+}
+process_race_attempt=0
+while :; do
+  process_race_attempt=$((process_race_attempt + 1))
+  process_race_source="process-race-source-$process_race_attempt"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race "$process_race_source" --config-ref good >/dev/null
+  rm -f "$process_race_marker" "$process_race_release"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" start "$process_race_source" > "$TMP_ROOT/process-retire-race-start.out" 2>&1 &
+  process_race_start_pid=$!
+  wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "process-event race fixture never reached binding resolution"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" > "$TMP_ROOT/process-retire-race-retire.out" 2>&1 &
+  process_race_retire_pid=$!
+  process_race_retire_held=1
+  if [ "$process_race_attempt" -eq 1 ]; then
+    process_race_hold_past_handshake "$process_race_start_pid" "$process_race_retire_pid"
+  else
+    sleep 0.2
+    kill -0 "$process_race_retire_pid" 2>/dev/null || process_race_retire_held=0
+  fi
+  touch "$process_race_release"
+  wait "$process_race_start_pid" || fail "lifecycle-locked process-event did not complete after release"
+  process_race_start_pid=
+  process_race_retire_rc=0
+  wait "$process_race_retire_pid" || process_race_retire_rc=$?
+  process_race_retire_pid=
+  [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved process-event invocation"
+  process_race_result="$H_PROCESS_RETIRE_RACE/state/procevent-inbox/$process_race_source.1.result"
+  assert_present "$process_race_result" "reserved process-event did not capture its result"
+  if grep -q '"code":"timeout"' "$process_race_result"; then
+    [ "$process_race_attempt" -lt "$process_race_attempts" ] \
+      || fail "every process-event reservation attempt outlived the host's handshake timeout"
+    continue
+  fi
+  [ "$process_race_attempt" -gt 1 ] || fail "the forced process-event stall did not outlast the host's handshake timeout"
+  [ "$process_race_retire_held" -eq 1 ] || fail "binding retirement bypassed an in-flight process-event resolution"
+  assert_contains "$(cat "$TMP_ROOT/process-retire-race-retire.out")" "still owns process-event registration" "retirement did not observe the reserved process-event registration"
+  break
+done
 pass "process-event resolution reserves the lifecycle before invocation"
 
-process_race_result="$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result"
 process_race_resolution=$(FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" resolve-process-event ext-process-retire-race)
 IFS=$'\t' read -r process_race_schema process_race_id process_race_version process_race_cap process_race_package process_race_resolution_binding process_race_extra <<< "$process_race_resolution"
 [ "$process_race_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$process_race_extra" ] \
@@ -1373,30 +1405,50 @@ for process_race_operation in result.classify result.terminal result.silent; do
   process_race_guard="process-race-${process_race_operation#result.}"
   process_race_registration=$(FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race "$process_race_guard" --config-ref good)
   process_race_owner=$(printf '%s\n' "$process_race_registration" | sed -n 's/^owner-token: //p')
-  rm -f "$process_race_marker" "$process_race_release"
-  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" process-event ext-process-retire-race "$process_race_operation" \
-    --result-file "$process_race_result" \
-    --expect-extension "$process_race_id" --expect-version "$process_race_version" \
-    --expect-capability-version "$process_race_cap" \
-    --expect-package-digest "$process_race_package" \
-    --expect-binding-digest "$process_race_resolution_binding" \
-    > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}.out" 2>&1 &
-  process_race_start_pid=$!
-  wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "$process_race_operation race fixture never reached binding resolution"
-  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" \
-    > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out" 2>&1 &
-  process_race_retire_pid=$!
-  sleep 0.2
-  kill -0 "$process_race_retire_pid" 2>/dev/null || fail "binding retirement bypassed $process_race_operation lifecycle reservation"
-  touch "$process_race_release"
-  wait "$process_race_start_pid" 2>/dev/null || true
-  process_race_start_pid=
-  process_race_retire_rc=0
-  wait "$process_race_retire_pid" || process_race_retire_rc=$?
-  process_race_retire_pid=
-  [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved $process_race_operation invocation"
-  assert_contains "$(cat "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out")" "still owns process-event registration" \
-    "retirement did not observe the $process_race_operation registration"
+  process_race_attempt=0
+  while :; do
+    process_race_attempt=$((process_race_attempt + 1))
+    process_race_out="$TMP_ROOT/process-retire-race-${process_race_operation#result.}.out"
+    rm -f "$process_race_marker" "$process_race_release"
+    FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" process-event ext-process-retire-race "$process_race_operation" \
+      --result-file "$process_race_result" \
+      --expect-extension "$process_race_id" --expect-version "$process_race_version" \
+      --expect-capability-version "$process_race_cap" \
+      --expect-package-digest "$process_race_package" \
+      --expect-binding-digest "$process_race_resolution_binding" \
+      > "$process_race_out" 2>&1 &
+    process_race_start_pid=$!
+    wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "$process_race_operation race fixture never reached binding resolution"
+    FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" \
+      > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out" 2>&1 &
+    process_race_retire_pid=$!
+    process_race_retire_held=1
+    process_race_forced=0
+    if [ "$process_race_operation" = result.classify ] && [ "$process_race_attempt" -eq 1 ]; then
+      process_race_forced=1
+      process_race_hold_past_handshake "$process_race_start_pid" "$process_race_retire_pid"
+    else
+      sleep 0.2
+      kill -0 "$process_race_retire_pid" 2>/dev/null || process_race_retire_held=0
+    fi
+    touch "$process_race_release"
+    wait "$process_race_start_pid" 2>/dev/null || true
+    process_race_start_pid=
+    process_race_retire_rc=0
+    wait "$process_race_retire_pid" || process_race_retire_rc=$?
+    process_race_retire_pid=
+    [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved $process_race_operation invocation"
+    assert_contains "$(cat "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out")" "still owns process-event registration" \
+      "retirement did not observe the $process_race_operation registration"
+    if grep -q 'extension handshake exceeded' "$process_race_out"; then
+      [ "$process_race_attempt" -lt "$process_race_attempts" ] \
+        || fail "every $process_race_operation reservation attempt outlived the host's handshake timeout"
+      continue
+    fi
+    [ "$process_race_forced" -eq 0 ] || fail "the forced $process_race_operation stall did not outlast the host's handshake timeout"
+    [ "$process_race_retire_held" -eq 1 ] || fail "binding retirement bypassed $process_race_operation lifecycle reservation"
+    break
+  done
   FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" retire "$process_race_guard" --if-owner "$process_race_owner" >/dev/null
 done
 process_race_release=
