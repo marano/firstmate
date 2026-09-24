@@ -1,0 +1,7 @@
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 3 slots held; oldest: held by pid 56258 for 5m33s running: bash -c for\ t\ in\ tests/fm-remote-backlog-handoff.test.sh\ tests/fm-watch-triage-absorb.test.sh\ tests/fm-stock-bash-lane.test.sh\;\ do\ echo\ \"==\ \$t\"\;\ /bin/bash\ \$t\ 2\>\&1\ \|\ grep\ -v\ \"\^ok\"\ \|\ tail\ -25\;\ echo\ \"exit=\$\{PIPESTATUS\[0\]\}\"\;\ done [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M394NGGNM2B7JMHXCSMK3NX2]; 2 more - see mutex --status)
+fm-build-lock: acquired a machine-wide build slot after 35s
+ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 71752.1790237285.1qdMkC
+ok - checkpoint passes through a real watcher wake and leaves the queue for drain
+ok - checkpoint preserves watcher environment for registered custom checks
+ok - checkpoint rejects an existing watcher singleton as unowned
