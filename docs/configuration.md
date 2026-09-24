@@ -429,7 +429,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
-With no file, launch behavior is unchanged: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
+With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
@@ -447,7 +447,7 @@ OPENAI_API_KEY
 SSH_AUTH_SOCK
 ```
 
-Firstmate retains basic home, executable search, terminal, locale, temporary-directory, and backend routing variables, plus its explicit launch assignments, its ship and scout task marker, and enabled task trace.
+Firstmate retains basic home, executable search, terminal, locale, temporary-directory, and backend routing variables, plus its explicit launch assignments, its ship and scout task marker, the compact-adviser kill switch described below, and enabled task trace.
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
@@ -471,6 +471,12 @@ Raw launch commands run under noninteractive POSIX `sh` with this option and mus
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+
+Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
+This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.
+Firstmate provides no configuration or flag to change this value.
+This applies only to agents Firstmate launches; the captain's own primary Firstmate session is never given the variable.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 

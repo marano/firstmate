@@ -60,6 +60,14 @@ ln -s "$SLEEP_BIN" "$LAB/agent/claude"
 cat > "$LAB/bin/tmux" <<SH
 #!/usr/bin/env bash
 args=("\$@")
+# Record the byte length of every literal the spawn types, so a case can bound
+# the longest line the pane shell ever has to hold.
+if [ "\${1:-}" = send-keys ]; then
+  for a in "\${args[@]}"; do
+    if [ "\${prev:-}" = -l ]; then printf '%s\n' "\${#a}" >> "$LAB/typed-lengths"; fi
+    prev=\$a
+  done
+fi
 if [ "\${1:-}" = send-keys ] && [ -s "$LAB/garble" ]; then
   last=\$((\${#args[@]} - 1))
   payload=\${args[\$last]}
@@ -282,7 +290,34 @@ test_spawn_launch_survives_a_slow_prompt_hook() {
   pass "a launch typed while the pane shell runs a slow prompt hook starts the agent"
 }
 
+# The longest launch this home really builds - the longest task id in use, an
+# effort flag, and an enabled launch-environment allowlist that prepends about
+# thirty names - is well past 1024 bytes as a command. The typed line must stay
+# far under the platform's canonical-input limit with real margin, not a few
+# dozen bytes.
+# Named mutant: type the whole launch command in place of the short line.
+test_spawn_typed_line_keeps_margin_on_the_longest_launch() {
+  local id=blu-orgunit-lock-live-tenant-walkthrough out rc launch_bytes longest n
+  new_case margin "$id"
+  garble_next 0
+  : > "$LAB/typed-lengths"
+  : > "$CASE_HOME/config/launch-env-allowlist"
+  for n in $(seq 1 30); do printf 'FM_MARGIN_EXTRA_ENV_%s\n' "$n" >> "$CASE_HOME/config/launch-env-allowlist"; done
+  out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" \
+    --harness claude --mode no-mistakes --yolo off --effort xhigh); rc=$?
+  expect_code 0 "$rc" "the longest launch should start its agent"$'\n'"$out"$'\n'"$(pane_tail "$id")"
+  launch_bytes=$(wc -c < "/tmp/fm-$id/launch.sh" | tr -d ' ')
+  [ "${launch_bytes:-0}" -gt 1024 ] \
+    || fail "the longest launch must exceed 1024 bytes for the margin to mean anything (it is ${launch_bytes:-0} bytes)"
+  longest=$(sort -n "$LAB/typed-lengths" | tail -1)
+  [ -n "$longest" ] || fail "the spawn typed no literal line"
+  [ "$longest" -le 256 ] \
+    || fail "the longest typed line is $longest bytes; it must stay well under the 1024-byte canonical-input limit"
+  pass "the longest launch types no line over $longest bytes while the command itself is $launch_bytes"
+}
+
 test_spawn_refuses_to_report_a_launch_that_never_started
 test_spawn_recovers_a_launch_cut_once
 test_relaunch_clears_a_poisoned_prompt
 test_spawn_launch_survives_a_slow_prompt_hook
+test_spawn_typed_line_keeps_margin_on_the_longest_launch
