@@ -1763,8 +1763,11 @@ serial_hints_from_timing() {
   # Members this home excludes by default never run in CI, so no timing input
   # can measure them: refresh keeps their existing hints, and only theirs.
   local held="$cur.held"
-  comm -23 <("$0" --lane portable-serial --list --include-excluded | LC_ALL=C sort -u) \
-    <("$0" --lane portable-serial --list | LC_ALL=C sort -u) >"$held" || return 1
+  : >"$held"
+  if [ "$mode" = refresh ]; then
+    comm -23 <("$0" --lane portable-serial --list --include-excluded | LC_ALL=C sort -u) \
+      <("$0" --lane portable-serial --list | LC_ALL=C sort -u) >"$held" || return 1
+  fi
   local rc=0
   python3 - "$mode" "$cur" "$0" "$held" "$PORTABLE_SERIAL_HINT_DRIFT_PERCENT" \
     "$PORTABLE_SERIAL_HINT_DRIFT_FLOOR_MS" "$PORTABLE_SERIAL_MEASURED_SHARD_MAX_MS" \
