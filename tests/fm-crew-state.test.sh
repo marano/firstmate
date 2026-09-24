@@ -2318,7 +2318,7 @@ test_missing_meta() {
 }
 
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
-# canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
+# canned fake verdict, unlike tests/fm-watch-triage-*.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
 # incident: a validating crew whose bare `axi status` answer belongs to
 # another branch must still be absorbed by the watcher via the runs-list
