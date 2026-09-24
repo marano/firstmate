@@ -74,6 +74,11 @@
 #                          deliberately ... not a wedge" and then only absorbs
 #                          (stopped_agent_hold); a declared wait and any class
 #                          the awaiting-landing owner names keep their own path.
+#                          A pane whose agent is gone (fm_backend_agent_state reads
+#                          `dead` or `missing`) about to wedge-escalate surfaces
+#                          ONCE per agent as "agent gone ... not a wedge" and then
+#                          only absorbs (wedge_dead_agent_hold); an alive or
+#                          unreadable agent keeps the ordinary ladder.
 #   stale: <window> (the worker's turn ended ...s ago while a run of its own is
 #                    still going - pid N, held Ns, running: ...)
 #                          the pairing a held build slot alone cannot show: the
@@ -877,7 +882,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1523,6 +1528,50 @@ task_shell_triage() {  # <window> <task> <busy-state> -> 0 if handled
   return 1
 }
 
+# A gone agent is not a wedge either. The wedge ladder measures a pane that is not
+# moving, and it never asked whether anything is left to freeze: an agent that has
+# exited never moves, its pane never churns, the idle timer never resets, and the
+# escalate path below clears its own timer and re-arms it, so nothing bounded the
+# count. Two lanes that had failed and lost their agent climbed past 200
+# escalations each. This runs only in the branch that is about to escalate - at
+# most one backend read per window per STALE_ESCALATE_SECS - and acts only on the
+# two recovery-grade verdicts fm_backend_agent_state licenses, `dead` and
+# `missing`; an alive, ambiguous, unreadable or unverified read keeps the ordinary
+# ladder. The first such read surfaces once as a plain wake naming the gone agent
+# and records its identity in .wedge-dead-<key>; every later one over the same
+# identity only absorbs, restarting the timer so the read repeats at the same
+# bounded cadence. The identity is the verdict plus the task's busy generation, so
+# a relaunched agent that dies again is a new report, and the marker is dropped
+# wherever the window's hash-scoped tracking resets (clear_stale_hash_tracking).
+# Returns 0 when it handled the window, 1 when the agent is not confidently gone.
+wedge_dead_agent_hold() {  # <window> <task> <since-file> <escalation-count-file> <label> <age>
+  local win=$1 task=$2 since_file=$3 escalation_file=$4 label=$5 age=$6 key marker state identity gen reason
+  key=$(window_key "$win")
+  marker="$STATE/.wedge-dead-$key"
+  state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null || true)
+  case "$state" in
+    dead|missing) ;;
+    *) rm -f "$marker"; return 1 ;;
+  esac
+  identity=$state
+  if [ -n "$task" ] && gen=$(fm_busy_current_gen "$STATE" "$task"); then
+    identity="$state:$gen"
+  fi
+  rm -f "$escalation_file"
+  clear_write_tracking "$key"
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$identity" ]; then
+    date +%s > "$since_file"
+    triage_log "absorbed $label (agent gone: $state, already surfaced for this agent): $win"
+    return 0
+  fi
+  reason="stale: $win (idle ${age}s, agent gone ($state) - not a wedge; reported once, no further wedge escalation while no agent runs here)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$identity" > "$marker"
+  rm -f "$since_file"
+  triage_log_surfaced_stale "$win" "agent gone ($state)"
+  wake "$reason"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1550,6 +1599,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
+        if wedge_dead_agent_hold "$win" "$task" "$since_file" "$escalation_file" "$label" "$age"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1597,7 +1649,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   now=$(date +%s)
@@ -1833,7 +1885,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   clear_task_shell_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
