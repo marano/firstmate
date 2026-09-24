@@ -47,9 +47,10 @@ concurrent_failure_report() {  # <logs-dir> <state> <label> <status>
       2>/dev/null | tr '\n' ' ')"
 }
 
+# Mutant: publish the lock link with an ln -s that follows an existing lock link.
 test_concurrent_append_and_drain() {
   local dir state logs out1 out2 pids i pid count unique malformed sequence generation
-  local status label failures=
+  local status label stray failures=
   dir=$(make_case concurrent)
   state="$dir/state"
   logs="$dir/subprocess-logs"
@@ -100,6 +101,12 @@ test_concurrent_append_and_drain() {
     [ "$status" = 0 ] || failures="$failures$(concurrent_failure_report "$logs" "$state" "$label" "$status")"$'\n'
   done
   [ -z "$failures" ] || fail "concurrent append/drain subprocess failed:"$'\n'"$failures"
+  # Losing an acquisition race must leave nothing inside the winner's owner
+  # directory: anything there outlives the winner's release, and neither that
+  # release nor the stray-owner reaper can then remove the directory.
+  stray=$(find "$state" -path '*.owner.*/*' -type l 2>/dev/null)
+  [ -z "$stray" ] \
+    || fail "a losing lock acquirer linked itself inside another acquirer's owner directory:"$'\n'"$stray"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
@@ -2056,6 +2063,61 @@ test_malformed_presentation_lock_reports_acquire_failure() {
   pass "malformed presentation locks report acquire failure instead of contention"
 }
 
+# A drain whose deadline passes while the queue lock sits between holders lost
+# an ordinary race, and must skip for the next drain rather than refuse as if
+# the lock were unsafe. A verdict read once, after the refused attempt, at an
+# instant with no live pid recorded made that refusal; the concurrent case
+# above meets such instants only by chance. This case holds one open instead:
+# another acquirer has published its link and not yet recorded its pid, which
+# the lock counts as held until that claim goes stale. The drain must still
+# read and acknowledge nothing, and must leave the claim in place.
+# Mutant: take the deadline verdict from one read of the lock after the refused attempt.
+# Mutant: count an unrecorded claim as unsafe rather than held.
+test_queue_deadline_during_unrecorded_claim_skips() {
+  local dir state out err next_out next_err owner rc
+  dir=$(make_case deadline-unrecorded-claim)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  next_out="$dir/next.out"
+  next_err="$dir/next.err"
+
+  append_wake "$state" signal task.status "signal: $state/task.status" \
+    || fail "could not seed the unrecorded-claim wake"
+  owner=$(mktemp -d "$state/.wake-queue.lock.owner.XXXXXX") \
+    || fail "could not mint the claiming acquirer's owner directory"
+  ln -s "$owner" "$state/.wake-queue.lock" || fail "could not publish the unrecorded claim"
+
+  # The staleness bound outlasts the deadline, so the claim is still inside its
+  # window whenever the drain gives its verdict.
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_LOCK_STALE_AFTER=60 \
+    "$DRAIN" > "$out" 2> "$err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "drain refused a lock held by an unrecorded claim (rc=$rc): $(tr '\n' ' ' < "$err")"
+  if grep -F 'could not be acquired safely' "$err" >/dev/null; then
+    fail "an unrecorded claim was reported as an unsafe queue lock"
+  fi
+  grep -F 'WAKE DRAIN SKIPPED: queue lock remains held' "$out" >/dev/null \
+    || fail "an unrecorded claim was not reported as retriable contention"
+  if grep "$(printf '\tsignal\t')" "$out" >/dev/null \
+    || grep -F 'WAKE_ACK_REQUIRED:' "$err" >/dev/null; then
+    fail "a drain that never held the queue lock presented its rows"
+  fi
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a drain that never held the queue lock changed the durable wake"
+  [ "$(readlink "$state/.wake-queue.lock" 2>/dev/null || true)" = "$owner" ] \
+    || fail "the skipped drain broke another acquirer's claim"
+
+  rm -f "$state/.wake-queue.lock"
+  rmdir "$owner" || fail "the claiming acquirer's owner directory gained unexpected contents"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$next_out" 2> "$next_err" \
+    || fail "drain after the claim cleared failed"
+  grep "$(printf '\tsignal\t')" "$next_out" >/dev/null \
+    || fail "the skipped wake was not presented once the claim cleared"
+  pass "a queue-lock deadline during an unrecorded claim skips for the next drain instead of refusing"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -2110,6 +2172,7 @@ test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
+test_queue_deadline_during_unrecorded_claim_skips
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
 test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
