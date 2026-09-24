@@ -145,7 +145,7 @@ init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -239,7 +239,7 @@ init_primary_and_linked_worktree() {
   for tree in "$repo" "$linked"; do
     mkdir -p "$tree/bin" "$tree/tests"
     install_runner "$tree/bin/fm-test-run.sh"
-    cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
+    cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$tree/tests/"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
 #!/usr/bin/env bash
@@ -378,6 +378,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "git-config helper selects snapshot dependents"
   git -C "$repo" add tests/git-config-helpers.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm git-config-helper-change
+
+  printf '\n' >>"$repo/tests/worker-env-helpers.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "worker-env helper selects lib.sh dependents"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" "worker-env helper selects secondmate dependents"
+  git -C "$repo" add tests/worker-env-helpers.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm worker-env-helper-change
 
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
@@ -563,7 +570,7 @@ PY
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   install_runner "$timeout_repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$timeout_repo/tests/"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   [ "$1" -eq 1800 ] || return 99
@@ -709,7 +716,7 @@ test_family_proofs_run_in_separate_concurrent_phases() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -1690,7 +1697,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
@@ -1808,7 +1815,7 @@ test_per_script_timeout_bounds_a_hang() {
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
@@ -1874,7 +1881,7 @@ test_default_per_script_bound_names_a_stall_and_moves_on() {
   after=tests/fm-after-stall-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   cat >"$repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   printf '%s\n' "$1" >>"$FM_TIMED_BOUNDS"
@@ -1940,7 +1947,7 @@ test_bounded_script_killed_by_a_signal_still_fails() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$repo/bin/fm-test-run.sh"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   # Two individually proven scripts, so the bounded run takes the concurrent
   # path that captures output instead of streaming it.
   killed=tests/fm-cd-pretool-check.test.sh
@@ -1978,7 +1985,7 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   install_runner "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -2065,7 +2072,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   install_runner "$runner"
-  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$repo/tests/"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
