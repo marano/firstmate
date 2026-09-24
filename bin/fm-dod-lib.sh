@@ -10,6 +10,10 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# The two PR-based blocks require a non-draft pull request, read back from the
+# forge, before the done report; a lane that deliberately holds a draft declares
+# a paused wait instead. bin/fm-pr-check.sh refuses to arm merge monitoring on a
+# draft through the reading bin/fm-pr-lib.sh owns.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -362,7 +366,11 @@ _fm_dod_render_block() {  # <mode> <task-id> [<delivers-csv>]
 Delivery contract: mode=direct-PR
 ${delivers_block}This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft.
+Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready <number> -R <owner>/<repo>\`.
+A draft cannot be merged, so a done report on one leaves the merge unasked and merge monitoring refuses to arm.
+Then append \`done: PR {url}\` to the status file and stop.
+If you deliberately keep the PR a draft, append \`paused: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -419,7 +427,10 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green run={run-id}\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready <number> -R <owner>/<repo>\`.
+A draft cannot be merged, so a done report on one leaves the merge unasked and merge monitoring refuses to arm.
+Then append \`done: PR {url} checks green run={run-id}\` and stop. You are finished.
+If you deliberately keep the PR a draft, append \`paused: {why the draft is held}\` instead of done.
 \`{run-id}\` is the concrete no-mistakes run you drove to that green result, exactly as \`axi run\`/\`axi respond\` printed it - paste that id, never a description of the command you ran. "Applied via axi respond" is a report about a command, not evidence about the commit: a \`done:\` line with no run id is not a complete report, so do not send one.
 EOF
       ;;
