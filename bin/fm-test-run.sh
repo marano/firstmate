@@ -944,8 +944,6 @@ tests/fm-home-summary-refresh.test.sh	cost:42611
 tests/fm-inactive-reconcile.test.sh	cost:41680
 tests/fm-lint.test.sh	cost:156636
 tests/fm-muse-harness.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
-tests/fm-muse-harness.test.sh 42782
-tests/fm-muse-harness.test.sh${t}muse harness is not used here
 tests/fm-omp-harness.test.sh	cost:53578
 tests/fm-pending-reply.test.sh	cost:42048
 tests/fm-pi-branch-extension.test.sh	cost:91395
