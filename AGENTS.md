@@ -126,7 +126,7 @@ state/               runtime records and signals; gitignored
   afk-contracts/     archived away-posture records: one final record per away window keyed by entry time, plus any superseded mandates from that window
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm* .turnend-claude-blocks* .cursor-park-owner* .turnend-cursor-blocks   per-harness turn-end guard records - auto-arm single-flight, epoch, failure episode, attended alarm, Cursor stop-hook ownership - with their locks and guard budgets; never touch (docs/turnend-guard.md)
-  .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .idle-fleet-* .unrecorded-pr-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-dead-* .writing-* .seen-* .hb-surfaced-* .idle-fleet-* .unrecorded-pr-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch

@@ -116,7 +116,7 @@ test_paused_authoritative_working_holds_cadence_and_recheck_ceiling() {
 # independent of the worker's harness process) must not be trusted as evidence
 # the declared wait still holds - it still wedge-escalates on the ordinary short
 # cadence, exactly as an undeclared provably-working stale does.
-test_paused_run_step_working_dead_agent_still_wedge_escalates() {
+test_paused_run_step_working_dead_agent_still_wakes_once() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case paused-run-step-dead-agent); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-dead"
@@ -156,9 +156,9 @@ test_paused_run_step_working_dead_agent_still_wedge_escalates() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a dead agent behind a declared pause with an active run record did not eventually wake firstmate"
-  grep -F "possible wedge" "$out" >/dev/null || fail "a dead agent behind a run-step-working pause did not wedge-escalate: $(cat "$out")"
+  grep -F "agent gone (dead)" "$out" >/dev/null || fail "a dead agent behind a run-step-working pause was not reported as gone: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
-  pass "a dead agent behind a declared pause still wedge-escalates even while the run record reads working"
+  pass "a dead agent behind a declared pause still wakes firstmate even while the run record reads working, reported as a gone agent"
 }
 
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
@@ -1137,6 +1137,71 @@ test_turn_end_under_pause_whose_time_passed_surfaces_once() {
   pass "a turn-end under a pause whose declared time has passed surfaces once for that declaration"
 }
 
+# --- a gone agent is reported once, never wedge-escalated forever -------------
+# The wedge ladder measured a pane that does not move and never asked whether an
+# agent was still attached to it. An agent that is gone never moves, so the timer
+# cleared and re-armed on every escalation with nothing bounding the count: two
+# lanes that had lost their agent reached 226 and 203 consecutive escalations.
+# wedge_dead_agent_hold reads fm_backend_agent_state once, in the branch about to
+# escalate, and acts only on the recovery-grade `dead` and `missing` verdicts.
+# The fake tmux reads `zsh` as a shell-only pane (dead) and `claude` as a live
+# agent; an unset current command reads unreadable and keeps the ladder.
+#
+# Mutants that must turn this red:
+#   - drop the wedge_dead_agent_hold call: the first leg wakes as a possible wedge.
+#   - hold without recording the identity marker: the quiet leg wakes again.
+#   - hold on every verdict, not only dead and missing: the live-agent leg goes quiet.
+#   - drop the busy generation from the identity: the relaunched-and-died-again
+#     leg stays quiet.
+test_a_gone_agent_reports_once_and_a_live_idle_one_still_escalates() {
+  local dir state fakebin out capture window key pid
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  dir=$(make_case gone-agent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-gone-agent"
+  key=$(landing_stale_task "$state" gone-agent "$window" "$capture" 'fm-gone-agent $' \
+    'working: implementing the risk module')
+  printf 'gen1\n' > "$state/gone-agent.busy-gen"
+
+  # First sight of the gone agent: one plain wake naming it, no ladder entry.
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a gone agent never woke firstmate"; }
+  grep -F "stale: $window (idle " "$out" | grep -F "agent gone (dead)" >/dev/null \
+    || fail "the gone agent did not wake as a gone agent: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a gone agent was called a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the gone agent's one wake"
+
+  # Every later poll over the same agent stays quiet, well past the threshold.
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 5 "a gone agent whose one wake was already surfaced"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the quiet leg's watcher stop"
+
+  # A relaunched agent that dies again is a new agent and reports once more.
+  printf 'gen2\n' > "$state/gone-agent.busy-gen"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a second gone agent never woke firstmate"; }
+  grep -F "agent gone (dead)" "$out" >/dev/null || fail "the second gone agent printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second gone agent's wake"
+
+  # CONTROL: the same pane with a live but idle agent is still a possible wedge,
+  # and it climbs the ladder as before.
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=claude
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a live idle agent never escalated"; }
+  grep -F "stale: $window (idle " "$out" | grep -F "possible wedge, escalation 1" >/dev/null \
+    || fail "a live idle agent did not escalate as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-dead-$key" ] || fail "a live agent left the gone-agent record behind"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live agent's escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a gone agent reports once and stays quiet, a relaunched one reports again, and a live idle agent still escalates"
+}
+
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
@@ -1147,12 +1212,13 @@ test_a_declared_wait_survives_the_resolutions_logged_after_it
 test_a_bare_resolution_ends_an_unkeyed_wait
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_stopped_worker_with_unlanded_work_surfaces_once_and_never_as_a_wedge
+test_a_gone_agent_reports_once_and_a_live_idle_one_still_escalates
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
 test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet
 test_nonterminal_paused_confirmed_by_active_run_holds_pause_cadence
 test_paused_authoritative_working_holds_cadence_and_recheck_ceiling
-test_paused_run_step_working_dead_agent_still_wedge_escalates
+test_paused_run_step_working_dead_agent_still_wakes_once
 test_turn_end_under_declared_pause_is_absorbed
 test_turn_end_after_new_status_still_surfaces
 test_turn_end_under_declared_pause_resurfaces_on_the_cadence
