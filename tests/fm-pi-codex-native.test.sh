@@ -360,3 +360,7 @@ try {
 }
 
 JS
+status=$?
+[ "$status" -eq 0 ] || exit "$status"
+# The node guard reports its checks as JSON; the runner counts cases by this line.
+pass "native Codex-through-Pi primary guard held against the installed Pi and adapter"
