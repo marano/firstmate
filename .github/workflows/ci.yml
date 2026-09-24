@@ -539,8 +539,13 @@ jobs:
   # bin/fm-test-run.sh owns which tests this lane selects and names every test it
   # leaves out with the reason; docs/verification/stock-bash-lane.md records the
   # measurement behind those reasons and what this lane still cannot cover.
+  # Split across separate macOS runners the way the portable serial lane is, so
+  # it stops setting the floor on every run's wall clock: each shard is still
+  # strictly serial in itself. bin/fm-test-run.sh owns the shard count and the
+  # packing, and bin/fm-stock-bash-lane.sh refuses a --shard whose job-total
+  # disagrees with it, so resizing this matrix alone cannot drop part of the lane.
   macos-stock-bash:
-    name: Stock macOS Bash 3.2 behavior lane
+    name: Stock macOS Bash 3.2 behavior lane ${{ matrix.shard }}
     runs-on: macos-latest
     # Budget, not a hang tripwire: the lane's per-script cost rule in
     # bin/fm-test-run.sh is what keeps it inside this wall clock, and macOS
@@ -549,7 +554,16 @@ jobs:
     # (about 110s in this lane instead of about 21s) one run was cut at the
     # 30-minute cap with 98 of 99 scripts done, and a re-run that stopped
     # early on a failure still took 28m17s. Raised to give real headroom.
+    # Each shard now packs about half of that lane.
     timeout-minutes: 40
+    strategy:
+      # Every shard reports so one failure never hides another shard's result.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # job-total rather than a literal; see the note above the job.
+      FM_STOCK_BASH_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v6
       # Pin ONLY Bash. The previous job restricted PATH to /bin:/usr/bin:... to
@@ -568,13 +582,13 @@ jobs:
           printf '%s\n' "$shim" >> "$GITHUB_PATH"
       # The lint suites need the repository's pinned linters; without them those
       # suites fail for a missing tool rather than for anything about the shell
-      # under test. Asked of the lane owner rather than of the stock-bash lane
-      # alone, because this job also runs the retained public-followup
-      # regression and so must have whatever that needs too.
-      - name: Install the pinned lint tools this lane needs
+      # under test. Asked of the lane owner for this shard rather than of the
+      # runner's lane alone, because one shard also runs the retained
+      # public-followup regression and so must have whatever that needs too.
+      - name: Install the pinned lint tools this shard needs
         run: |
           set -euo pipefail
-          bin/fm-stock-bash-lane.sh --required-tools \
+          bin/fm-stock-bash-lane.sh --shard "$FM_STOCK_BASH_SHARD" --required-tools \
             | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install tasks-axi
@@ -586,21 +600,23 @@ jobs:
       # bin/fm-stock-bash-lane.sh owns everything this lane runs - the stock
       # Bash pin and its guards, the parse sweep, the selected tests with their
       # pinned case counts, and the retained public-followup regression - so a
-      # local run before push executes exactly what this job executes.
-      - name: Run the stock-bash lane under stock Bash
+      # local run before push executes exactly what these shards execute.
+      - name: Run stock-bash shard ${{ matrix.shard }} under stock Bash
         shell: /bin/bash {0}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-stock-bash-lane.sh --json "$RUNNER_TEMP/fm-test/fm-test-timing-stock-bash.json"
-      - name: Upload stock-bash timing artifact
+          bin/fm-stock-bash-lane.sh --shard "$FM_STOCK_BASH_SHARD" \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-stock-bash-${{ matrix.shard }}.json"
+      - name: Upload stock-bash shard ${{ matrix.shard }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          # The measured per-script durations the lane's cost exclusions are
-          # justified against. Refresh that table from this artifact.
-          name: fm-test-timing-stock-bash
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-stock-bash.json
+          # The measured per-script durations the lane's cost exclusions and
+          # shard packing are justified against. Refresh those tables from the
+          # artifacts of every shard (docs/verification/stock-bash-lane.md).
+          name: fm-test-timing-stock-bash-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-stock-bash-${{ matrix.shard }}.json
           if-no-files-found: warn
 
   invariants:

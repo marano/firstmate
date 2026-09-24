@@ -1,7 +1,7 @@
 # Stock macOS Bash 3.2 lane coverage
 
 `bin/fm-test-run.sh` owns which tests the `stock-bash` lane selects, the exclusion table with one reason per excluded test, and the `STOCK_BASH_MAX_SCRIPT_MS` bound a `cost:` reason must clear.
-`bin/fm-stock-bash-lane.sh` owns everything the lane runs, so CI's `macos-stock-bash` job and a local run before push execute the same checks; `.github/workflows/ci.yml` owns that job's tool installs and wall-clock budget.
+`bin/fm-stock-bash-lane.sh` owns everything the lane runs, so CI's `macos-stock-bash` shards and a local run before push execute the same checks; `.github/workflows/ci.yml` owns those jobs' tool installs and wall-clock budget.
 This record holds the measurement those reasons are justified against, and states what the lane still cannot cover.
 
 ## Why the lane exists
@@ -48,7 +48,44 @@ Closing it needs the two properties in one job - Bash 3.2 on a runner that has H
 ## Refreshing the cost table
 
 The `cost:` reasons in `bin/fm-test-run.sh` cite measured per-script durations.
-The `macos-stock-bash` job uploads `fm-test-timing-stock-bash`, whose `scripts[].duration_ms` values are the CI measurement for every script the lane runs; refresh the table from that artifact rather than from a local run, because local timings and CI timings are not interchangeable.
+Each `macos-stock-bash` shard uploads `fm-test-timing-stock-bash-<k>`, whose `scripts[].duration_ms` values are the CI measurement for every script that shard runs; refresh the table from those artifacts rather than from a local run, because local timings and CI timings are not interchangeable.
+Runs before the split uploaded the whole lane as one `fm-test-timing-stock-bash` artifact.
+
+## CI shards
+
+The lane runs as `STOCK_BASH_SHARDS` separate macOS jobs, each strictly serial in itself, so no two stateful scripts share a runner.
+`bin/fm-test-run.sh` owns the count, the `stock-bash-<k>of<n>` lanes, and their longest-first packing over `stock_bash_weight_hints`; a script the default exclusions drop weighs nothing there, because a default run never executes it.
+`bin/fm-stock-bash-lane.sh --shard <k>/<n>` runs one shard, hands every shard every case-count pin, runs the parse sweep and the retained public-followup regression in shard 1 only, and refuses an `<n>` the runner does not pack before it runs anything.
+`bin/fm-test-run.sh --check-coverage` proves the shards partition the lane and that every pinned script lands in exactly one shard, since a shard ignores the pin of a script it does not hold.
+
+Why two, measured over CI runs of 2026-09-23 and 2026-09-24:
+
+- The single lane's job took a median 22.2 minutes and was the last job to finish in 44 of 60 runs, while the longest Linux job took a median 19.4 minutes.
+- Two shards bring the lane under that Linux floor; replaying 60 runs' real job arrivals under the Free plan's 20-job and 5-macOS-job limits put the median pull-request run at 21.4 minutes instead of 25.3.
+- Three or more shards gave the same 21.4-minute median in that replay, because the Linux jobs are then the floor, and each extra shard is one more job competing for the five macOS slots.
+- The split adds about 1% of list-price macOS minutes, one job setup per extra shard; the repository is public, so those minutes bill at $0.
+
+### Hint provenance
+
+`stock_bash_weight_hints` holds each script's median `duration_ms` over the lane artifacts of 14 green CI runs from 2026-09-24: 35971956181, 35976456798, 35976793939, 35988804472, 35989009252, 35991212700, 35991644617, 35993214150, 35993814031, 35995178342, 35995512527, 35998099424, 35998978341 and 35999600195.
+All 14 ran the same 102 scripts.
+`tests/fm-build-lock.test.sh` takes its median over 35993214150 and 35998978341 only, the two runs that executed its 51 cases; in the others it exited 0 having run none, the defect #131 fixed.
+Packed from those hints, the two shards hold 51 scripts each and weigh 832,482 ms and 832,465 ms.
+
+To refresh, download `fm-test-timing-stock-bash-<k>` for every shard of several recent green runs, take each script's median `duration_ms`, and rewrite the table as `<path> <ms>` lines sorted by path:
+
+```sh
+gh api "repos/<owner>/<repo>/actions/runs/<run>/artifacts?per_page=100" \
+  --jq '.artifacts[] | select(.name | startswith("fm-test-timing-stock-bash")) | .id'
+gh api repos/<owner>/<repo>/actions/artifacts/<id>/zip > a.zip && unzip -p a.zip > <run>-<k>.json
+jq -r '.scripts[] | "\(.path) \(.duration_ms)"' *.json \
+  | awk '{ d[$1] = d[$1] " " $2 } END { for (p in d) print p d[p] }' \
+  | python3 -c 'import statistics, sys
+for l in sys.stdin:
+    p, *v = l.split(); print(p, int(statistics.median(map(int, v))))' | LC_ALL=C sort
+```
+
+`--check-coverage` reports `stock_bash_unhinted`, the default-run scripts still packed on `STOCK_BASH_DEFAULT_WEIGHT_MS`, and `stock_bash_max_ms`, the heavier shard's packed weight.
 
 ## Local measurement
 

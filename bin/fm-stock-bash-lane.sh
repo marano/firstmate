@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # fm-stock-bash-lane.sh - the single owner of what the stock macOS Bash 3.2 lane
-# runs, so CI's `macos-stock-bash` job and a local run before push execute the
+# runs, so CI's `macos-stock-bash` shards and a local run before push execute the
 # same checks and cannot drift apart.
 #
 # Usage:
-#   fm-stock-bash-lane.sh [--json <path>]   run the lane
-#   fm-stock-bash-lane.sh --list            print the test scripts it runs
-#   fm-stock-bash-lane.sh --required-tools  print the pinned linters those tests
-#                                           need, one per line, so CI installs
-#                                           exactly those and no others
+#   fm-stock-bash-lane.sh [--shard <k>/<n>] [--json <path>]
+#                                 run the lane, or one CI shard of it
+#   fm-stock-bash-lane.sh [--shard <k>/<n>] --list
+#                                 print the test scripts that runs
+#   fm-stock-bash-lane.sh [--shard <k>/<n>] --required-tools
+#                                 print the pinned linters those tests need,
+#                                 one per line, so CI installs exactly those
+#                                 and no others
+#   fm-stock-bash-lane.sh --ok-count-pins
+#                                 print the lane's case-count pins, one
+#                                 <script>=<count> per line
 #   fm-stock-bash-lane.sh --help
 #
 # Run it locally before pushing a change to firstmate's shell, and treat a
@@ -19,7 +25,7 @@
 # Do not wrap it in `mutex`: bin/fm-test-run.sh already takes the machine-wide
 # build lock once per script, and the retained regression below takes its own
 # hold, so other workers' builds go between two tests instead of queueing behind
-# the whole ~20 minute lane.
+# the whole ~28 minute lane.
 #
 # It is where the day's CI-only failures landed. The lane does not only vary
 # the shell: it runs 130-odd scripts a targeted local run never selects, and it
@@ -39,6 +45,16 @@
 #      per-script bound and pinned case counts.
 #   4. The one `tests/fm-public-followup.test.sh` regression the lane keeps by
 #      name although that file is cost-excluded.
+#
+# CI runs the lane as separate macOS shards, one job per `--shard <k>/<n>` with
+# <n> the matrix's strategy.job-total. bin/fm-test-run.sh owns the shard count
+# and the packing, as its `stock-bash-<k>of<n>` lanes, and refuses an <n> that
+# disagrees, so a shard is refused before it runs anything and a matrix resized
+# on its own cannot leave part of the lane unrun. Step 3 runs that shard's share
+# with every case-count pin; steps 2 and 4 run only in shard EXTRAS_SHARD. With
+# no --shard it runs the whole lane, which is what a local run before push wants.
+# `bin/fm-test-run.sh --check-coverage` proves the shards partition the lane and
+# that every pinned script lands in exactly one of them.
 #
 # It never installs anything: `jq` and `tasks-axi` must already be on PATH, as
 # must the repository-pinned linters the lint suites need.
@@ -61,6 +77,17 @@ STOCK_BASH=${FM_STOCK_BASH:-/bin/bash}
 # The one regression retained from the cost-excluded public-followup file.
 PF_TEST=tests/fm-public-followup.test.sh
 PF_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32
+# The shard that also runs the parse sweep and the retained regression.
+EXTRAS_SHARD=1
+
+# Exact case counts, passed to every shard: exit status alone cannot see a
+# script that stops printing cases while still exiting 0. A shard ignores the
+# pin of a script it does not hold.
+ok_count_pins() {
+  printf '%s\n' \
+    tests/fm-fleet-snapshot-view.test.sh=22 \
+    tests/fm-bearings-snapshot.test.sh=60
+}
 
 usage() {
   awk '
@@ -79,15 +106,23 @@ lane_error() {
   fi
 }
 
+# Whether this run carries the parse sweep and the retained regression.
+runs_extras() {
+  [ -z "$SHARD_INDEX" ] || [ "$SHARD_INDEX" = "$EXTRAS_SHARD" ]
+}
+
 list_lane() {
-  "$ROOT/bin/fm-test-run.sh" --list --lane stock-bash || return 1
-  printf '%s\n' "$PF_TEST"
+  "$ROOT/bin/fm-test-run.sh" --list --lane "$RUNNER_LANE" || return 1
+  if runs_extras; then
+    printf '%s\n' "$PF_TEST"
+  fi
 }
 
 # The pinned linters this lane's complete selection needs. Asked over --list
 # rather than over the stock-bash lane alone, because the retained
-# public-followup regression is part of what this job runs and so part of what
-# it must have installed. bin/fm-test-run.sh owns which test needs which tool.
+# public-followup regression is part of what its shard runs and so part of what
+# that job must have installed. bin/fm-test-run.sh owns which test needs which
+# tool.
 required_tools() {
   local scripts
   scripts=$(list_lane) || return 1
@@ -103,25 +138,53 @@ require_stock() {  # <what> <version>
   exit 1
 }
 
+ACTION=run
 JSON=
-case "${1:-}" in
-  --help|-h) usage; exit 0 ;;
-  --list)
-    [ "$#" -eq 1 ] || { lane_error "--list takes no further arguments"; exit 2; }
-    list_lane
-    exit $?
-    ;;
-  --required-tools)
-    [ "$#" -eq 1 ] || { lane_error "--required-tools takes no further arguments"; exit 2; }
-    required_tools
-    exit $?
-    ;;
-  --json)
-    [ "$#" -eq 2 ] || { lane_error "--json takes exactly one path"; exit 2; }
-    JSON=$2
-    ;;
-  '') ;;
-  *) lane_error "unknown argument: $1 (see --help)"; exit 2 ;;
+SHARD=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --list|--required-tools|--ok-count-pins)
+      [ "$ACTION" = run ] || { lane_error "--$ACTION and $1 cannot be combined"; exit 2; }
+      ACTION=${1#--}
+      shift
+      ;;
+    --json|--shard)
+      [ "$#" -ge 2 ] || { lane_error "$1 takes a value"; exit 2; }
+      if [ "$1" = --json ]; then JSON=$2; else SHARD=$2; fi
+      shift 2
+      ;;
+    *) lane_error "unknown argument: $1 (see --help)"; exit 2 ;;
+  esac
+done
+[ -z "$JSON" ] || [ "$ACTION" = run ] || { lane_error "--json applies only to a run"; exit 2; }
+
+if [ "$ACTION" = ok-count-pins ]; then
+  [ -z "$SHARD" ] || { lane_error "--ok-count-pins is the same for every shard; drop --shard"; exit 2; }
+  ok_count_pins
+  exit 0
+fi
+
+# The runner's lane for this run, which is also what refuses a shard count that
+# disagrees with bin/fm-test-run.sh.
+RUNNER_LANE=stock-bash
+SHARD_INDEX=
+if [ -n "$SHARD" ]; then
+  case "$SHARD" in
+    [0-9]*/[0-9]*) ;;
+    *) lane_error "--shard takes <k>/<n>, got '$SHARD'"; exit 2 ;;
+  esac
+  SHARD_INDEX=${SHARD%%/*}
+  shard_count=${SHARD#*/}
+  case "$SHARD_INDEX$shard_count" in
+    *[!0-9]*) lane_error "--shard takes <k>/<n>, got '$SHARD'"; exit 2 ;;
+  esac
+  RUNNER_LANE="stock-bash-${SHARD_INDEX}of${shard_count}"
+fi
+
+case "$ACTION" in
+  list) list_lane; exit $? ;;
+  required-tools) required_tools; exit $? ;;
 esac
 
 [ -x "$STOCK_BASH" ] || { lane_error "stock Bash not found at $STOCK_BASH"; exit 1; }
@@ -138,6 +201,12 @@ case "$BASH_VERSION" in
 esac
 require_stock "this lane script" "$BASH_VERSION"
 
+# Refuse a shard the runner does not pack before spending anything on it.
+if [ -n "$SHARD" ] && ! "$ROOT/bin/fm-test-run.sh" --list --lane "$RUNNER_LANE" >/dev/null; then
+  lane_error "shard $SHARD does not match the stock-bash shards bin/fm-test-run.sh packs (see its --list-lanes)"
+  exit 2
+fi
+
 SHIM=$(mktemp -d "${TMPDIR:-/tmp}/fm-stock-bash.XXXXXX") || exit 1
 trap 'rm -rf "$SHIM"' EXIT
 ln -s "$STOCK_BASH" "$SHIM/bash" || exit 1
@@ -152,28 +221,29 @@ bash --version | head -1
 command -v jq >/dev/null || { lane_error "jq is required"; exit 1; }
 command -v tasks-axi >/dev/null || { lane_error "tasks-axi is required for the stock Bash regressions"; exit 1; }
 
-parse_fail=0
-while IFS= read -r f; do
-  bash -n "$f" || { lane_error "stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
-done < <(CI=true "$ROOT/bin/fm-lint.sh" --list-files)
-[ "$parse_fail" -eq 0 ] || { lane_error "stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+if runs_extras; then
+  parse_fail=0
+  while IFS= read -r f; do
+    bash -n "$f" || { lane_error "stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
+  done < <(CI=true "$ROOT/bin/fm-lint.sh" --list-files)
+  [ "$parse_fail" -eq 0 ] || { lane_error "stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+fi
 
-# --require-ok-count keeps exact case counts: exit status alone cannot see a
-# script that stops printing cases while still exiting 0. A per-script bound
-# well clear of the slowest member turns a HUNG script into a named failure
-# instead of an unattributed job cancellation at the cap. The slowest script
-# measured is tests/fm-bearings-snapshot.test.sh: 321.8s in CI (max over 96
-# recent macos-stock-bash job logs) and 197.8s in a full local lane run on
-# 2026-09-19. 1000s is 3.1x over the slowest CI script and still well under the
-# job's 30-minute cap, so a hung script fails by name rather than the job being
+# A per-script bound well clear of the slowest member turns a HUNG script into
+# a named failure instead of an unattributed job cancellation at the cap. The
+# slowest script measured is tests/fm-bearings-snapshot.test.sh: 321.8s in CI
+# (max over 96 recent macos-stock-bash job logs) and 197.8s in a full local lane
+# run on 2026-09-19. 1000s is 3.1x over the slowest CI script and still well
+# under the job's cap, so a hung script fails by name rather than the job being
 # cancelled with no verdict.
 LANE_SCRIPT_TIMEOUT_SECS=1000
-run_args=(--lane stock-bash
-  --per-script-timeout-secs "$LANE_SCRIPT_TIMEOUT_SECS"
-  --require-ok-count tests/fm-fleet-snapshot-view.test.sh=22
-  --require-ok-count tests/fm-bearings-snapshot.test.sh=60)
+run_args=(--lane "$RUNNER_LANE" --per-script-timeout-secs "$LANE_SCRIPT_TIMEOUT_SECS")
+while IFS= read -r pin; do
+  run_args+=(--require-ok-count "$pin")
+done < <(ok_count_pins)
 [ -z "$JSON" ] || run_args+=(--json "$JSON")
 "$ROOT/bin/fm-test-run.sh" "${run_args[@]}" || exit 1
+runs_extras || exit 0
 
 # The public-followup file is cost-excluded from the lane, but this lane already
 # covered ONE test inside it, so that regression is retained by name rather than

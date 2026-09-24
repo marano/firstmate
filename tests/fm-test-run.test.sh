@@ -2460,6 +2460,96 @@ test_stock_bash_exclusions_carry_a_checkable_reason() {
   pass "stock-bash exclusions: each names a real test and an admissible reason"
 }
 
+# The stock-bash lane runs as separate macOS shards. Asked through the runner's
+# own lane selection, the one each CI job runs: the shards must cover the lane
+# exactly, with and without the default exclusions, and must refuse a shard
+# count that disagrees with the runner's.
+test_stock_bash_shards_partition_the_stock_bash_lane() {
+  local count lane union shard listed flag tmp rc
+  count=$("$RUNNER" --list-lanes | grep -c '^stock-bash-[0-9]*of[0-9]*$' || true)
+  [ "$count" -ge 2 ] || fail "expected at least two stock-bash shard lanes, got $count"
+  for flag in "" --include-excluded; do
+    lane=$("$RUNNER" --list --lane stock-bash ${flag:+"$flag"} | LC_ALL=C sort)
+    union=""
+    shard=1
+    while [ "$shard" -le "$count" ]; do
+      listed=$("$RUNNER" --list --lane "stock-bash-${shard}of${count}" ${flag:+"$flag"})
+      [ "$(printf '%s\n' "$listed" | grep -c .)" -ge 2 ] \
+        || fail "stock-bash-${shard}of${count} ${flag} holds fewer than two scripts"
+      union=$(printf '%s\n%s' "$union" "$listed")
+      shard=$((shard + 1))
+    done
+    union=$(printf '%s\n' "$union" | grep -v '^$' || true)
+    [ -z "$(printf '%s\n' "$union" | LC_ALL=C sort | uniq -d)" ] \
+      || fail "stock-bash shards ${flag} run a script twice: $(printf '%s\n' "$union" | LC_ALL=C sort | uniq -d)"
+    [ "$(printf '%s\n' "$union" | LC_ALL=C sort)" = "$lane" ] \
+      || fail "stock-bash shards ${flag} must cover the stock-bash lane exactly"
+  done
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stock-shards.XXXXXX")
+  rc=0
+  "$RUNNER" --list --lane "stock-bash-1of$((count + 1))" >"$tmp/out" 2>"$tmp/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a stock-bash shard count the runner does not pack must refuse (exit 2), got $rc"
+  [ ! -s "$tmp/out" ] || fail "a refused stock-bash shard count still listed tests"
+  grep -Fq "configured for $count" "$tmp/err" \
+    || fail "the stock-bash shard count refusal must name the configured count: $(cat "$tmp/err")"
+  rc=0
+  "$RUNNER" --list --lane "stock-bash-$((count + 1))of${count}" >/dev/null 2>"$tmp/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "an out-of-range stock-bash shard must refuse (exit 2), got $rc"
+  rm -rf "$tmp"
+  pass "stock-bash shards cover the lane exactly and refuse a shard count the runner does not pack"
+}
+
+# The coverage guard is what proves the shard split loses nothing, so drive it
+# with partitions the packing never produces and require a red that names the
+# script: one dropped from every shard, one run in two, and the same two for a
+# script the lane pins a case count for, whose pin every shard it misses ignores.
+test_stock_bash_shard_guard_refuses_a_broken_partition() {
+  local tmp count shard pins pinned plain out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stock-guard.XXXXXX")
+  count=$("$RUNNER" --list-lanes | grep -c '^stock-bash-[0-9]*of[0-9]*$' || true)
+  shard=1
+  while [ "$shard" -le "$count" ]; do
+    "$RUNNER" --list --include-excluded --lane "stock-bash-${shard}of${count}" \
+      | awk -v k="$shard" 'NF { print k "\t" $0 }' >>"$tmp/assignments"
+    shard=$((shard + 1))
+  done
+  pins=$("$ROOT/bin/fm-stock-bash-lane.sh" --ok-count-pins) || fail "could not list the lane's case-count pins"
+  pinned=$(printf '%s\n' "$pins" | sed -n '1s/=.*//p')
+  [ -n "$pinned" ] || fail "the stock-bash lane pins no case count, so the pin cases prove nothing"
+  plain=$(awk -F '\t' '$1 == 1 { print $2 }' "$tmp/assignments" | grep -vxF "$(printf '%s\n' "$pins" | sed 's/=.*//')" | sed -n 1p)
+  [ -n "$plain" ] || fail "shard 1 holds no unpinned script to mutate"
+
+  # The unmodified assignment must pass, or the mutants below prove only that
+  # the seam's format is wrong.
+  out=$(FM_STOCK_BASH_ASSIGNMENTS_FILE="$tmp/assignments" "$RUNNER" --check-coverage 2>&1) \
+    || fail "the guard refused the runner's own stock-bash assignment: $out"
+
+  awk -F '\t' -v p="$plain" '$2 != p' "$tmp/assignments" >"$tmp/dropped"
+  out=$(FM_STOCK_BASH_ASSIGNMENTS_FILE="$tmp/dropped" "$RUNNER" --check-coverage 2>&1) \
+    && fail "the guard accepted a stock-bash split that runs $plain in no shard"
+  assert_contains "$out" "missing from stock-bash shards" "a dropped script was not reported as missing"
+  assert_contains "$out" "$plain" "the dropped-script refusal did not name $plain"
+
+  { cat "$tmp/assignments"; printf '2\t%s\n' "$plain"; } >"$tmp/both"
+  out=$(FM_STOCK_BASH_ASSIGNMENTS_FILE="$tmp/both" "$RUNNER" --check-coverage 2>&1) \
+    && fail "the guard accepted a stock-bash split that runs $plain in two shards"
+  assert_contains "$out" "stock-bash shards share scripts" "a doubled script was not reported as shared"
+  assert_contains "$out" "$plain" "the shared-script refusal did not name $plain"
+
+  awk -F '\t' -v p="$pinned" '$2 != p' "$tmp/assignments" >"$tmp/pin-dropped"
+  out=$(FM_STOCK_BASH_ASSIGNMENTS_FILE="$tmp/pin-dropped" "$RUNNER" --check-coverage 2>&1) \
+    && fail "the guard accepted a stock-bash split that runs pinned $pinned in no shard"
+  assert_contains "$out" "$pinned lands in 0 stock-bash shards" "a dropped pinned script was not named"
+
+  awk -F '\t' -v p="$pinned" '{ print } $2 == p { print ($1 == 1 ? 2 : 1) "\t" p }' \
+    "$tmp/assignments" >"$tmp/pin-both"
+  out=$(FM_STOCK_BASH_ASSIGNMENTS_FILE="$tmp/pin-both" "$RUNNER" --check-coverage 2>&1) \
+    && fail "the guard accepted a stock-bash split that runs pinned $pinned in two shards"
+  assert_contains "$out" "$pinned lands in 2 stock-bash shards" "a doubled pinned script was not named"
+  rm -rf "$tmp"
+  pass "the coverage guard refuses a stock-bash split that drops or doubles a script, pinned or not"
+}
+
 test_require_ok_count_catches_a_shrinking_case_list() {
   local tmp f out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-okcount.XXXXXX")
@@ -2630,6 +2720,8 @@ test_required_tools_are_membership_derived_not_constant
 test_a_missing_tool_no_table_names_reds_the_run
 test_a_declared_tool_that_never_arrived_reds_the_run
 test_coverage_guard_refuses_an_unusable_tool_table
+test_stock_bash_shards_partition_the_stock_bash_lane
+test_stock_bash_shard_guard_refuses_a_broken_partition
 test_require_ok_count_catches_a_shrinking_case_list
 test_zero_case_script_fails_the_run
 test_family_selection

@@ -11,6 +11,7 @@
 #   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-parallel-3|portable-serial
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --lane stock-bash                (the stock-Bash 3.2 lane)
+#   fm-test-run.sh --lane stock-bash-<k>of<n>       (one CI stock-Bash shard)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
@@ -234,7 +235,13 @@
 # It also reports stock_bash (how many tests the stock-bash lane selects) and
 # stock_bash_excluded (how many the exclusion table names), and refuses an
 # exclusion that names a missing test, carries no admissible reason, or claims a
-# cost at or under STOCK_BASH_MAX_SCRIPT_MS.
+# cost at or under STOCK_BASH_MAX_SCRIPT_MS. The stock-bash lane's CI shards
+# (stock-bash-<k>of<n>) are packed the same way as the serial shards below, from
+# the measured macOS medians in stock_bash_weight_hints, and this script owns
+# their <n> the same way. The guard refuses unless those shards partition the
+# lane exactly and every script bin/fm-stock-bash-lane.sh --ok-count-pins names
+# lands in exactly one shard, and reports stock_bash_shards, stock_bash_max_ms
+# (the heaviest shard's packed weight) and stock_bash_unhinted.
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -650,6 +657,11 @@ list_known_lanes() {
   done
   printf '%s\n' real-herdr-gated
   printf '%s\n' stock-bash
+  i=1
+  while [ "$i" -le "$STOCK_BASH_SHARDS" ]; do
+    printf 'stock-bash-%sof%s\n' "$i" "$STOCK_BASH_SHARDS"
+    i=$((i + 1))
+  done
 }
 
 # Exact proven-isolated candidate set (same paths as
@@ -1020,6 +1032,161 @@ list_stock_bash() {
   done < <(all_repo_tests)
 }
 
+# How many separate macOS runners the stock-bash lane splits into. One owner:
+# a stock-bash-<k>of<n> lane whose <n> disagrees is refused, so the CI matrix,
+# which passes its strategy.job-total through bin/fm-stock-bash-lane.sh, cannot
+# silently leave part of the lane unrun. Two, by captain decision on 2026-09-24:
+# the single lane was the last job to finish in most CI runs, and a third shard
+# buys nothing once the Linux serial shards are the slowest jobs again
+# (docs/verification/stock-bash-lane.md).
+STOCK_BASH_SHARDS=2
+
+# Balance hint for a stock-bash script with no measured duration: about the
+# mean of the measured medians below, so a newly added test neither starves nor
+# overloads the shard it lands in.
+STOCK_BASH_DEFAULT_WEIGHT_MS=16000
+
+# Measured stock-bash script durations on the macOS runner, in milliseconds:
+# each is the script's median over the lane's timing artifacts from recent green
+# CI runs. docs/verification/stock-bash-lane.md records the runs and owns the
+# refresh. Balance hints only: the shard partition stays complete and disjoint
+# whatever they say, so a stale hint costs balance rather than coverage.
+stock_bash_weight_hints() {
+  cat <<'EOF'
+tests/fm-afk-contract.test.sh 27510
+tests/fm-afk-pi-herdr-return-e2e.test.sh 99
+tests/fm-afk-return.test.sh 44581
+tests/fm-ask-user-authority.test.sh 244
+tests/fm-ask.test.sh 65230
+tests/fm-awaiting-landing.test.sh 31340
+tests/fm-backend-tmux-smoke.test.sh 62
+tests/fm-backlog-read-bound.test.sh 31107
+tests/fm-bearings-board-lavish-live-e2e.test.sh 117
+tests/fm-bearings-board-render.test.sh 26906
+tests/fm-bearings-snapshot.test.sh 263717
+tests/fm-bootstrap-network-parallel.test.sh 16201
+tests/fm-branch-orphans.test.sh 3217
+tests/fm-branch-supervision.test.sh 16562
+tests/fm-brief.test.sh 10569
+tests/fm-build-lock.test.sh 253038
+tests/fm-busy-state.test.sh 7264
+tests/fm-check-unregister.test.sh 812
+tests/fm-ci-workflow.test.sh 29496
+tests/fm-classify-corr-token.test.sh 34276
+tests/fm-classify-decision-key.test.sh 1815
+tests/fm-claude-stop-autoarm-live-e2e.test.sh 90
+tests/fm-claude-trust.test.sh 19687
+tests/fm-cmux-claude-composer-live-e2e.test.sh 96
+tests/fm-codex-continuity-live-e2e.test.sh 95
+tests/fm-composer-codex-idle-live-e2e.test.sh 87
+tests/fm-composer-ghost.test.sh 3090
+tests/fm-composer-lib.test.sh 14097
+tests/fm-composer-matrix-live-e2e.test.sh 97
+tests/fm-documentation-audiences.test.sh 1268
+tests/fm-ensure-agents-md.test.sh 1915
+tests/fm-extension-binding.test.sh 99443
+tests/fm-fleet-snapshot-view.test.sh 26274
+tests/fm-gate-refuse.test.sh 9391
+tests/fm-gitignore-config.test.sh 187
+tests/fm-gotmp.test.sh 2250
+tests/fm-grouping.test.sh 71423
+tests/fm-guard-stale-banner.test.sh 17602
+tests/fm-harness-adapter-instructions-live-e2e.test.sh 116
+tests/fm-harness-adapter-references.test.sh 143
+tests/fm-herdr-lab.test.sh 24380
+tests/fm-herdr-session-cleanup.test.sh 8883
+tests/fm-herdr-submit-confirm-live-e2e.test.sh 129
+tests/fm-herdr-version-floor-live-e2e.test.sh 129
+tests/fm-idle-fleet.test.sh 14168
+tests/fm-linear-board.test.sh 75871
+tests/fm-lint-repair-note.test.sh 155
+tests/fm-lint-workflows.test.sh 1657
+tests/fm-live-gate.test.sh 3345
+tests/fm-mail-check.test.sh 9182
+tests/fm-mail.test.sh 16152
+tests/fm-main-ci.test.sh 13054
+tests/fm-nm-test-contract.test.sh 222
+tests/fm-no-mistakes-required.test.sh 258
+tests/fm-operational-input.test.sh 614
+tests/fm-peek-remote.test.sh 1103
+tests/fm-pr-body-write-live-e2e.test.sh 130
+tests/fm-pr-reviewers.test.sh 313
+tests/fm-pr-state-live-e2e.test.sh 135
+tests/fm-pr-state.test.sh 902
+tests/fm-procevent-quota.test.sh 4062
+tests/fm-project-origin.test.sh 352
+tests/fm-quota-array-dispatch-live-e2e.test.sh 126
+tests/fm-quota-choose.test.sh 2648
+tests/fm-remote-entrypoint.test.sh 235
+tests/fm-review-diff.test.sh 4946
+tests/fm-send-inbox-doorbell-live-e2e.test.sh 136
+tests/fm-send-inbox.test.sh 43488
+tests/fm-send-popup-settle.test.sh 6234
+tests/fm-send-secondmate-marker-herdr-e2e.test.sh 137
+tests/fm-send-settle.test.sh 2509
+tests/fm-send-strict.test.sh 6789
+tests/fm-session-lock-ancestry.test.sh 5145
+tests/fm-sessionstart-hook-live-e2e.test.sh 112
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 120
+tests/fm-spawn-batch.test.sh 3332
+tests/fm-spawn-compact-adviser-disable-remote.test.sh 55901
+tests/fm-spawn-compact-adviser-disable.test.sh 30598
+tests/fm-spawn-launch-confirm.test.sh 134
+tests/fm-spawn-worktree-settle.test.sh 13377
+tests/fm-stat-shadowing.test.sh 438
+tests/fm-stock-bash-lane.test.sh 557
+tests/fm-subagent-pretool-check.test.sh 2315
+tests/fm-supervision-events.test.sh 955
+tests/fm-supervision-instructions.test.sh 597
+tests/fm-tangle-guard.test.sh 11961
+tests/fm-tasks-axi.test.sh 8466
+tests/fm-test-fixture-cleanup.test.sh 1695
+tests/fm-test-fixtures.test.sh 7378
+tests/fm-test-isolation-proof.test.sh 4909
+tests/fm-tmux-agent-liveness.test.sh 43
+tests/fm-tmux-submit-busy.test.sh 7598
+tests/fm-tool-update-check.test.sh 22458
+tests/fm-trace-context-lib.test.sh 360
+tests/fm-transition-lib.test.sh 224
+tests/fm-unrecorded-pr.test.sh 6186
+tests/fm-update.test.sh 21765
+tests/fm-wake-daemon-lifecycle-e2e.test.sh 14082
+tests/fm-wake-drain-open-decisions-cursor.test.sh 27829
+tests/fm-wake-drain-open-decisions.test.sh 10632
+tests/fm-wake-drain-unread-status.test.sh 23685
+tests/fm-watch-checkpoint.test.sh 8137
+EOF
+}
+
+# "<ms>\t<script>" for every script read on stdin, longest first, then by path.
+# A script the default exclusions drop weighs nothing: default exclusions apply
+# after selection, so it keeps its shard, but a default run never spends a
+# second on it and the lane never measured it.
+stock_bash_weighted() {
+  local scripts
+  scripts=$(cat)
+  awk -v fallback="$STOCK_BASH_DEFAULT_WEIGHT_MS" '
+    FILENAME == ARGV[1] { if (NF) { hint[$1] = $2 } ; next }
+    FILENAME == ARGV[2] { if (NF) { held[$1] = 1 } ; next }
+    NF { printf "%d\t%s\n", ($1 in held) ? 0 : ($1 in hint) ? hint[$1] : fallback, $1 }
+  ' <(stock_bash_weight_hints) <(printf '%s\n' "$scripts" | default_excluded_among) \
+    <(printf '%s\n' "$scripts") | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
+}
+
+# Longest-processing-time assignment of the stock-bash lane read on stdin to
+# STOCK_BASH_SHARDS macOS runners, printing "<shard>\t<script>" for every
+# script. Each shard is strictly serial in itself, so two stateful scripts still
+# never share a machine. FM_STOCK_BASH_ASSIGNMENTS_FILE replaces the assignment,
+# for the regressions in tests/fm-test-run.test.sh that must hand the coverage
+# guard a partition this packing never produces.
+stock_bash_assignments() {
+  if [ -n "${FM_STOCK_BASH_ASSIGNMENTS_FILE:-}" ]; then
+    cat "$FM_STOCK_BASH_ASSIGNMENTS_FILE"
+    return
+  fi
+  stock_bash_weighted | lpt_assign "$STOCK_BASH_SHARDS"
+}
+
 # Pinned external linters a test needs in order to exercise its subject, one
 # "<script><TAB><tool>" line per requirement (a script needing two tools gets
 # two lines). Lane membership above is what DERIVES each CI job's install set
@@ -1321,15 +1488,15 @@ portable_serial_weight_for() {
   printf '%s\n' "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS"
 }
 
-# Longest-processing-time assignment of the serial remainder to
-# PORTABLE_SERIAL_SHARDS bins, printing "<shard>\t<script>" for every script.
-# Deterministic: candidates are ordered by hint descending then path, and ties
-# between equally loaded bins always take the lowest bin index.
-portable_serial_assignments() {
-  local ms script i best best_load
+# Longest-processing-time assignment of "<ms>\t<script>" lines read on stdin,
+# already ordered longest first, to <bins> bins, printing "<bin>\t<script>" for
+# every script. Deterministic: ties between equally loaded bins always take the
+# lowest bin index. Both separate-runner shardings below pack through this.
+lpt_assign() {  # <bins>
+  local bins=$1 ms script i best best_load
   local -a loads=()
   i=1
-  while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+  while [ "$i" -le "$bins" ]; do
     loads[i]=0
     i=$((i + 1))
   done
@@ -1338,7 +1505,7 @@ portable_serial_assignments() {
     best=1
     best_load=${loads[1]}
     i=2
-    while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
+    while [ "$i" -le "$bins" ]; do
       if [ "${loads[i]}" -lt "$best_load" ]; then
         best_load=${loads[i]}
         best=$i
@@ -1347,20 +1514,27 @@ portable_serial_assignments() {
     done
     loads[best]=$((best_load + ms))
     printf '%s\t%s\n' "$best" "$script"
-  done < <(
-    while IFS= read -r script; do
-      [ -n "$script" ] || continue
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
-    done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
-  )
+  done
 }
 
-# Parse "<k>of<n>" from a portable-serial shard lane and echo <k>, refusing when
-# <n> disagrees with this script's configured count so a CI matrix built for a
+# Longest-processing-time assignment of the serial remainder to
+# PORTABLE_SERIAL_SHARDS bins, printing "<shard>\t<script>" for every script.
+# Candidates are ordered by hint descending then path.
+portable_serial_assignments() {
+  local script
+  while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
+  done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2 \
+    | lpt_assign "$PORTABLE_SERIAL_SHARDS"
+}
+
+# Parse "<k>of<n>" from a shard lane "<prefix><k>of<n>" and echo <k>, refusing
+# when <n> disagrees with the configured <count> so a CI matrix built for a
 # different shard count fails loudly instead of dropping tests.
-portable_serial_shard_index() {
-  local lane=$1 spec index count
-  spec=${lane#portable-serial-}
+shard_lane_index() {  # <lane> <prefix> <count> <what>
+  local lane=$1 prefix=$2 configured=$3 what=$4 spec index count
+  spec=${lane#"$prefix"}
   index=${spec%%of*}
   count=${spec#*of}
   case "$spec" in
@@ -1373,11 +1547,11 @@ portable_serial_shard_index() {
   case "$count" in
     ''|*[!0-9]*) die "unknown lane '$lane' (see --list-lanes)" ;;
   esac
-  if [ "$count" -ne "$PORTABLE_SERIAL_SHARDS" ]; then
-    die "lane '$lane' asks for $count portable serial shards but this runner is configured for $PORTABLE_SERIAL_SHARDS (see --list-lanes)"
+  if [ "$count" -ne "$configured" ]; then
+    die "lane '$lane' asks for $count $what shards but this runner is configured for $configured (see --list-lanes)"
   fi
-  if [ "$index" -lt 1 ] || [ "$index" -gt "$PORTABLE_SERIAL_SHARDS" ]; then
-    die "lane '$lane' shard index is outside 1..$PORTABLE_SERIAL_SHARDS (see --list-lanes)"
+  if [ "$index" -lt 1 ] || [ "$index" -gt "$configured" ]; then
+    die "lane '$lane' shard index is outside 1..$configured (see --list-lanes)"
   fi
   printf '%s\n' "$index"
 }
@@ -1423,7 +1597,7 @@ select_lane() {
       ;;
     portable-serial-*)
       # One separate-runner shard of the same remainder, still serial in itself.
-      shard=$(portable_serial_shard_index "$want")
+      shard=$(shard_lane_index "$want" portable-serial- "$PORTABLE_SERIAL_SHARDS" "portable serial")
       while IFS=$'\t' read -r idx s; do
         [ -n "$s" ] || continue
         if [ "$idx" = "$shard" ]; then
@@ -1443,6 +1617,17 @@ select_lane() {
         found=1
       done < <(list_stock_bash)
       ;;
+    stock-bash-*)
+      # One macOS runner's share of the same lane, still serial in itself.
+      shard=$(shard_lane_index "$want" stock-bash- "$STOCK_BASH_SHARDS" stock-bash)
+      while IFS=$'\t' read -r idx s; do
+        [ -n "$s" ] || continue
+        if [ "$idx" = "$shard" ]; then
+          add_script "$s"
+          found=1
+        fi
+      done < <(list_stock_bash | stock_bash_assignments)
+      ;;
     *)
       die "unknown lane '$want' (see --list-lanes)"
       ;;
@@ -1453,7 +1638,7 @@ select_lane() {
 run_coverage_guard() {
   local tmp missing extra a b shard unhinted serial_total line stock_path stock_reason stock_ms
   local p1_ms p1_unhinted p2_ms p2_unhinted p3_ms p3_unhinted parallel_max_ms parallel_imbalance_ms parallel_min_ms
-  local shard_ms serial_max_ms=0 serial_max_shard=0
+  local shard_ms serial_max_ms=0 serial_max_shard=0 stock_max_ms=0 stock_unhinted lands
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
@@ -1689,6 +1874,71 @@ run_coverage_guard() {
     return 1
   fi
 
+  # The stock-bash lane runs as STOCK_BASH_SHARDS macOS shards, so every lane
+  # script must run in exactly one of them. So must every script the lane pins a
+  # case count for: bin/fm-stock-bash-lane.sh passes every pin to every shard,
+  # and a shard ignores the pin of a script it does not hold, so a pinned script
+  # packed into no shard would drop its pin in silence. As with the serial
+  # shards above, one packing of the one listing already taken is sliced by
+  # shard rather than each shard rescanning tests/.
+  stock_bash_assignments <"$tmp/stock_bash" >"$tmp/stock_bash_assignments"
+  : >"$tmp/stock_bash_shards_raw"
+  shard=1
+  while [ "$shard" -le "$STOCK_BASH_SHARDS" ]; do
+    awk -F '\t' -v want="$shard" '$1 == want { print $2 }' \
+      "$tmp/stock_bash_assignments" >"$tmp/stock_bash_shard_$shard"
+    if [ ! -s "$tmp/stock_bash_shard_$shard" ]; then
+      log "coverage guard: stock-bash shard $shard of $STOCK_BASH_SHARDS is empty"
+      rm -rf "$tmp"
+      return 1
+    fi
+    cat "$tmp/stock_bash_shard_$shard" >>"$tmp/stock_bash_shards_raw"
+    shard_ms=$(stock_bash_weighted <"$tmp/stock_bash_shard_$shard" | awk -F '\t' '{ t += $1 } END { printf "%d\n", t + 0 }')
+    [ "$shard_ms" -le "$stock_max_ms" ] || stock_max_ms=$shard_ms
+    shard=$((shard + 1))
+  done
+  "$ROOT/bin/fm-stock-bash-lane.sh" --ok-count-pins >"$tmp/stock_bash_pins" || {
+    log "coverage guard: bin/fm-stock-bash-lane.sh --ok-count-pins failed"
+    rm -rf "$tmp"
+    return 1
+  }
+  : >"$tmp/stock_bash_pin_bad"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    stock_path=${line%=*}
+    lands=$(grep -cxF "$stock_path" "$tmp/stock_bash_shards_raw" || true)
+    [ "$lands" -eq 1 ] \
+      || printf '%s lands in %s stock-bash shards\n' "$stock_path" "$lands" >>"$tmp/stock_bash_pin_bad"
+  done <"$tmp/stock_bash_pins"
+  if [ -s "$tmp/stock_bash_pin_bad" ]; then
+    log "coverage guard: every script the stock-bash lane pins a case count for must land in exactly one shard:"
+    cat "$tmp/stock_bash_pin_bad" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  LC_ALL=C sort "$tmp/stock_bash_shards_raw" | uniq -d >"$tmp/stock_bash_shard_dups"
+  if [ -s "$tmp/stock_bash_shard_dups" ]; then
+    log "coverage guard: stock-bash shards share scripts:"
+    cat "$tmp/stock_bash_shard_dups" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  LC_ALL=C sort -u "$tmp/stock_bash_shards_raw" >"$tmp/stock_bash_shards"
+  missing=$(comm -23 "$tmp/stock_bash" "$tmp/stock_bash_shards" || true)
+  extra=$(comm -13 "$tmp/stock_bash" "$tmp/stock_bash_shards" || true)
+  if [ -n "$missing" ] || [ -n "$extra" ]; then
+    log "coverage guard: stock-bash shards must equal the stock-bash lane"
+    [ -z "$missing" ] || { log "missing from stock-bash shards:"; printf '%s\n' "$missing" >&2; }
+    [ -z "$extra" ] || { log "extra beyond the stock-bash lane:"; printf '%s\n' "$extra" >&2; }
+    rm -rf "$tmp"
+    return 1
+  fi
+  # Scripts a default run executes with no measured macOS duration, so packed
+  # on STOCK_BASH_DEFAULT_WEIGHT_MS. Reported for the next hint refresh.
+  { default_excluded_among <"$tmp/stock_bash"; stock_bash_weight_hints | awk 'NF { print $1 }'; } \
+    | LC_ALL=C sort -u >"$tmp/stock_bash_weighed"
+  stock_unhinted=$(comm -23 "$tmp/stock_bash" "$tmp/stock_bash_weighed" | grep -c . || true)
+
   # Keep these estimates derived from the membership and hint owners; see the
   # header for the distinction between packed weights and measured job time.
   read -r p1_ms p1_unhinted <<<"$(list_portable_parallel_1 | portable_parallel_lane_weight)"
@@ -1735,7 +1985,7 @@ run_coverage_guard() {
   done < <(script_required_tools)
   tool_rows=$(script_required_tools | grep -c . || true)
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_max_ms=%s serial_shard_budget_ms=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s required_tools=%s\n' \
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_max_ms=%s serial_shard_budget_ms=%s serial_unhinted=%s herdr=%s stock_bash=%s stock_bash_excluded=%s stock_bash_shards=%s stock_bash_max_ms=%s stock_bash_unhinted=%s required_tools=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$parallel_max_ms" \
@@ -1749,6 +1999,9 @@ run_coverage_guard() {
     "$(wc -l <"$tmp/herdr" | tr -d ' ')" \
     "$(wc -l <"$tmp/stock_bash" | tr -d ' ')" \
     "$(list_stock_bash_exclusions | grep -c . || true)" \
+    "$STOCK_BASH_SHARDS" \
+    "$stock_max_ms" \
+    "$stock_unhinted" \
     "$tool_rows"
   rm -rf "$tmp"
   return 0
@@ -2624,6 +2877,27 @@ load_default_exclusions() {
       *) EXCLUDE_SCRIPTS+=("$key") ;;
     esac
   done < <(list_default_exclusions)
+}
+
+# The scripts read on stdin that the default exclusions drop, one per line.
+default_excluded_among() {
+  local key reason s families=" " paths=$'\n'
+  while IFS=$'\t' read -r key reason; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      family:*) families="$families${key#family:} " ;;
+      *) paths="$paths$key"$'\n' ;;
+    esac
+  done < <(list_default_exclusions)
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    case "$paths" in
+      *$'\n'"$s"$'\n'*) printf '%s\n' "$s"; continue ;;
+    esac
+    case "$families" in
+      *" $(family_for_basename "${s##*/}") "*) printf '%s\n' "$s" ;;
+    esac
+  done
 }
 
 apply_exclude_families() {
