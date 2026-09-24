@@ -3020,10 +3020,9 @@ teardown_herdr_require_prerequisites() {  # <task-id>
       return 1
     fi
   done
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fi
+  # The lock primitives come from the single top-level bin/fm-wake-lib.sh
+  # source site; a second site here would make ShellCheck analyse that library
+  # and its classifier again for this root.
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
     || ! declare -F fm_lock_release >/dev/null 2>&1; then
     echo "error: herdr teardown lock machinery is unavailable for $task_id; nothing was changed - restore the lock support and rerun teardown" >&2
