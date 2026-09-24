@@ -444,7 +444,7 @@ landing_expect_escalation() {  # <state> <fakebin> <out> <window> <capture-file>
 }
 
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
-  local dir state fakebin out capture window key head
+  local dir state fakebin out capture window key head pid
   # THE REFUSAL: quiet is licensed only by the owner's answer, so every task it
   # does not call awaiting landing keeps the whole ladder - including near misses
   # that carry some of the same records.
@@ -459,13 +459,20 @@ test_wedged_task_not_awaiting_landing_still_alarms_and_escalates() {
   landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 2 "a genuinely wedged task, again"
 
   # Stopped deliberately with a PR recorded, but its work still open: neither the
-  # stop record nor the PR licenses quiet on its own.
+  # stop record nor the PR licenses quiet on its own, so it surfaces - once, as a
+  # deliberate stop rather than as a wedge (the stopped-worker test below owns the
+  # repeat behavior).
   dir=$(make_case landing-refusal-stopped-open); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-stopped-open"
   key=$(landing_stale_task "$state" stopped-open "$window" "$capture" 'fm-stopped-open $' \
     'working: rebasing onto main' 'pr=https://example.test/pr/26')
   landing_stop_agent "$state" stopped-open
-  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" 1 "a task stopped with its work open"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" FM_STALE_ESCALATE_SECS=1
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a task stopped with its work open never surfaced"; }
+  grep -F "stale: $window (agent stopped deliberately" "$out" >/dev/null \
+    || fail "a task stopped with its work open printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stopped-open wake"
 
   # Reported done, but nothing records that firstmate took it in hand.
   dir=$(make_case landing-refusal-unacknowledged); state="$dir/state"; fakebin="$dir/fakebin"
@@ -692,6 +699,60 @@ test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet() {
   pass "a validated PR head only the pipeline's gate holds raises no stale wake on a stopped worker; an unvouched one still does"
 }
 
+# THE 2026-09-23 wedge alarm on a deliberately stopped worker. A cancelled card's
+# agent was stopped with bin/fm-control.sh exit and its local copy kept uncommitted
+# edits with no PR while firstmate waited for the word to discard them; the watcher
+# raised "idle, possible wedge" at escalation 1, 2 and 3, then demand-deep-inspection,
+# over an agent that was gone on purpose. The task needs firstmate exactly once, to
+# decide between discarding and relaunching, and never as a wedge.
+test_stopped_worker_with_unlanded_work_surfaces_once_and_never_as_a_wedge() {
+  local dir state fakebin out capture window key pid i
+  # The run step reads working - the read that lets a quiet pane onto the ladder -
+  # and the 1s threshold means any ladder entry escalates within a poll or two.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  dir=$(make_case stopped-unlanded); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-cancelled-card"
+  key=$(landing_stale_task "$state" cancelled-card "$window" "$capture" 'fm-cancelled-card $' \
+    'working: implementing the risk module' "worktree=$dir/wt")
+  landing_stop_agent "$state" cancelled-card
+
+  # First sight: one plain wake naming the decision, and no place on the ladder.
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a stopped worker with unlanded work never surfaced"; }
+  grep -F "stale: $window (agent stopped deliberately" "$out" >/dev/null \
+    || fail "the stopped worker did not surface as a deliberate stop: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a stopped worker was called a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stopped worker's one wake"
+
+  # Every later poll over the same stop stays quiet, well past the wedge threshold.
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a stopped worker whose one wake was already surfaced"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a stopped worker holds a wedge timer on the ladder"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the quiet leg's watcher stop"
+
+  # A NEW stop (relaunched, then stopped again) is a new decision and surfaces once more.
+  printf 'stopped_at=2026-09-23T09:00:00Z\nverb=exit\nresult=stopped\n' > "$state/cancelled-card.agent-stopped"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_STALE_ESCALATE_SECS=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a second stop never surfaced"; }
+  grep -F "stale: $window (agent stopped deliberately" "$out" >/dev/null \
+    || fail "the second stop printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second stop's wake"
+
+  # CONTROL: the same records with no stop record are a live, idle worker, and it
+  # still escalates as a possible wedge.
+  rm -f "$state/cancelled-card.agent-stopped"
+  i=1
+  landing_expect_escalation "$state" "$fakebin" "$out" "$window" "$capture" "$key" "$i" "the same idle worker with no stop record"
+  unset FM_FAKE_CREW_STATE
+  pass "a deliberately stopped worker with unlanded work surfaces once and never enters the wedge ladder; an unstopped idle one still escalates"
+}
+
 # --- a declared wait survives the resolutions logged after it ----------------
 # The stale path asks whether a quiet worker declared a wait, and it read the
 # LAST status line to answer. A `resolved [key=k]` line firstmate appends when it
@@ -906,7 +967,7 @@ test_a_declared_wait_survives_the_resolutions_logged_after_it() {
     pid=$!
     wait_for_exit "$pid" 100 \
       || { reap "$pid"; fail "a stopped worker with open work and no standing declared wait did not alarm ($leg): $(cat "$out")"; }
-    grep -Fx "stale: $window" "$out" >/dev/null \
+    grep -F "stale: $window (agent stopped deliberately" "$out" >/dev/null \
       || fail "a stopped worker with open work printed the wrong wake ($leg): $(cat "$out")"
   done
   unset FM_FAKE_CREW_STATE
@@ -954,7 +1015,7 @@ test_a_bare_resolution_ends_an_unkeyed_wait() {
   pid=$!
   wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "a stopped worker whose wait it had ended itself was still read as waiting: $(cat "$out")"; }
-  grep -Fx "stale: $window" "$out" >/dev/null \
+  grep -F "stale: $window (agent stopped deliberately" "$out" >/dev/null \
     || fail "a stopped worker whose wait had ended printed the wrong wake: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "a bare resolution ends an unkeyed wait, while a stated default answer or an answered blocker between them leaves it standing"
@@ -970,6 +1031,7 @@ test_status_declared_identity_classifier
 test_a_declared_wait_survives_the_resolutions_logged_after_it
 test_a_bare_resolution_ends_an_unkeyed_wait
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
+test_stopped_worker_with_unlanded_work_surfaces_once_and_never_as_a_wedge
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
 test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet

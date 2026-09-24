@@ -66,7 +66,12 @@
 #                          bin/fm-awaiting-landing-lib.sh reports awaiting
 #                          landing never reaches any of this triage, in either
 #                          posture: no stale wake, no wedge timer, and no
-#                          escalation count.
+#                          escalation count. A task whose agent firstmate stopped
+#                          on purpose (state/<id>.agent-stopped) with work not
+#                          landed surfaces ONCE per stop record as "agent stopped
+#                          deliberately ... not a wedge" and then only absorbs
+#                          (stopped_agent_hold); a declared wait and any class
+#                          the awaiting-landing owner names keep their own path.
 #   stale: <window> (the worker's turn ended ...s ago while a run of its own is
 #                    still going - pid N, held Ns, running: ...)
 #                          the pairing a held build slot alone cannot show: the
@@ -1986,6 +1991,50 @@ triage_log_surfaced_stale() {  # <window> <path>
   triage_log "surfaced stale ($how; landing=${FM_AWAITING_LANDING_CLASS:-none}${FM_AWAITING_LANDING_DETAIL:+ - $FM_AWAITING_LANDING_DETAIL}): $win"
 }
 
+# A deliberately stopped agent is not a wedge. bin/fm-control.sh `exit` records
+# state/<id>.agent-stopped, and a pane holding only a shell over that record has
+# nothing left to freeze: repeating the wedge ladder at it (idle, escalation 1, 2,
+# 3, then demand-deep-inspection) measures an agent that was taken away on purpose.
+# The awaiting-landing owner already quiets a stopped task whose work reported
+# done. This covers the rest - work stopped with edits unlanded and no PR, for
+# example a cancelled card whose local copy waits for the word to discard it -
+# which needs firstmate exactly once, to decide between discarding and relaunching.
+# So the first stable idle pane over a given stop record surfaces as one plain
+# wake naming that decision, its identity is recorded in .stale-stopped-<key>, and
+# every later poll over the same record only absorbs. Returns 0 when it handled
+# the window (the caller skips the rest of stale triage), 1 when the task has no
+# stop record, holds a declared wait, or the landing owner has a class for it. A relaunch removes the record (bin/fm-spawn.sh)
+# and the identity with it, so the next stop surfaces afresh.
+stopped_agent_hold() {  # <window> <task> <window-key> <hash>
+  local win=$1 task=$2 key=$3 h=$4 marker="$STATE/$2.agent-stopped" mark identity reason
+  mark="$STATE/.stale-stopped-$key"
+  if [ -z "$task" ] || [ -L "$marker" ] || [ ! -f "$marker" ]; then
+    rm -f "$mark"
+    return 1
+  fi
+  # A declared wait keeps its own bounded re-surface cadence: its recheck is the
+  # only thing that ever brings that wait back to firstmate.
+  ! status_is_paused_or_captain_held "$(status_declared_line "$STATE/$task.status")" || return 1
+  # The awaiting-landing owner keeps its own answers: a stopped task it calls
+  # awaiting landing never reaches here, and one it calls landing-blocked must
+  # keep alarming with its landing detail.
+  [ "$(fm_awaiting_landing_class "$task" "$STATE")" = none ] || return 1
+  identity=$(cat "$marker" 2>/dev/null) || identity=
+  [ -n "$identity" ] || identity=stopped
+  # Whatever position the ladder held for this window is dropped: the quiet that
+  # follows a deliberate stop is not time toward a wedge.
+  clear_pause_tracking "$key"
+  if [ "$(cat "$mark" 2>/dev/null || true)" = "$identity" ]; then
+    triage_log "absorbed stale (agent stopped deliberately, already surfaced for this stop): $win"
+    return 0
+  fi
+  reason="stale: $win (agent stopped deliberately and its work is not landed - not a wedge; waiting on a decision to discard the local copy or relaunch the agent)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  triage_log_surfaced_stale "$win" "agent stopped deliberately"
+  printf '%s' "$identity" > "$mark"
+  wake "$reason"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -3031,7 +3080,9 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if stopped_agent_hold "$w" "$task" "$key" "$h"; then
+          :
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
