@@ -494,6 +494,17 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
+# Whether <lockdir> is the link this process just made to its own <ownerdir>.
+# This runs right after ln, where a signal sent to this process group - a
+# checkpoint deadline - kills whatever child is running then. A killed readlink
+# read the creator's fresh lock as somebody else's, so it discarded the owner
+# directory its own link still pointed at and left that lock dangling. The test
+# builtin forks no child for such a signal to kill. -ef matches device and inode
+# through the link, and only this process links to its own fresh mktemp owner.
+fm_lock_links_to_owner() {  # <lockdir> <ownerdir>
+  [ -L "$1" ] && [ "$1" -ef "$2" ]
+}
+
 fm_lock_discard_owner() {
   local ownerdir=$1
   [ -n "$ownerdir" ] || return 0
@@ -546,7 +557,7 @@ fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
-  if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
+  if [ -n "$allowed_steal_owner" ] && fm_lock_links_to_owner "$steal" "$allowed_steal_owner"; then
     return 1
   fi
   return 0
@@ -559,17 +570,20 @@ fm_lock_claim() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  # Read back with the read builtin for the same reason fm_lock_links_to_owner
+  # forks nothing: the lock is already published here.
+  back=
+  { IFS= read -r back < "$ownerdir/pid"; } 2>/dev/null || true
   if [ "$back" != "$mypid" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if ! fm_lock_links_to_owner "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
-    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+    if fm_lock_links_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
     fm_lock_discard_owner "$ownerdir"
@@ -608,7 +622,11 @@ fm_lock_try_create() {
   # owner directory, where it stops the winner's release and the reaper from
   # ever removing that directory. -n cannot keep ln out of a lock that is a real
   # directory, the legacy shape, so a stray link made there is still removed.
-  if ln -sn "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  # The link itself, not ln's exit status, decides who won: the same group
+  # signal can kill ln after it made the link, and a lock that is this
+  # process's own must never be read as somebody else's.
+  ln -sn "$ownerdir" "$lockdir" 2>/dev/null || true
+  if fm_lock_links_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -617,6 +635,11 @@ fm_lock_try_create() {
       rm -f "$lockdir" 2>/dev/null || true
     fi
   else
+    # -ef cannot see a link whose owner directory has become unreachable, so a
+    # dangling link of this process's own is still recognised by its target.
+    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
