@@ -174,7 +174,7 @@ init_changed_fixture_repo() {
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
     fm-backend-orca.test.sh; do
-    printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
+    printf '#!/usr/bin/env bash\n# tests/lib.sh\necho "ok - %s fixture"\n' "$script" >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
@@ -2484,6 +2484,48 @@ SH
   pass "--require-ok-count: pins a script's case count against a silent green"
 }
 
+# A script that exits 0 having run no case is a failure, not a pass: exit status
+# alone banked tests/fm-build-lock.test.sh's 0 of 51 cases green on the macOS
+# lane. A skip line anywhere in the output is an explained zero and stays green,
+# so a guard that reports each missing tool before its final skip line still
+# passes. Mutants: drop the guard - the zero-case script passes; let any output
+# count as a case - the same; drop the skip clause - the late-skip script reds.
+test_zero_case_script_fails_the_run() {
+  local tmp f out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-zerocase.XXXXXX")
+  f="$tmp/zero.test.sh"
+  out="$tmp/out.txt"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+echo "# setting up fixtures"
+exit 0
+SH
+  if "$RUNNER" "$f" >"$out" 2>&1; then
+    fail_with_evidence "$tmp" "a script that exits 0 having run no case must fail the run" "$out"
+  fi
+  grep -q "ran no cases: $f" "$out" \
+    || fail_with_evidence "$tmp" "the zero-case failure must name the script" "$out"
+  grep -q "FM_TEST_END .* $f exit=1 " "$out" \
+    || fail_with_evidence "$tmp" "the zero-case script must be recorded as failed" "$out"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+echo "# skip: the only harness is not installed here"
+echo "skip: live: no verified harness is installed here"
+exit 0
+SH
+  "$RUNNER" "$f" >"$out" 2>&1 \
+    || fail_with_evidence "$tmp" "a script whose only output explains a skip must stay green" "$out"
+  cat >"$f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - the one case"
+exit 0
+SH
+  "$RUNNER" "$f" >"$out" 2>&1 \
+    || fail_with_evidence "$tmp" "a script that ran a case must stay green" "$out"
+  rm -rf "$tmp"
+  pass "a script that exits 0 having run no case fails the run unless it says why it skipped"
+}
+
 # A multi-script run takes the build lock once per script and gives it back
 # between scripts, so a worker that queues while one script runs goes before the
 # next one instead of waiting out the whole loop - every measured hold over ten
@@ -2578,6 +2620,7 @@ test_a_missing_tool_no_table_names_reds_the_run
 test_a_declared_tool_that_never_arrived_reds_the_run
 test_coverage_guard_refuses_an_unusable_tool_table
 test_require_ok_count_catches_a_shrinking_case_list
+test_zero_case_script_fails_the_run
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
