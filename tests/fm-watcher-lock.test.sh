@@ -363,6 +363,54 @@ test_lock_empty_pid_uses_minimum_grace() {
   pass "empty mid-acquire lock keeps a minimum grace"
 }
 
+# A lock whose directory is gone - a live process whose home's state directory
+# was removed - or cannot be written leaves nothing to steal. The acquire must
+# refuse promptly so the caller's wait loop decides, rather than recursing into
+# "$lock.steal", "$lock.steal.steal" and on: stock Bash 3.2 has no FUNCNEST, so
+# that recursion never returned.
+# Mutant: drop the absent-lock refusal before the steal in fm_lock_try_acquire.
+test_lock_without_a_usable_directory_is_refused_promptly() {
+  local dir state rc start elapsed probe
+  dir=$(make_case lock-without-directory)
+  state="$dir/state"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  probe='. "$1"; fm_lock_try_acquire "$2"'
+
+  mkdir -p "$dir/gone"
+  rmdir "$dir/gone"
+  rc=0
+  start=$SECONDS
+  FM_STATE_OVERRIDE="$state" fm_run_timed 20 bash -c "$probe" \
+    _ "$LIB" "$dir/gone/.contend.lock" >/dev/null 2>&1 || rc=$?
+  elapsed=$((SECONDS - start))
+  [ "$rc" -ne 124 ] || fail "acquiring a lock under a removed directory recursed without returning"
+  [ "$rc" -eq 1 ] || fail "acquiring a lock under a removed directory returned rc=$rc, not a refusal"
+  [ "$elapsed" -le 10 ] || fail "acquiring a lock under a removed directory took ${elapsed}s"
+  [ ! -e "$dir/gone" ] || fail "acquiring a lock under a removed directory recreated it"
+
+  mkdir -p "$dir/readonly"
+  chmod 555 "$dir/readonly"
+  if ( : > "$dir/readonly/.write-probe" ) 2>/dev/null; then
+    rm -f "$dir/readonly/.write-probe"
+    chmod 755 "$dir/readonly"
+    pass "a lock under a removed directory is refused promptly (unwritable case skipped: permissions are not enforced here)"
+    return
+  fi
+  rc=0
+  start=$SECONDS
+  FM_STATE_OVERRIDE="$state" fm_run_timed 20 bash -c "$probe" \
+    _ "$LIB" "$dir/readonly/.contend.lock" >/dev/null 2>&1 || rc=$?
+  elapsed=$((SECONDS - start))
+  chmod 755 "$dir/readonly"
+  [ "$rc" -ne 124 ] || fail "acquiring a lock in an unwritable directory recursed without returning"
+  [ "$rc" -eq 1 ] || fail "acquiring a lock in an unwritable directory returned rc=$rc, not a refusal"
+  [ "$elapsed" -le 10 ] || fail "acquiring a lock in an unwritable directory took ${elapsed}s"
+  [ -z "$(ls -A "$dir/readonly")" ] || fail "acquiring a lock in an unwritable directory left residue"
+  pass "a lock under a removed or unwritable directory is refused promptly instead of recursing into steal locks"
+}
+
 # An owner directory is minted before the symlink that publishes it, so a
 # process killed in between strands one that nothing points at: no release, no
 # stale recovery and no later acquire would ever reach it again, and it would
@@ -1785,6 +1833,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
+test_lock_without_a_usable_directory_is_refused_promptly
 test_lock_collects_owner_dirs_stranded_by_a_dead_acquirer
 test_lock_reap_spares_the_owner_a_held_lock_links
 test_lock_late_claim_loses_after_recreate

@@ -1058,6 +1058,17 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
+  # An absent lock leaves nothing to steal: the create above lost to a holder
+  # that has since released, which one more ordinary create settles, or its
+  # directory is gone or unwritable. Stealing then recursed into
+  # "$lockdir.steal", ".steal.steal" and on without bound, because each level
+  # fails the same way and stock Bash 3.2 has no FUNCNEST; refusing here hands
+  # that case to the caller's wait loop instead.
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_try_create "$lockdir" && return 0
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    return 1
+  fi
 
   steal="$lockdir.steal"
   if ! fm_lock_try_acquire "$steal"; then
