@@ -1,0 +1,18 @@
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 3 slots held; oldest: held by pid 10275 for 1m03s running: bash tests/fm-control-relaunch.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M38GJ46EHKF8F478PRTGH5VR]; 2 more - see mutex --status)
+fm-build-lock: still waiting 1m00s for a machine-wide build slot - position 1 of 2 in line - all 3 slots held; oldest: held by pid 10275 for 2m03s running: bash tests/fm-control-relaunch.test.sh [in /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M38GJ46EHKF8F478PRTGH5VR]; 2 more - see mutex --status
+fm-build-lock: acquired a machine-wide build slot after 1m06s
+ok - fm-send inbox: the payload is recorded durably and only the doorbell is typed
+ok - fm-send inbox: newlines are legal and the terminal can no longer truncate a steer
+ok - fm-send inbox: a re-send is a new durable record, never a retyped payload
+ok - fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent
+ok - fm-send inbox: a failed doorbell is still a durably sent steer
+ok - fm-send planes: slash and codex $skill invocations stay typed; plain $-text rides the inbox
+ok - fm-send planes: an explicit backend target keeps the typed plane
+ok - fm-send planes: the --key lifecycle path never touches the inbox
+ok - fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue
+ok - fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated
+ok - fm-send inbox: metadata lock contention fails bounded without enqueue
+ok - fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation
+ok - fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing
+ok - fm-send inbox: a hung doorbell is bounded, reported, and leaves the durable record and no stray process
+ok - fm-send inbox: SIGTERM ends a hung doorbell promptly and reaps its child
