@@ -59,6 +59,7 @@ git -C "$repo" commit -q --allow-empty -m initial
 [ "$(git -C "$repo" log -1 --format='%s:%an:%ae')" = 'initial:Runner Fixture:runner@example.invalid' ]
 [ "$(git -C "$repo" config --get fixture.input)" = preserved ]
 [ "$(GIT_CONFIG_GLOBAL="$FM_TEST_GIT_CONFIG" git config --global --get commit.gpgsign)" = true ]
+echo "ok - the runner isolated this script's Git configuration"
 SH
   chmod +x "$dir/runner/tests/fm-test-run.test.sh"
   export GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system"

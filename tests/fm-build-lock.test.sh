@@ -49,29 +49,58 @@ unset FM_TASK_STATUS
 # of this shell, anything whose command line names this run's private temp
 # root - which is what still finds a fixture orphaned because the subshell that
 # started it exited first, the shape a failing command substitution leaves -
-# and everything below either. Each round freezes what it finds with SIGSTOP
-# before looking again, so no fixture loop can fork a child or have one
-# reparented between the look and the kill, and the frozen set is then
-# SIGKILLed. Cleanup comes only after that, because a live waiter would recreate
-# its lock root under the temp root with mkdir -p.
+# and everything below either. Cleanup comes only after that, because a live
+# waiter would recreate its lock root under the temp root with mkdir -p.
+#
+# Each round SIGKILLs what it finds and looks again, until a round finds nothing
+# it has not already killed. A process sent SIGKILL can start nothing more, so
+# that round shows nothing of ours is left to start anything. A fixture killed
+# in one round can still have forked a child just before the kill landed - a
+# waiter that got the lock the moment its holder died starts its command then -
+# and that child is reparented to init with no command line naming the temp
+# root. So from the second round on, a process init has adopted is ours too
+# when it is in this shell's process group and the previous round's look had
+# it either absent or the child of a process already killed. That is a race no
+# case below can stage on demand, so no mutant names this clause.
+#
+# Nothing is frozen with SIGSTOP first, as this once did. When the kernel judges
+# a process group orphaned while any member is stopped, it sends the WHOLE
+# group SIGHUP and SIGCONT, and that group is not only ours: under
+# bin/fm-test-run.sh it also holds the runner's wrapper shell and its tee. On
+# the macOS CI runner, a killed fixture that init had adopted was enough to
+# trip that. The SIGHUP killed the wrapper during the very first case, the file
+# ran none of its cases, and the runner read the wrapper's signal death as
+# exit 0.
 #
 # Judged from one ps snapshot per round. A zombie is already dead and is left
 # for its parent, and a pid that has exited since the snapshot - this round's
 # own ps and awk among them - is skipped rather than signalled.
-suite_processes() {
-  ps -Aww -o pid=,ppid=,stat=,command= 2>/dev/null | REAP_SELF=$$ REAP_ROOT=$TMP_ROOT awk '
-    BEGIN { self = ENVIRON["REAP_SELF"]; root = ENVIRON["REAP_ROOT"] }
+suite_processes() {  # <ps snapshot> [<previous round's snapshot> <pids killed so far>]
+  printf '%s\n' "$1" | REAP_SELF=$$ REAP_ROOT=$TMP_ROOT REAP_PREV=${2:-} REAP_KILLED=" ${3:-} " awk '
+    BEGIN {
+      self = ENVIRON["REAP_SELF"]; root = ENVIRON["REAP_ROOT"]; killed = ENVIRON["REAP_KILLED"]
+      rounds = split(ENVIRON["REAP_PREV"], prev, "\n")
+      for (i = 1; i <= rounds; i++) {
+        if (split(prev[i], f, " ") >= 2) { seen[f[1]] = 1; was_child_of[f[1]] = f[2] }
+      }
+    }
     {
       n++
       order[n] = $1
       parent[$1] = $2
-      if ($3 ~ /^Z/) zombie[$1] = 1
+      group[$1] = $3
+      if ($4 ~ /^Z/) zombie[$1] = 1
       if (root != "" && index($0, root)) named[$1] = 1
     }
     END {
       for (i = 1; i <= n; i++) {
         p = order[i]
         if (p == self || zombie[p]) continue
+        if (rounds > 0 && parent[p] == 1 && group[p] == group[self] &&
+          (!seen[p] || index(killed, " " was_child_of[p] " "))) {
+          print p
+          continue
+        }
         q = p
         for (depth = 0; depth < 64 && q != "" && q != 0 && q != 1; depth++) {
           if (q == self || named[q]) { print p; break }
@@ -82,23 +111,23 @@ suite_processes() {
 }
 
 reap_suite_processes() {
-  local found=' ' pid round=0 fresh
+  local killed=' ' pid round=0 fresh snap prev=
   while [ "$round" -lt 20 ]; do
-    fresh=0
-    for pid in $(suite_processes); do
-      case "$found" in *" $pid "*) continue ;; esac
-      kill -STOP "$pid" 2>/dev/null || continue
-      found="$found$pid "
-      fresh=1
+    snap=$(ps -Aww -o pid=,ppid=,pgid=,stat=,command= 2>/dev/null) || snap=
+    fresh=
+    for pid in $(suite_processes "$snap" "$prev" "$killed"); do
+      case "$killed" in *" $pid "*) continue ;; esac
+      kill -KILL "$pid" 2>/dev/null || continue
+      killed="$killed$pid "
+      fresh="$fresh$pid "
     done
-    [ "$fresh" = 1 ] || break
+    [ -n "$fresh" ] || break
+    [ "$round" -gt 0 ] || printf '# reaping what this run left running:\n' >&2
+    printf '%s\n' "$snap" | REAP_PIDS=" $fresh" awk '
+      index(ENVIRON["REAP_PIDS"], " " $1 " ") { sub(/^ */, ""); print "#   " $0 }' >&2
+    prev=$snap
     round=$((round + 1))
-  done
-  [ "$found" != ' ' ] || return 0
-  printf '# reaping what this run left running:\n' >&2
-  for pid in $found; do
-    ps -ww -o pid=,command= -p "$pid" 2>/dev/null | sed 's/^/#   /' >&2
-    kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.1
   done
 }
 
