@@ -1,0 +1,11 @@
+FM_TEST_COVERAGE ok total=227 parallel=24 parallel_max_ms=405469 parallel_imbalance_ms=921 parallel_unhinted=0 serial=187 serial_shards=5 serial_max_ms=1402289 serial_shard_budget_ms=1440000 serial_unhinted=0 herdr=16 stock_bash=152 stock_bash_excluded=75 stock_bash_shards=2 stock_bash_max_ms=840484 stock_bash_unhinted=1 required_tools=5
+cov exit=0
+      52 /tmp/s1
+      51 /tmp/s2
+     103 /tmp/all
+     206 total
+PARTITION_EXACT
+       0
+fm-test-run: lane 'stock-bash-3of2' shard index is outside 1..2 (see --list-lanes)
+       1
+       1

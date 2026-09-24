@@ -1,0 +1,43 @@
+== tests/fm-stock-bash-lane.test.sh
+ok - the lane refuses to run under a Bash that is not stock 3.2.57
+ok - --list delegates selection to the test runner's stock-bash lane
+ok - --shard lists the runner's shard, with the retained regression in shard 1 only
+ok - a malformed --shard, or one on the shard-independent pin listing, is refused
+ok - the lane runs the runner's selection and pins under stock Bash despite a newer bash on PATH
+ok - every shard gets every pin; the parse sweep and retained regression run in shard 1 only
+ok - a shard count the runner refuses stops the lane before it runs anything
+ok - a failing selected test fails the lane
+ok - a parse failure under stock Bash fails the lane and names the file
+exit=0
+== tests/fm-ci-workflow.test.sh
+ok - a newer push to one PR supersedes that PR's in-flight CI
+ok - distinct PRs get distinct concurrency groups
+ok - every main push keeps its own group and is never cancelled
+ok - every ci.yml job carries a finite timeout
+ok - the incident's unbounded jobs keep their recommended caps
+ok - the already-measured lane bounds are unchanged
+ok - the stock-bash CI job runs the shared lane owner and nothing else of the lane
+ok - the stock-bash job runs every one of the runner's 2 shards, each naming its own
+ok - a failed Lint job ends its log with the repair note, and only when the lint failed
+ok - no lane job names a pinned linter installer, so no per-job tool matrix can rot here
+ok - every lane job derives its pinned tools from the lane it runs, in one step
+ok - every pinned tool a test needs is installed by the lane that runs it
+ok - lane tool installs are 3 of a possible 16, so a download outage no longer reds lanes that never use the tool
+exit=0
+== tests/fm-test-run.test.sh
+fm-test-run: lane 'portable-serial' selected no tests
+ok - hint refresh rewrites the table from measured timings
+ok - portable serial shard lanes refuse mismatched, out-of-range, and countless names
+ok - --jobs refuses non-proven / stateful selections
+ok - --jobs admits and schedules a family with a recorded concurrent proof
+ok - an unclassified new test stays serial while the proven residual family runs concurrently
+ok - a changed shared test fixture selects its readers while an unread tests/ path still refuses
+ok - a concurrent run starts the longest-hint script first
+ok - --per-script-timeout-secs turns a hung script into a bounded failure
+ok - a run that names no bound ends a stalled script at the 1800s default, names it, and moves on
+ok - a bounded script killed by a signal is recorded as that signal, not as a pass
+ok - --max-wall-ms fails an over-budget run and refuses a malformed budget
+ok - jobs scheduler runs proven scripts; failure propagates; non-proven refused
+ok - Herdr CI family-run step times out at 20 min under a 75 min job backstop
+ok - aggregate-json merges lane timing artifacts
+exit=0
