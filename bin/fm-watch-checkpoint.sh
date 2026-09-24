@@ -93,6 +93,7 @@ run_with_perl_timeout() {
   ' "$SECONDS_ARG" "$KILL_GRACE" "$SCRIPT_DIR/fm-watch.sh"
 }
 
+START=$SECONDS
 set +e
 if command -v timeout >/dev/null 2>&1; then
   timeout -k "$KILL_GRACE" "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
@@ -119,7 +120,7 @@ if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ "$RC" -eq 137 ]; then
+if [ "$RC" -eq 137 ] && [ $((SECONDS - START)) -ge "$SECONDS_ARG" ]; then
   echo "checkpoint: watcher survived the deadline TERM and was killed" >&2
   RC=124
 fi
