@@ -88,9 +88,17 @@
 #   running a pre-prompt hook such as mise's after each typed export - is held
 #   by the terminal's canonical input, which keeps only its first 1024 bytes on
 #   macOS and drops the rest along with the Enter behind it. So the command is
-#   written to a private launch.sh in the per-task temp root and the pane is
-#   typed only a short line sourcing it, which evaluates the command in the pane
-#   shell exactly as typing it would.
+#   written to a 0600 file in the per-task temp root and the pane is typed only
+#   a short line sourcing it, which evaluates the command in the pane shell
+#   exactly as typing it would.
+#   The file is named for this spawn's incarnation (launch.<spawn_gen>.sh) and
+#   is never reused or replaced, so a source line still buffered from an
+#   earlier incarnation can never run a later relaunch's command.
+#   The temp root sits at a predictable /tmp path and the pane shell runs what
+#   it holds, so it is created 0700; a root that already exists is reused only
+#   as a real directory owned by this user that nobody else can write, and is
+#   tightened to 0700. Anything else refuses the spawn before any launch.
+#   Teardown removes the root, and every launch file in it, with the task.
 # Launch confirmation: a typed launch is never its own proof that an agent
 #   started. A launch line can still be cut short or garbled on its way into
 #   the pane, which can leave the shell at a continuation prompt with no
@@ -313,9 +321,11 @@
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above.
-#   The launch command itself exports the compact-adviser kill switch
-#   COMPACT_ADVISER_DISABLE=1 first, so it reaches the agent inside the
-#   cleared environment even on a host that never had it set.
+#   The compact-adviser kill switch COMPACT_ADVISER_DISABLE is also in the
+#   floor, and the env -i boundary then pins it with a literal
+#   COMPACT_ADVISER_DISABLE=1, so the wrapping /bin/sh already has it; the
+#   launch command itself exports it again first, so it reaches the agent
+#   inside the cleared environment even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4030,7 +4040,18 @@ esac
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# The root holds the launch file the pane shell sources, so it is private; the
+# header's "Launch file" paragraph owns what a pre-existing root must be.
 TASK_TMP="/tmp/fm-$ID"
+if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+  if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
+    [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+    ! chmod 700 "$TASK_TMP"; then
+    echo "error: per-task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+    [ "$RELAUNCH" -eq 1 ] || spawn_launch_endpoint_cleanup
+    exit 1
+  fi
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -4847,7 +4868,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID FM_TASK_STATUS \
+    FM_TASK_ID FM_TASK_STATUS COMPACT_ADVISER_DISABLE \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
@@ -4855,22 +4876,29 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
+  # Pinned last because env applies assignments left to right: this wins over
+  # the pane value the floor just forwarded, and still sets the switch for the
+  # wrapping /bin/sh on a pane whose export never landed.
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-# The header's "Launch file" paragraph owns why only this short line is typed.
-# The temp root must be this user's own real directory, since the pane shell
-# runs whatever launch.sh holds.
-if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ]; then
-  echo "error: per-task temp root $TASK_TMP is not a directory owned by this user; refusing to write a launch file there; inspect window $T" >&2
+# The header's "Launch file" paragraph owns why only this short line is typed
+# and why the file name is never reused. The temp root was made private above.
+case "$SPAWN_GEN" in
+  *[!A-Za-z0-9.]*|'') echo "error: spawn incarnation '$SPAWN_GEN' is not a usable launch-file name; inspect window $T" >&2; exit 1 ;;
+esac
+LAUNCH_FILE="$TASK_TMP/launch.$SPAWN_GEN.sh"
+if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
+  echo "error: launch file $LAUNCH_FILE already exists; refusing to replace it; inspect window $T" >&2
   exit 1
 fi
-LAUNCH_FILE="$TASK_TMP/launch.sh"
-if ! LAUNCH_FILE_TMP=$(mktemp "$TASK_TMP/.launch.sh.XXXXXX") ||
+if ! LAUNCH_FILE_TMP=$(mktemp "$TASK_TMP/.launch.XXXXXX") ||
   ! printf '%s\n' "$LAUNCH" >"$LAUNCH_FILE_TMP" ||
+  ! chmod 0600 "$LAUNCH_FILE_TMP" ||
   ! mv -f "$LAUNCH_FILE_TMP" "$LAUNCH_FILE"; then
   rm -f "${LAUNCH_FILE_TMP:-}" 2>/dev/null || true
   echo "error: could not write the launch file $LAUNCH_FILE; inspect window $T" >&2
