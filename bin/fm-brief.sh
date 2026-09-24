@@ -457,6 +457,11 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    suite, a full CI script - prefixed with \`mutex\`, as in \`mutex pnpm run ci\`. Other workers
    share these cores and this memory, and an unwrapped build racing another worker's suite has
    produced false test failures on unmodified code. Leave obviously cheap commands unwrapped.
+   The criterion is local CPU and memory, never duration:
+   a command that is slow because it waits on a network or an external API does not take the
+   lock, however long it runs, so \`terraform plan\` stays unwrapped beside the \`pnpm\` build
+   that does take it. Wrapping one held the lock for over eleven minutes while it waited on a
+   remote API and blocked another worker's real build.
    ONE \`mutex\` PER RUN: a run is one build or suite command you would otherwise issue once.
    Never split one run into per-test, per-file or per-module invocations just to wrap them.
    Never put one \`mutex\` around a loop, script or \`&&\` chain of several runs, such as a
