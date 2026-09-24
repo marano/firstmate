@@ -29,6 +29,11 @@ make_fixture() {  # <name>
 log="$(cd "$(dirname "$0")/.." && pwd)/log"
 if [ "$1" = --list ]; then
   printf '%s\n' "$*" >>"$log/list-args"
+  # The real runner owns the shard count; this one is configured for two.
+  case "$3" in
+    stock-bash-*of2|stock-bash) ;;
+    *) echo "fake runner: lane $3 does not match its 2 shards" >&2; exit 2 ;;
+  esac
   printf 'tests/a.test.sh\ntests/b.test.sh\n'
   exit 0
 fi
@@ -103,6 +108,35 @@ test_list_is_the_runner_lane_plus_retained_regression() {
   pass "--list delegates selection to the test runner's stock-bash lane"
 }
 
+test_shard_list_carries_the_retained_regression_in_one_shard_only() {
+  local fx out
+  fx=$(make_fixture shard-list)
+  out=$(run_lane "$fx" --shard 1/2 --list) || fail "--shard 1/2 --list failed: $out"
+  assert_equals $'tests/a.test.sh\ntests/b.test.sh\ntests/fm-public-followup.test.sh' "$out" \
+    "shard 1 does not list the runner's shard plus the retained regression"
+  out=$(run_lane "$fx" --shard 2/2 --list) || fail "--shard 2/2 --list failed: $out"
+  assert_equals $'tests/a.test.sh\ntests/b.test.sh' "$out" \
+    "shard 2 lists the retained regression that shard 1 already runs"
+  assert_equals $'--list --lane stock-bash-1of2\n--list --lane stock-bash-2of2' "$(cat "$fx/log/list-args")" \
+    "--shard did not ask the test runner for that shard's own selection"
+  pass "--shard lists the runner's shard, with the retained regression in shard 1 only"
+}
+
+test_malformed_shard_and_option_mix_are_refused() {
+  local fx arg rc
+  fx=$(make_fixture shard-refusals)
+  for arg in x/2 1 1/ /2 1/2/3; do
+    rc=0
+    run_lane "$fx" --shard "$arg" --list >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "--shard $arg was not refused as malformed (rc=$rc)"
+  done
+  rc=0
+  run_lane "$fx" --shard 1/2 --ok-count-pins >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "--ok-count-pins accepted a --shard it ignores (rc=$rc)"
+  [ ! -e "$fx/log/list-args" ] || fail "a refused call still asked the runner for a selection"
+  pass "a malformed --shard, or one on the shard-independent pin listing, is refused"
+}
+
 test_run_executes_the_runner_lane_under_stock_bash() {
   local fx out args
   fx=$(make_fixture run)
@@ -132,6 +166,46 @@ $fx/log/timing.json" "$args" "lane did not run the runner's stock-bash selection
   pass "the lane runs the runner's selection and pins under stock Bash despite a newer bash on PATH"
 }
 
+# Every shard gets every pin, and only shard 1 runs the parse sweep and the
+# retained regression, so each runs exactly once across the matrix.
+test_shards_split_the_extras_and_share_every_pin() {
+  local fx pins args
+  fx=$(make_fixture shard-2)
+  pins=$(run_lane "$fx" --ok-count-pins) || fail "--ok-count-pins failed"
+  [ "$(printf '%s\n' "$pins" | grep -c .)" -ge 2 ] || fail "the lane lists fewer than two case-count pins: $pins"
+  run_lane "$fx" --shard 2/2 >/dev/null 2>&1 || fail "shard 2 failed"
+  args=$(cat "$fx/log/run-args")
+  assert_equals stock-bash-2of2 "$(printf '%s\n' "$args" | sed -n 2p)" "shard 2 did not run the runner's second shard"
+  assert_equals "$pins" "$(printf '%s\n' "$args" | awk 'prev == "--require-ok-count" { print } { prev = $0 }')" \
+    "shard 2 was not handed every case-count pin"
+  [ ! -e "$fx/log/lint-ci" ] || fail "shard 2 ran the parse sweep shard 1 owns"
+  [ ! -e "$fx/log/pf-only" ] || fail "shard 2 ran the retained regression shard 1 owns"
+
+  fx=$(make_fixture shard-1)
+  run_lane "$fx" --shard 1/2 >/dev/null 2>&1 || fail "shard 1 failed"
+  args=$(cat "$fx/log/run-args")
+  assert_equals stock-bash-1of2 "$(printf '%s\n' "$args" | sed -n 2p)" "shard 1 did not run the runner's first shard"
+  assert_equals "$pins" "$(printf '%s\n' "$args" | awk 'prev == "--require-ok-count" { print } { prev = $0 }')" \
+    "shard 1 was not handed every case-count pin"
+  assert_equals true "$(cat "$fx/log/lint-ci" 2>/dev/null)" "shard 1 did not run the parse sweep"
+  assert_equals test_first_register_succeeds_with_empty_lock_list_under_bash32 "$(cat "$fx/log/pf-only" 2>/dev/null)" \
+    "shard 1 did not run the retained regression"
+  pass "every shard gets every pin; the parse sweep and retained regression run in shard 1 only"
+}
+
+# The runner owns the shard count, so a matrix of the wrong size stops before
+# the lane spends anything, rather than running a partial lane that looks whole.
+test_a_shard_count_the_runner_refuses_stops_the_lane() {
+  local fx out rc=0
+  fx=$(make_fixture shard-count)
+  out=$(run_lane "$fx" --shard 1/3 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a shard count the runner refuses did not stop the lane (rc=$rc): $out"
+  assert_contains "$out" "shard 1/3 does not match" "the refusal did not name the shard"
+  [ ! -e "$fx/log/lint-ci" ] || fail "the lane ran its parse sweep for a refused shard"
+  [ ! -e "$fx/log/run-args" ] || fail "the lane ran tests for a refused shard"
+  pass "a shard count the runner refuses stops the lane before it runs anything"
+}
+
 test_runner_failure_fails_the_lane() {
   local fx rc=0
   fx=$(make_fixture runner-red)
@@ -153,9 +227,13 @@ test_parse_failure_fails_the_lane_naming_the_file() {
 
 test_refuses_a_bash_that_is_not_stock
 test_list_is_the_runner_lane_plus_retained_regression
+test_shard_list_carries_the_retained_regression_in_one_shard_only
+test_malformed_shard_and_option_mix_are_refused
 case "$(/bin/bash -c 'printf %s "$BASH_VERSION"' 2>/dev/null)" in
   3.2.57*)
     test_run_executes_the_runner_lane_under_stock_bash
+    test_shards_split_the_extras_and_share_every_pin
+    test_a_shard_count_the_runner_refuses_stops_the_lane
     test_runner_failure_fails_the_lane
     test_parse_failure_fails_the_lane_naming_the_file
     ;;

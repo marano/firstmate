@@ -178,6 +178,36 @@ end
   pass "the stock-bash CI job runs the shared lane owner and nothing else of the lane"
 }
 
+# The stock-bash lane runs as one job per shard. Every shard must hand the lane
+# owner the same <k>/<job-total> spec, so a matrix resized without the runner
+# is refused at run time, and the matrix must hold exactly the runner's shard
+# count, so no shard of the lane is left without a job to run it.
+test_stock_bash_shards_match_the_runner() {
+  local reported runner_count
+  runner_count=$("$ROOT/bin/fm-test-run.sh" --list-lanes | grep -c '^stock-bash-[0-9]*of[0-9]*$' || true)
+  [ "$runner_count" -ge 2 ] || fail "the runner packs $runner_count stock-bash shards, want at least 2"
+  reported=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash")
+strategy = job["strategy"] || {}
+shards = (strategy["matrix"] || {})["shard"] || []
+want = ARGV[1].to_i
+puts "the matrix runs shards #{shards.inspect}, want 1..#{want}" unless shards == (1..want).to_a
+puts "a failing shard must not cancel the other shards" unless strategy["fail-fast"] == false
+spec = (job["env"] || {})["FM_STOCK_BASH_SHARD"].to_s
+puts "FM_STOCK_BASH_SHARD must be matrix.shard over strategy.job-total, got #{spec.inspect}" unless
+  spec == "\x24{{ matrix.shard }}/\x24{{ strategy.job-total }}"
+(job["steps"] || []).each do |step|
+  step["run"].to_s.lines.each do |line|
+    command = line.strip
+    next unless command.start_with?("bin/fm-stock-bash-lane.sh")
+    puts "a lane owner call does not pass its shard: #{command}" unless command.include?("--shard \x22\x24FM_STOCK_BASH_SHARD\x22")
+  end
+end
+' "$CI_WORKFLOW" "$runner_count") || fail "could not read the macos-stock-bash job from ci.yml"
+  [ -z "$reported" ] || fail "the stock-bash shards do not match the runner:"$'\n'"$reported"
+  pass "the stock-bash job runs every one of the runner's $runner_count shards, each naming its own"
+}
+
 # A failed Lint job must end its log with the repair note, because that tail is
 # what a CI-repair agent reads; it must not print when an install step failed.
 test_failed_lint_ends_with_the_repair_note() {
@@ -304,7 +334,7 @@ end
 # needs one. Proven against the runner's own answer rather than against the
 # workflow text, so moving a test between lanes moves its tool with it.
 test_installed_tools_cover_every_test_that_needs_one() {
-  local needed lane covered missing
+  local needed lane covered missing shards shard
   needed=$("$ROOT/bin/fm-test-run.sh" --list-required-tools --all --include-excluded) \
     || fail "could not ask bin/fm-test-run.sh what the whole suite needs"
   [ -n "$needed" ] || fail "no test requires a pinned tool, so this case proves nothing"
@@ -313,7 +343,13 @@ test_installed_tools_cover_every_test_that_needs_one() {
       [ -n "$lane" ] || continue
       "$ROOT/bin/fm-test-run.sh" --list-required-tools --lane "$lane" || exit 1
     done < <(workflow_install_lanes)
-    "$ROOT/bin/fm-stock-bash-lane.sh" --required-tools || exit 1
+    # The stock-bash job asks its lane owner per shard, exactly as it installs.
+    shards=$("$ROOT/bin/fm-test-run.sh" --list-lanes | grep -c '^stock-bash-[0-9]*of[0-9]*$') || exit 1
+    shard=1
+    while [ "$shard" -le "$shards" ]; do
+      "$ROOT/bin/fm-stock-bash-lane.sh" --shard "$shard/$shards" --required-tools || exit 1
+      shard=$((shard + 1))
+    done
   ) || fail "could not derive the tools ci.yml's lanes install"
   covered=$(printf '%s\n' "$covered" | LC_ALL=C sort -u)
   missing=$(comm -23 <(printf '%s\n' "$needed") <(printf '%s\n' "$covered"))
@@ -350,6 +386,7 @@ test_every_job_has_a_finite_timeout
 test_previously_unbounded_jobs_keep_their_caps
 test_measured_lanes_keep_their_existing_bounds
 test_stock_bash_job_runs_the_shared_lane_owner
+test_stock_bash_shards_match_the_runner
 test_failed_lint_ends_with_the_repair_note
 test_only_the_lint_job_names_a_linter_installer
 test_every_lane_job_derives_its_tools_from_its_own_lane

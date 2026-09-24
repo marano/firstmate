@@ -113,7 +113,7 @@ The lane's measured total meanwhile stayed between 5860 s and 6314 s across both
 Measured against a fixed packing the same durations are stable: across nine consecutive green `main` runs the 105 serial scripts over 5 s had a median spread of 17% and a 90th percentile of 34%, so the band is right and the basis was not.
 This is also why the guard runs pre-merge now: a branch's per-script durations were never `main`'s, but a shard's measured total against the job cap is the same quantity on either.
 
-The packed shards are not a way past the floor: the stock Bash 3.2 lane (about 19.7 minutes) bounds CI end to end, so more serial shards buy nothing.
+The packed shards are not a way past the floor: the Linux serial shards and the stock Bash 3.2 lane's two shards bound CI end to end, so more serial shards buy nothing (`docs/verification/stock-bash-lane.md` owns that lane's split and its measurement).
 
 ## Default exclusions
 
@@ -134,7 +134,7 @@ The `fm-calm-pi-extension` red on main was answered too: its restart raced the e
 
 Lane membership also decides which pinned external linters a CI job downloads.
 `bin/fm-test-run.sh --list-required-tools` prints, for any selection, the union of the tools its scripts invoke, from the `script_required_tools` table beside the lane memberships; each lane job pipes that answer into `bin/fm-install-pinned-tools.sh`, which owns the tool-to-installer mapping and refuses a name it cannot install.
-The stock-Bash job asks `bin/fm-stock-bash-lane.sh --required-tools` instead, because that lane owner also runs a retained regression outside the lane.
+Each stock-Bash shard asks `bin/fm-stock-bash-lane.sh --shard <k>/<n> --required-tools` instead, because that lane owner also runs a retained regression outside the lane.
 So a lane holding no test that invokes either linter downloads neither, and `.github/workflows/ci.yml` names no tool at all outside the Lint job, whose own two installs are not lane-derived because `bin/fm-lint.sh` needs both by definition.
 
 A release-download outage on 2026-09-21 reddened six jobs across two main runs and five were in lanes that never invoke the tool whose download failed; a hand-maintained per-job tool matrix was rejected as the answer because that shape had already rotted into four of the same six reds.
