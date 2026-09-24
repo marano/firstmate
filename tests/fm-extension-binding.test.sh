@@ -69,11 +69,25 @@ crash_cleanup_group_pid=
 crash_cleanup_release=
 crash_silent_start_pid=
 crash_silent_runner_pid=
+crash_silent_release=
+crash_silent_releaser_pid=
 override_crash_start_pid=
 override_crash_runner_pid=
 override_crash_release=
 section_coordinator_pid=
 progress_probe_release=
+# Signal a detached runner's whole process group and wait, bounded, for it to
+# exit. Its exit path still takes the source lock under the claim root, so a
+# fixture root removed while that runs is recreated outside any cleanup.
+stop_process_group() {  # <group-leader-pid>
+  local attempt
+  kill -TERM -"$1" 2>/dev/null || return 0
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    kill -0 -"$1" 2>/dev/null || return 0
+    sleep 0.05
+  done
+  kill -KILL -"$1" 2>/dev/null || true
+}
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
   [ -z "$progress_probe_release" ] || touch "$progress_probe_release" 2>/dev/null || true
@@ -118,8 +132,10 @@ extension_test_cleanup() {
   [ -z "$crash_invocation_host_pid" ] || kill -KILL "$crash_invocation_host_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_group_pid" ] || kill -KILL -"$crash_cleanup_group_pid" 2>/dev/null || true
   [ -z "$crash_cleanup_release" ] || touch "$crash_cleanup_release" 2>/dev/null || true
+  [ -z "$crash_silent_releaser_pid" ] || kill -TERM "$crash_silent_releaser_pid" 2>/dev/null || true
   [ -z "$crash_silent_start_pid" ] || kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
-  [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
+  [ -z "$crash_silent_runner_pid" ] || stop_process_group "$crash_silent_runner_pid"
+  [ -z "$crash_silent_release" ] || touch "$crash_silent_release" 2>/dev/null || true
   [ -z "$override_crash_release" ] || touch "$override_crash_release" 2>/dev/null || true
   [ -z "$override_crash_start_pid" ] || kill -TERM "$override_crash_start_pid" 2>/dev/null || true
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
@@ -285,7 +301,11 @@ elif request["operation"] == "result.classify": raw(success({"classification":"e
 elif request["operation"] == "result.terminal": raw(success({"value":True}))
 elif request["operation"] == "result.silent":
     content = request.get("input", {}).get("content", "")
-    if content == "external evidence: crash-silent\\n":
+    if content == "external evidence: crash-silent\n":
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, "crash-silent.entered"), "w", encoding="utf-8") as output: output.write(f"{os.getpid()}\n")
+        deadline = time.monotonic() + 120
+        while not os.path.exists(os.path.join(state, "crash-silent.release")) and time.monotonic() < deadline: time.sleep(.01)
         os.kill(os.getpid(), signal.SIGKILL)
     elif content.startswith("external evidence: silent-block|"):
         _, block_marker, block_release = content.rstrip("\n").split("|", 2)
@@ -404,6 +424,10 @@ wait_until() {  # <producer-pid|-> <condition command...>
 
 file_published() {
   [ -s "$1" ]
+}
+
+process_exited() {
+  ! kill -0 "$1" 2>/dev/null
 }
 
 wait_for_file() {  # <file> [producer-pid]
@@ -1286,28 +1310,37 @@ assert_absent "$H_FLOW/state/procevent/flow-source.source" "terminal external so
 FM_HOME="$H_FLOW" "$PROCEVENT" retire flow-source --if-owner "$owner_one" >/dev/null
 pass "one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end"
 FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow crash-silent-source --config-ref crash-silent >/dev/null
+crash_silent_state="$H_FLOW/state/extensions/org.example.flow"
+crash_silent_release="$crash_silent_state/crash-silent.release"
 FM_HOME="$H_FLOW" "$PROCEVENT" start crash-silent-source > "$TMP_ROOT/crash-silent-start.out" 2>&1 &
 crash_silent_start_pid=$!
-for _ in $(seq 1 400); do
-  if [ -f "$TMP_ROOT/claims/crash-silent-source.claim" ]; then
-    # The successful crash-recovery path may release this durable claim between
-    # the observation above and this best-effort cleanup PID read.
-    crash_silent_runner_pid=$(sed -n '2p' "$TMP_ROOT/claims/crash-silent-source.claim" 2>/dev/null || true)
-  fi
-  kill -0 "$crash_silent_start_pid" 2>/dev/null || break
-  sleep 0.01
-done
-if kill -0 "$crash_silent_start_pid" 2>/dev/null; then
-  kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
-  [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
-  wait "$crash_silent_start_pid" 2>/dev/null || true
-  crash_silent_start_pid=
-  crash_silent_runner_pid=
-  fail "inner host crash during result.silent wedged its runner before result.terminal"
-fi
+# The fixture publishes the crash point before killing itself, so a trigger
+# that never matches the captured bytes cannot pass this case without a crash.
+crash_silent_entered=0
+wait_for_file "$crash_silent_state/crash-silent.entered" "$crash_silent_start_pid" \
+  && crash_silent_entered=1
+# The runner holds its claim while its result.silent invocation is held, and
+# cleanup needs its group even when the crash point never published.
+crash_silent_runner_pid=$(sed -n '2p' "$TMP_ROOT/claims/crash-silent-source.claim" 2>/dev/null || true)
+[ "$crash_silent_entered" = 1 ] || fail "result.silent never reached its inner host crash"
+# Hold the crash longer than the fixed budget this wait once had, 400 polls of
+# 10ms. An unloaded run already used over half of that budget, so a loaded
+# aggregate's slower node and python chain overran it and read as a wedge. The
+# hold makes that slow chain certain, so a fixed budget here fails every run.
+(
+  trap - EXIT HUP INT TERM
+  sleep 10
+  : > "$crash_silent_release"
+) &
+crash_silent_releaser_pid=$!
+wait_until - process_exited "$crash_silent_start_pid" \
+  || fail "inner host crash during result.silent wedged its runner before result.terminal"
 wait "$crash_silent_start_pid" || fail "runner did not recover from inner result.silent crash"
 crash_silent_start_pid=
 crash_silent_runner_pid=
+wait "$crash_silent_releaser_pid" 2>/dev/null || true
+crash_silent_releaser_pid=
+crash_silent_release=
 assert_present "$H_FLOW/state/procevent-inbox/crash-silent-source.1.result" "crashed silent invocation discarded captured evidence"
 assert_absent "$H_FLOW/state/procevent/crash-silent-source.source" "terminal retry did not retire the crashed silent source"
 assert_absent "$H_FLOW/state/procevent/.extension-binding-lifecycle.lock" "inner host crash left a lifecycle lock behind"
