@@ -2933,6 +2933,38 @@ while kill -0 "$DETACHED_RUNNER_PID" 2>/dev/null; do
 done
 pass "an attached-start keeper stops refreshing after its parent exits"
 
+# A live start's keeper refreshes the lease every second, so a registry swapped
+# for a symlink can land between a refresh's directory check and its write. The
+# perl shim swaps the registry inside exactly that window: the lease clock read.
+HSWAP="$TMP_ROOT/lease-swap"; new_home "$HSWAP"
+mkdir -p "$HSWAP/state/procevent"
+SWAP_OUTSIDE="$TMP_ROOT/lease-swap-outside"
+SWAP_REAL="$TMP_ROOT/lease-swap-real"
+mkdir -p "$SWAP_OUTSIDE"
+SWAP_BIN=$(fm_fakebin "$TMP_ROOT/lease-swap-bin")
+REAL_PERL=$(command -v perl) || fail "the lease swap fixture requires perl"
+cat > "$SWAP_BIN/perl" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'%.6f'*)
+    if [ ! -e "$SWAP_REAL" ]; then
+      mv "$HSWAP/state/procevent" "$SWAP_REAL" && ln -s "$SWAP_OUTSIDE" "$HSWAP/state/procevent"
+    fi
+    ;;
+esac
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$SWAP_BIN/perl"
+PATH="$SWAP_BIN:$PATH" pe "$HSWAP" list >/dev/null 2>&1 || true
+assert_present "$SWAP_REAL" "the lease swap fixture never swapped the registry mid-refresh"
+[ -z "$(find "$SWAP_OUTSIDE" -mindepth 1 -print -quit)" ] \
+  || fail "a registry swapped for a symlink mid-refresh received the owner lease"
+rm "$HSWAP/state/procevent"
+mv "$SWAP_REAL" "$HSWAP/state/procevent"
+pe "$HSWAP" list >/dev/null
+assert_present "$HSWAP/state/procevent/.owner-lease" "a lease refresh stopped recording the lease in its own registry"
+pass "a lease refresh never writes through a registry swapped for a symlink mid-refresh"
+
 HREUSED_GROUP="$TMP_ROOT/reused-runner-group"; new_home "$HREUSED_GROUP"
 fm_test_track_procevent_home "$HREUSED_GROUP"
 REUSED_GROUP_MARKER="$TMP_ROOT/reused-runner-group.marker"

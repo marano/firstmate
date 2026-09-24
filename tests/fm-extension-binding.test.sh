@@ -71,8 +71,10 @@ override_crash_start_pid=
 override_crash_runner_pid=
 override_crash_release=
 section_coordinator_pid=
+progress_probe_release=
 extension_test_cleanup() {
   [ -z "$concurrent_release" ] || touch "$concurrent_release" 2>/dev/null || true
+  [ -z "$progress_probe_release" ] || touch "$progress_probe_release" 2>/dev/null || true
   [ -z "$install_race_release" ] || touch "$install_race_release" 2>/dev/null || true
   [ -z "$killed_install_release" ] || touch "$killed_install_release" 2>/dev/null || true
   [ -z "$killed_install_bind_pid" ] || kill -TERM "$killed_install_bind_pid" 2>/dev/null || true
@@ -371,13 +373,35 @@ if [ "${FM_TEST_OWNER_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 
-wait_for_file() {
-  local file=$1
-  for _ in $(seq 1 100); do
-    [ -s "$file" ] && return 0
+# A fixture reaches the state a check needs only after a chain of node and
+# python launches. That chain's duration is set by load, not by the code under
+# test, so a fixed poll budget failed at random on busy runners: an unloaded
+# run already spent up to 40% of the old 100-poll budget. A wait instead follows
+# the process expected to produce the state. It keeps waiting while that
+# producer lives, and fails at once when the producer exits without it. The
+# tripwire only bounds a hang, which the caller's failure message then names.
+progress_wait_tripwire_seconds=60
+
+wait_until() {  # <producer-pid|-> <condition command...>
+  local producer=$1 deadline=$((SECONDS + progress_wait_tripwire_seconds))
+  shift
+  while :; do
+    "$@" && return 0
+    if [ "$producer" != - ] && ! kill -0 "$producer" 2>/dev/null; then
+      "$@"
+      return
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.05
   done
-  return 1
+}
+
+file_published() {
+  [ -s "$1" ]
+}
+
+wait_for_file() {  # <file> [producer-pid]
+  wait_until "${2:--}" file_published "$1"
 }
 
 wake_payloads() {
@@ -675,6 +699,41 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     fail "the coordinator left its deadline child alive"
   fi
   pass "the section coordinator propagates ordered failures and bounded cleanup"
+  # Force the interleaving a loaded runner produced: the producer publishes
+  # only after the 100 polls of 50ms that the waits once allowed have all run.
+  progress_probe_file="$coordinator_probe/progress"
+  progress_probe_release="$coordinator_probe/progress.release"
+  (
+    trap - EXIT HUP INT TERM
+    progress_probe_deadline=$((SECONDS + FM_TEST_STUB_MAX_BLOCK_SECONDS))
+    while [ ! -e "$progress_probe_release" ] && [ "$SECONDS" -lt "$progress_probe_deadline" ]; do
+      sleep 0.05
+    done
+    printf 'published\n' > "$progress_probe_file"
+  ) &
+  progress_probe_producer_pid=$!
+  (
+    trap - EXIT HUP INT TERM
+    wait_for_file "$progress_probe_file" "$progress_probe_producer_pid"
+  ) &
+  progress_probe_waiter_pid=$!
+  sleep 8
+  kill -0 "$progress_probe_waiter_pid" 2>/dev/null \
+    || fail "a progress wait gave up on a live producer slower than a fixed poll budget"
+  touch "$progress_probe_release"
+  wait "$progress_probe_waiter_pid" || fail "a progress wait missed a slow producer's published file"
+  wait "$progress_probe_producer_pid" || true
+  progress_probe_release=
+  (trap - EXIT HUP INT TERM; exit 0) &
+  progress_probe_producer_pid=$!
+  wait "$progress_probe_producer_pid" || true
+  progress_probe_started=$SECONDS
+  if wait_for_file "$coordinator_probe/never-published" "$progress_probe_producer_pid"; then
+    fail "a progress wait accepted a producer that exited without publishing"
+  fi
+  [ $((SECONDS - progress_probe_started)) -lt "$progress_wait_tripwire_seconds" ] \
+    || fail "a progress wait outlived its exited producer until the hang tripwire"
+  pass "a progress wait outlasts any fixed poll budget while its producer lives and fails once it exits unpublished"
   if [ "$extension_segment" = coordinator ]; then
     printf '\nall coordinator tests passed\n'
     exit 0
@@ -726,11 +785,7 @@ H_CONCURRENT="$HOMES/concurrent"; new_home "$H_CONCURRENT"
 bind_package "$H_CONCURRENT" "$P_CONCURRENT_ONE" ext-concurrent \
   > "$TMP_ROOT/concurrent-first.out" 2>&1 &
 first_bind_pid=$!
-for _ in $(seq 1 200); do
-  [ -s "$concurrent_marker" ] && break
-  sleep 0.01
-done
-[ -s "$concurrent_marker" ] || fail "first concurrent bind never reached its pre-publication handshake"
+wait_for_file "$concurrent_marker" "$first_bind_pid" || fail "first concurrent bind never reached its pre-publication handshake"
 bind_package "$H_CONCURRENT" "$P_CONCURRENT_TWO" ext-concurrent > "$TMP_ROOT/concurrent-second.out" 2>&1 &
 second_bind_pid=$!
 sleep 0.2
@@ -1076,7 +1131,7 @@ pass "malformed, invalid UTF-8, BOM, control, multiple, duplicate, unknown, over
 overlap_out="$TMP_ROOT/overlap.out"
 invoke_matrix overlap >"$overlap_out" &
 overlap_invoke_pid=$!
-wait_for_file "$state_root/overlap-ready" || fail "overlap fixture never entered its invocation window"
+wait_for_file "$state_root/overlap-ready" "$overlap_invoke_pid" || fail "overlap fixture never entered its invocation window"
 unrelated_pid_file="$TMP_ROOT/unrelated-daemon.pid"
 python3 - "$unrelated_pid_file" <<'PY' &
 import os, subprocess, sys
@@ -1086,7 +1141,7 @@ child = subprocess.Popen(["/bin/sleep", "300"], cwd="/", start_new_session=True,
 with open(sys.argv[1], "w", encoding="utf-8") as output: output.write(f"{child.pid}\n")
 PY
 unrelated_launcher_pid=$!
-wait_for_file "$unrelated_pid_file" || fail "unrelated daemon launcher never published its child"
+wait_for_file "$unrelated_pid_file" "$unrelated_launcher_pid" || fail "unrelated daemon launcher never published its child"
 unrelated_daemon_pid=$(cat "$unrelated_pid_file")
 touch "$state_root/overlap-release"
 wait "$overlap_invoke_pid" || {
@@ -1259,7 +1314,7 @@ race_binding_digest=$(printf '%s\n' "$race_bind" | sed -n 's/^binding-digest: //
 rm -f "$race_marker" "$race_release"
 FM_HOME="$H_RETIRE_RACE" "$PROCEVENT" register-extension ext-retire-race race-source --config-ref good > "$TMP_ROOT/retire-race-register.out" 2>&1 &
 race_register_pid=$!
-wait_for_file "$race_marker" || fail "registration race fixture never entered binding resolution"
+wait_for_file "$race_marker" "$race_register_pid" || fail "registration race fixture never entered binding resolution"
 FM_HOME="$H_RETIRE_RACE" "$HOST" retire-binding org.example.retire-race --if-binding-digest "$race_binding_digest" > "$TMP_ROOT/retire-race-retire.out" 2>&1 &
 race_retire_pid=$!
 sleep 0.2
@@ -1289,28 +1344,59 @@ H_PROCESS_RETIRE_RACE="$HOMES/process-retire-race"; new_home "$H_PROCESS_RETIRE_
 touch "$process_race_release"
 process_race_bind=$(bind_package "$H_PROCESS_RETIRE_RACE" "$P_PROCESS_RETIRE_RACE" ext-process-retire-race)
 process_race_binding=$(printf '%s\n' "$process_race_bind" | sed -n 's/^binding-digest: //p')
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race process-race-source --config-ref good >/dev/null
-rm -f "$process_race_marker" "$process_race_release"
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" start process-race-source > "$TMP_ROOT/process-retire-race-start.out" 2>&1 &
-process_race_start_pid=$!
-wait_for_file "$process_race_marker" || fail "process-event race fixture never reached binding resolution"
-FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" > "$TMP_ROOT/process-retire-race-retire.out" 2>&1 &
-process_race_retire_pid=$!
-sleep 0.2
-kill -0 "$process_race_retire_pid" 2>/dev/null || fail "binding retirement bypassed an in-flight process-event resolution"
-touch "$process_race_release"
-wait "$process_race_start_pid" || fail "lifecycle-locked process-event did not complete after release"
-process_race_start_pid=
-process_race_retire_rc=0
-wait "$process_race_retire_pid" || process_race_retire_rc=$?
-process_race_retire_pid=
-[ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved process-event invocation"
-assert_contains "$(cat "$TMP_ROOT/process-retire-race-retire.out")" "still owns process-event registration" "retirement did not observe the reserved process-event registration"
-assert_present "$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result" "reserved process-event did not capture its result"
+# The host abandons a handshake at its own fixed timeout, which legitimately
+# ends the reservation a blocked fixture holds. A loaded runner can stall this
+# suite past that timeout while a window below is open. The host reports the
+# abandonment, so such an attempt proves nothing either way and is repeated,
+# while retirement finishing inside a window the host did not abandon still
+# fails as a bypass. Each race's first attempt forces that stall by holding its
+# window until the host gives up and retirement has finished, so the repeat is
+# exercised on every run.
+process_race_attempts=5
+process_race_hold_past_handshake() {  # <held-process-pid> <retirement-pid>
+  wait_until "$1" false || true
+  ! kill -0 "$1" 2>/dev/null || fail "the host never abandoned a handshake held past its timeout"
+  wait_until "$2" false || true
+}
+process_race_attempt=0
+while :; do
+  process_race_attempt=$((process_race_attempt + 1))
+  process_race_source="process-race-source-$process_race_attempt"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race "$process_race_source" --config-ref good >/dev/null
+  rm -f "$process_race_marker" "$process_race_release"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" start "$process_race_source" > "$TMP_ROOT/process-retire-race-start.out" 2>&1 &
+  process_race_start_pid=$!
+  wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "process-event race fixture never reached binding resolution"
+  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" > "$TMP_ROOT/process-retire-race-retire.out" 2>&1 &
+  process_race_retire_pid=$!
+  process_race_retire_held=1
+  if [ "$process_race_attempt" -eq 1 ]; then
+    process_race_hold_past_handshake "$process_race_start_pid" "$process_race_retire_pid"
+  else
+    sleep 0.2
+    kill -0 "$process_race_retire_pid" 2>/dev/null || process_race_retire_held=0
+  fi
+  touch "$process_race_release"
+  wait "$process_race_start_pid" || fail "lifecycle-locked process-event did not complete after release"
+  process_race_start_pid=
+  process_race_retire_rc=0
+  wait "$process_race_retire_pid" || process_race_retire_rc=$?
+  process_race_retire_pid=
+  [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved process-event invocation"
+  process_race_result="$H_PROCESS_RETIRE_RACE/state/procevent-inbox/$process_race_source.1.result"
+  assert_present "$process_race_result" "reserved process-event did not capture its result"
+  if grep -q '"code":"timeout"' "$process_race_result"; then
+    [ "$process_race_attempt" -lt "$process_race_attempts" ] \
+      || fail "every process-event reservation attempt outlived the host's handshake timeout"
+    continue
+  fi
+  [ "$process_race_attempt" -gt 1 ] || fail "the forced process-event stall did not outlast the host's handshake timeout"
+  [ "$process_race_retire_held" -eq 1 ] || fail "binding retirement bypassed an in-flight process-event resolution"
+  assert_contains "$(cat "$TMP_ROOT/process-retire-race-retire.out")" "still owns process-event registration" "retirement did not observe the reserved process-event registration"
+  break
+done
 pass "process-event resolution reserves the lifecycle before invocation"
-process_race_release=
 
-process_race_result="$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result"
 process_race_resolution=$(FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" resolve-process-event ext-process-retire-race)
 IFS=$'\t' read -r process_race_schema process_race_id process_race_version process_race_cap process_race_package process_race_resolution_binding process_race_extra <<< "$process_race_resolution"
 [ "$process_race_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$process_race_extra" ] \
@@ -1319,30 +1405,50 @@ for process_race_operation in result.classify result.terminal result.silent; do
   process_race_guard="process-race-${process_race_operation#result.}"
   process_race_registration=$(FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" register-extension ext-process-retire-race "$process_race_guard" --config-ref good)
   process_race_owner=$(printf '%s\n' "$process_race_registration" | sed -n 's/^owner-token: //p')
-  rm -f "$process_race_marker" "$process_race_release"
-  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" process-event ext-process-retire-race "$process_race_operation" \
-    --result-file "$process_race_result" \
-    --expect-extension "$process_race_id" --expect-version "$process_race_version" \
-    --expect-capability-version "$process_race_cap" \
-    --expect-package-digest "$process_race_package" \
-    --expect-binding-digest "$process_race_resolution_binding" \
-    > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}.out" 2>&1 &
-  process_race_start_pid=$!
-  wait_for_file "$process_race_marker" || fail "$process_race_operation race fixture never reached binding resolution"
-  FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" \
-    > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out" 2>&1 &
-  process_race_retire_pid=$!
-  sleep 0.2
-  kill -0 "$process_race_retire_pid" 2>/dev/null || fail "binding retirement bypassed $process_race_operation lifecycle reservation"
-  touch "$process_race_release"
-  wait "$process_race_start_pid" 2>/dev/null || true
-  process_race_start_pid=
-  process_race_retire_rc=0
-  wait "$process_race_retire_pid" || process_race_retire_rc=$?
-  process_race_retire_pid=
-  [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved $process_race_operation invocation"
-  assert_contains "$(cat "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out")" "still owns process-event registration" \
-    "retirement did not observe the $process_race_operation registration"
+  process_race_attempt=0
+  while :; do
+    process_race_attempt=$((process_race_attempt + 1))
+    process_race_out="$TMP_ROOT/process-retire-race-${process_race_operation#result.}.out"
+    rm -f "$process_race_marker" "$process_race_release"
+    FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" process-event ext-process-retire-race "$process_race_operation" \
+      --result-file "$process_race_result" \
+      --expect-extension "$process_race_id" --expect-version "$process_race_version" \
+      --expect-capability-version "$process_race_cap" \
+      --expect-package-digest "$process_race_package" \
+      --expect-binding-digest "$process_race_resolution_binding" \
+      > "$process_race_out" 2>&1 &
+    process_race_start_pid=$!
+    wait_for_file "$process_race_marker" "$process_race_start_pid" || fail "$process_race_operation race fixture never reached binding resolution"
+    FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" retire-binding org.example.process-retire-race --if-binding-digest "$process_race_binding" \
+      > "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out" 2>&1 &
+    process_race_retire_pid=$!
+    process_race_retire_held=1
+    process_race_forced=0
+    if [ "$process_race_operation" = result.classify ] && [ "$process_race_attempt" -eq 1 ]; then
+      process_race_forced=1
+      process_race_hold_past_handshake "$process_race_start_pid" "$process_race_retire_pid"
+    else
+      sleep 0.2
+      kill -0 "$process_race_retire_pid" 2>/dev/null || process_race_retire_held=0
+    fi
+    touch "$process_race_release"
+    wait "$process_race_start_pid" 2>/dev/null || true
+    process_race_start_pid=
+    process_race_retire_rc=0
+    wait "$process_race_retire_pid" || process_race_retire_rc=$?
+    process_race_retire_pid=
+    [ "$process_race_retire_rc" -ne 0 ] || fail "retirement crossed a reserved $process_race_operation invocation"
+    assert_contains "$(cat "$TMP_ROOT/process-retire-race-${process_race_operation#result.}-retire.out")" "still owns process-event registration" \
+      "retirement did not observe the $process_race_operation registration"
+    if grep -q 'extension handshake exceeded' "$process_race_out"; then
+      [ "$process_race_attempt" -lt "$process_race_attempts" ] \
+        || fail "every $process_race_operation reservation attempt outlived the host's handshake timeout"
+      continue
+    fi
+    [ "$process_race_forced" -eq 0 ] || fail "the forced $process_race_operation stall did not outlast the host's handshake timeout"
+    [ "$process_race_retire_held" -eq 1 ] || fail "binding retirement bypassed $process_race_operation lifecycle reservation"
+    break
+  done
   FM_HOME="$H_PROCESS_RETIRE_RACE" "$PROCEVENT" retire "$process_race_guard" --if-owner "$process_race_owner" >/dev/null
 done
 process_race_release=
@@ -1446,7 +1552,7 @@ active_config="active-block|$active_runner_marker|$active_runner_release"
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref "$active_config" >/dev/null
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source > "$TMP_ROOT/active-runner.out" 2>&1 &
 active_runner_pid=$!
-wait_for_file "$active_runner_marker" || fail "active extension runner never entered its poll"
+wait_for_file "$active_runner_marker" "$active_runner_pid" || fail "active extension runner never entered its poll"
 expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
 expect_prompt_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
 touch "$active_runner_release"
@@ -1485,7 +1591,7 @@ perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
   "$PROCEVENT" register-extension ext-lock-order order-source --config-ref replacement \
   > "$TMP_ROOT/lock-order-register.out" 2>&1 &
 lock_order_register_pid=$!
-wait_for_file "$lock_order_marker" || fail "lock-order registration never reached its adapter handshake"
+wait_for_file "$lock_order_marker" "$lock_order_register_pid" || fail "lock-order registration never reached its adapter handshake"
 perl -e 'setpgrp(0, 0); exec @ARGV or exit 127' -- env FM_HOME="$H_LOCK_ORDER" \
   "$PROCEVENT" reconcile > "$TMP_ROOT/lock-order-reconcile.out" 2>&1 &
 lock_order_reconcile_pid=$!
@@ -1684,7 +1790,7 @@ FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" start override-crash-source > "$TMP_ROOT/override-crash-start.out" 2>&1 &
 override_crash_start_pid=$!
-wait_for_file "$override_crash_marker" || fail "overridden-state crash fixture never reached its reservation handoff"
+wait_for_file "$override_crash_marker" "$override_crash_start_pid" || fail "overridden-state crash fixture never reached its reservation handoff"
 override_crash_claim="$TMP_ROOT/claims/override-crash-source.claim"
 assert_present "$override_crash_claim" "overridden-state crash fixture did not retain its claim"
 override_crash_runner_pid=$(sed -n '2p' "$override_crash_claim")
@@ -1769,7 +1875,7 @@ FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" start registry-race-source > "$TMP_ROOT/registry-race.out" 2>&1 &
 registry_race_pid=$!
-wait_for_file "$registry_race_marker" || fail "registry race fixture never reached its pinned staging boundary"
+wait_for_file "$registry_race_marker" "$registry_race_pid" || fail "registry race fixture never reached its pinned staging boundary"
 mkdir "$TMP_ROOT/registry-race-outside"
 mv "$STATE_OVERRIDE/procevent" "$TMP_ROOT/registry-race-real"
 ln -s "$TMP_ROOT/registry-race-outside" "$STATE_OVERRIDE/procevent"
@@ -1792,7 +1898,7 @@ FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" start leaf-race-source > "$TMP_ROOT/leaf-race.out" 2>&1 &
 leaf_race_pid=$!
-wait_for_file "$leaf_race_marker" || fail "leaf race fixture never entered its staged invocation"
+wait_for_file "$leaf_race_marker" "$leaf_race_pid" || fail "leaf race fixture never entered its staged invocation"
 leaf_stage=$(find "$STATE_OVERRIDE/procevent" -maxdepth 1 -name '.leaf-race-source.*.output' -print -quit)
 leaf_runner="$STATE_OVERRIDE/procevent/leaf-race-source.runner"
 [ -n "$leaf_stage" ] && [ -f "$leaf_runner" ] || fail "leaf race fixture did not create both protected leaves"
@@ -1819,7 +1925,7 @@ FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
 FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" \
   "$PROCEVENT" start publication-race-source > "$TMP_ROOT/publication-race.out" 2>&1 &
 publication_race_pid=$!
-wait_for_file "$publication_race_marker" || fail "publication race fixture never reached result handoff"
+wait_for_file "$publication_race_marker" "$publication_race_pid" || fail "publication race fixture never reached result handoff"
 mkdir "$TMP_ROOT/publication-race-outside"
 mv "$STATE_OVERRIDE/procevent-inbox" "$TMP_ROOT/publication-race-real-inbox"
 ln -s "$TMP_ROOT/publication-race-outside" "$STATE_OVERRIDE/procevent-inbox"
@@ -1996,7 +2102,7 @@ FM_HOME="$H_INVOCATION_CLEANUP" "$HOST" process-event ext-invocation-cleanup sou
   --expect-package-digest "$cleanup_package" --expect-binding-digest "$cleanup_binding" \
   > "$TMP_ROOT/invocation-signal.out" 2>&1 &
 signal_cleanup_host_pid=$!
-wait_for_file "$signal_state/descendant.pid" || fail "signal cleanup fixture never started its descendant"
+wait_for_file "$signal_state/descendant.pid" "$signal_cleanup_host_pid" || fail "signal cleanup fixture never started its descendant"
 signal_owner=$(wait_for_invocation_owner "$H_INVOCATION_CLEANUP") \
   || fail "signal cleanup fixture published no invocation owner"
 signal_cleanup_group_pid=$(owner_group_pid "$signal_owner") \
@@ -2027,7 +2133,7 @@ FM_HOME="$H_INVOCATION_CLEANUP" "$HOST" process-event ext-invocation-cleanup sou
   --expect-package-digest "$cleanup_package" --expect-binding-digest "$cleanup_binding" \
   > "$TMP_ROOT/invocation-crash.out" 2>&1 &
 crash_cleanup_host_pid=$!
-wait_for_file "$crash_marker" || fail "crash cleanup fixture never entered extension code"
+wait_for_file "$crash_marker" "$crash_cleanup_host_pid" || fail "crash cleanup fixture never entered extension code"
 crash_owner=$(wait_for_invocation_owner "$H_INVOCATION_CLEANUP") \
   || fail "crash cleanup fixture published no invocation owner"
 crash_cleanup_group_pid=$(owner_group_pid "$crash_owner") \
@@ -2235,10 +2341,7 @@ expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.s
 expect_prompt_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
 touch "$remote_active_release"
 remote_active_release=
-for _ in $(seq 1 400); do
-  [ ! -e "$H_REMOTE/state/procevent/remote-active-source.source" ] && break
-  sleep 0.01
-done
+wait_until - test ! -e "$H_REMOTE/state/procevent/remote-active-source.source" || true
 assert_absent "$H_REMOTE/state/procevent/remote-active-source.source" "remote terminal runner retained its registration"
 remote_direct fm-procevent.sh handled remote-active-source 1 >/dev/null
 remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in >/dev/null
@@ -2402,10 +2505,7 @@ example_registration=$(FM_HOME="$H_EXAMPLE" "$PROCEVENT" register-extension file
 example_token=$(printf '%s\n' "$example_registration" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_EXAMPLE" "$PROCEVENT" start example-file > "$TMP_ROOT/example-start.out" &
 example_start=$!
-for _ in $(seq 1 100); do
-  [ -f "$FM_PROCEVENT_CLAIM_ROOT/example-file.claim" ] && break
-  sleep 0.05
-done
+wait_until "$example_start" test -f "$FM_PROCEVENT_CLAIM_ROOT/example-file.claim" || true
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/example-file.claim" "example source never started waiting"
 printf 'build 42 completed successfully\n' > "$SIGNAL_FILE"
 wait "$example_start" || fail "example source failed after its file appeared"
@@ -2427,10 +2527,7 @@ symlinked_registration=$(FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" register-ex
 symlinked_token=$(printf '%s\n' "$symlinked_registration" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" start example-symlinked > "$TMP_ROOT/example-symlinked-start.out" &
 symlinked_start=$!
-for _ in $(seq 1 100); do
-  [ -f "$FM_PROCEVENT_CLAIM_ROOT/example-symlinked.claim" ] && break
-  sleep 0.05
-done
+wait_until "$symlinked_start" test -f "$FM_PROCEVENT_CLAIM_ROOT/example-symlinked.claim" || true
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/example-symlinked.claim" \
   "a home reached through a symlinked ancestor never started its external source"
 printf 'build 43 completed successfully\n' > "$SIGNAL_FILE_SYMLINKED"
