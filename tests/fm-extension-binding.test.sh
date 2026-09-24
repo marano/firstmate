@@ -1363,7 +1363,6 @@ process_race_retire_pid=
 assert_contains "$(cat "$TMP_ROOT/process-retire-race-retire.out")" "still owns process-event registration" "retirement did not observe the reserved process-event registration"
 assert_present "$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result" "reserved process-event did not capture its result"
 pass "process-event resolution reserves the lifecycle before invocation"
-process_race_release=
 
 process_race_result="$H_PROCESS_RETIRE_RACE/state/procevent-inbox/process-race-source.1.result"
 process_race_resolution=$(FM_HOME="$H_PROCESS_RETIRE_RACE" "$HOST" resolve-process-event ext-process-retire-race)
