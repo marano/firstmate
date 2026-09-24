@@ -11,6 +11,8 @@
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
+# A bare turn-end while a paused: line is the worker's latest declaration is
+# absorbed the same way, and surfaces only when that wait is due its recheck.
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
@@ -1689,6 +1691,72 @@ declared_wait_wording() {  # <declared-line> <age-secs> <now>
   fi
 }
 
+# A bare turn-end while the worker's latest word is a declared `paused:` wait.
+# A worker riding a monitor ends a short turn about once a minute, and each
+# turn-end used to surface as a signal with nothing new to read: 2026-09-23, a
+# flaky-test worker that declared `paused: before/after measurement running`
+# raised about ten in a row overnight, each costing a handling turn. The
+# declaration already tells the supervisor the worker is idle on purpose, so
+# the turn-end is absorbed the way the same wait's stale pane is, on the same
+# bounded cadence (a `paused:` line's own `until` time, else
+# PAUSE_RESURFACE_SECS measured from the declaration), so a forgotten wait is
+# still rechecked. Its own throttle marker, .paused-turnend-resurfaced-<task>,
+# holds the declaration that last surfaced, because the stale path's marker is
+# keyed by window and a churning pane is never stale.
+#
+# Only a batch made ENTIRELY of turn-end markers is eligible. A status append
+# in the batch is new worker word - and one that is captain-relevant is
+# classified before this is asked - and a latest line that is anything but the
+# unresolved pause (a `working:` resume, `done:`, `blocked:`) is not a declared
+# wait at all, so both take the ordinary triage. Nothing here reads crew state
+# or a pane, so a quiet pane with no declared wait keeps the wedge path.
+# Returns 0 to absorb, 1 when this is not that case, and 2 when the declared
+# wait is due its recheck and must surface whatever the crew's evidence says.
+# A due recheck records the throttle marker, so the caller must surface it.
+signal_declared_pause_disposition() {  # <file> ...
+  local f base task statusf last declaration now age until marker scope due=0 file_due
+  local -a due_tasks=() due_scopes=()
+  [ "$#" -gt 0 ] || return 1
+  now=$(date +%s)
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in *.turn-ended) task=${base%.turn-ended} ;; *) return 1 ;; esac
+    [ -n "$task" ] || return 1
+    statusf="$STATE/$task.status"
+    last=$(status_declared_line "$statusf")
+    status_is_paused "$last" || return 1
+    declaration=$(stale_wait_declaration "$task")
+    age=$(declared_wait_age "$statusf" "$now")
+    marker="$STATE/.paused-turnend-resurfaced-$task"
+    scope=$declaration
+    file_due=0
+    if until=$(status_paused_until "$last") && [ "$now" -ge "$until" ]; then
+      scope="$declaration:due"
+      [ "$(cat "$marker" 2>/dev/null || true)" = "$scope" ] || file_due=1
+    fi
+    if [ "$file_due" = 0 ] && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+      if [ ! -e "$marker" ] || [ "$(cat "$marker" 2>/dev/null || true)" != "$scope" ] \
+        || [ "$(age_of "$marker")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+        file_due=1
+      fi
+    fi
+    if [ "$file_due" = 1 ]; then
+      due=1
+      due_tasks+=("$task")
+      due_scopes+=("$scope")
+    fi
+  done
+  if [ "$due" = 1 ]; then
+    local i
+    for ((i = 0; i < ${#due_tasks[@]}; i++)); do
+      printf '%s' "${due_scopes[$i]}" > "$STATE/.paused-turnend-resurfaced-${due_tasks[$i]}"
+    done
+    return 2
+  fi
+  triage_log "absorbed turn-end under a declared pause: $*"
+  return 0
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -2926,6 +2994,9 @@ EOF
     # busy state has no verified semantic source, bounded so it cannot defer that
     # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
     # wake surfaces exactly as before.
+    # A bare turn-end whose worker's latest word is still an unresolved `paused:`
+    # wait is also benign, on that wait's own recheck cadence
+    # (signal_declared_pause_disposition), whatever the pane evidence says.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew is still executing) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. Both evidence
@@ -2948,8 +3019,16 @@ EOF
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+    signal_pause_disposition=1
+    if ! afk_present && [ "$signal_actionable" -ne 0 ]; then
+      # shellcheck disable=SC2086  # same space-separated status-path list
+      signal_declared_pause_disposition $files
+      signal_pause_disposition=$?
+    fi
+    # shellcheck disable=SC2086  # same space-separated status-path list
+    if afk_present || [ "$signal_actionable" -eq 0 ] || [ "$signal_pause_disposition" -eq 2 ] \
+      || { [ "$signal_pause_disposition" -ne 0 ] \
+        && ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"

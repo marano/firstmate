@@ -1022,6 +1022,121 @@ test_a_bare_resolution_ends_an_unkeyed_wait() {
 }
 
 
+# --- a bare turn-end under a declared `paused:` wait is absorbed ---------------
+# 2026-09-23: a worker that declared `paused: before/after measurement running`
+# and rode a Monitor ended a short turn about once a minute, and every turn-end
+# surfaced as a signal with no new status line - about ten handling turns that
+# found nothing. A turn-end with the pause still the worker's latest declaration
+# is absorbed on the declared wait's own cadence; any new worker word, a resumed
+# `working:`, or a wait past its recheck cadence still surfaces.
+declared_turnend_case() {  # <name> <status-line>... ; prints the case dir
+  local name=$1 dir state
+  shift
+  dir=$(make_case "$name"); state="$dir/state"
+  # No window: the pane-stale path has its own recheck cadence and must not
+  # answer for the turn-end path's.
+  printf 'kind=ship\nharness=grok\n' > "$state/$name.meta"
+  printf '%s\n' "$@" > "$state/$name.status"
+  printf '%s' "$(seen_sig "$state/$name.status")" > "$state/.seen-${name}_status"
+  : > "$state/$name.turn-ended"
+  printf '%s' "$dir"
+}
+
+test_turn_end_under_declared_pause_is_absorbed() {
+  local dir state fakebin out pid
+  dir=$(declared_turnend_case pause-turnend 'working: measuring' 'paused: before/after measurement running'); state="$dir/state"
+  fakebin="$dir/fakebin"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  FM_PAUSE_RESURFACE_SECS=999 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a turn-end under a declared pause was surfaced: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a turn-end under a declared pause printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a turn-end under a declared pause enqueued a durable wake record"
+  [ -s "$state/.seen-pause-turnend_turn-ended" ] || fail "an absorbed turn-end did not advance its suppressor, so it would re-fire"
+  unset FM_FAKE_CREW_STATE
+  pass "a bare turn-end while the latest status is a declared pause is absorbed and its suppressor advanced"
+}
+
+test_turn_end_after_new_status_still_surfaces() {
+  local leg dir state fakebin out pid
+  for leg in resumed blocked finished; do
+    case "$leg" in
+      resumed) dir=$(declared_turnend_case "pause-turnend-$leg" 'paused: measurement running' 'working: measurement finished, analyzing') ;;
+      blocked) dir=$(declared_turnend_case "pause-turnend-$leg" 'paused: measurement running' 'blocked: the measurement needs a decision') ;;
+      finished) dir=$(declared_turnend_case "pause-turnend-$leg" 'paused: measurement running' 'done: PR https://example.test/pr/9') ;;
+    esac
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+    export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+    FM_PAUSE_RESURFACE_SECS=999 watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 \
+      || { reap "$pid"; fail "a turn-end after a new $leg status line was absorbed as a declared pause"; }
+    grep -F "signal:" "$out" >/dev/null || fail "a turn-end after a new $leg status line printed no signal: $(cat "$out")"
+    unset FM_FAKE_CREW_STATE
+  done
+  pass "a turn-end whose latest status is no longer the declared pause (resumed, blocked, finished) still surfaces"
+}
+
+test_turn_end_under_declared_pause_resurfaces_on_the_cadence() {
+  local dir state fakebin out pid marker
+  dir=$(declared_turnend_case pause-turnend-due 'paused: measurement running'); state="$dir/state"
+  fakebin="$dir/fakebin"; out="$dir/watch.out"; marker="$state/.paused-turnend-resurfaced-pause-turnend-due"
+  set_mtime $(( $(date +%s) - 120 )) "$state/pause-turnend-due.status"
+  printf '%s' "$(seen_sig "$state/pause-turnend-due.status")" > "$state/.seen-pause-turnend-due_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # A pause held past its recheck cadence surfaces once...
+  FM_PAUSE_RESURFACE_SECS=60 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a turn-end under a pause held past its cadence was never re-surfaced"; }
+  grep -F "signal: $state/pause-turnend-due.turn-ended" "$out" >/dev/null \
+    || fail "the cadence recheck printed the wrong wake: $(cat "$out")"
+  [ -e "$marker" ] || fail "the surfaced recheck did not record its throttle"
+  # ...and the next turn-end inside that cadence is absorbed again.
+  ack_stopped_cycle "$state" || fail "the surfaced recheck could not be acknowledged"
+  : > "$out"
+  sleep 1
+  : > "$state/pause-turnend-due.turn-ended"
+  FM_PAUSE_RESURFACE_SECS=60 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a second turn-end inside the recheck cadence was surfaced again: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a second turn-end inside the recheck cadence printed a wake reason: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn-end under a long-held pause surfaces once per recheck cadence and is absorbed between"
+}
+
+test_turn_end_under_pause_whose_time_passed_surfaces_once() {
+  local dir state fakebin out pid
+  dir=$(declared_turnend_case pause-turnend-until 'paused: measurement running until 2020-01-01T00:00Z'); state="$dir/state"
+  fakebin="$dir/fakebin"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  FM_PAUSE_RESURFACE_SECS=999 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a turn-end under a pause whose declared time had passed was absorbed"; }
+  grep -F "signal: $state/pause-turnend-until.turn-ended" "$out" >/dev/null \
+    || fail "the due recheck printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "the surfaced recheck could not be acknowledged"
+  : > "$out"
+  sleep 1
+  : > "$state/pause-turnend-until.turn-ended"
+  FM_PAUSE_RESURFACE_SECS=999 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the due recheck was surfaced twice for one declaration: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the due recheck was surfaced twice for one declaration: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn-end under a pause whose declared time has passed surfaces once for that declaration"
+}
+
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
@@ -1038,3 +1153,7 @@ test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet
 test_nonterminal_paused_confirmed_by_active_run_holds_pause_cadence
 test_paused_authoritative_working_holds_cadence_and_recheck_ceiling
 test_paused_run_step_working_dead_agent_still_wedge_escalates
+test_turn_end_under_declared_pause_is_absorbed
+test_turn_end_after_new_status_still_surfaces
+test_turn_end_under_declared_pause_resurfaces_on_the_cadence
+test_turn_end_under_pause_whose_time_passed_surfaces_once
