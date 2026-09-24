@@ -58,15 +58,23 @@ fm_run_bash_timeout() {
   child_pid=$!
   (
     set +m
-    sleep "$seconds"
+    # command -p: the deadline is a real clock, never a stand-in on PATH.
+    command -p sleep "$seconds"
     printf 'expired\n' > "$deadline_status"
     kill -TERM -- "-$child_pid" 2>/dev/null || true
-    sleep 0.2
+    command -p sleep 0.2
     kill -KILL -- "-$child_pid" 2>/dev/null || true
     exit 124
   ) &
   watchdog_pid=$!
   [ "$monitor_was_on" -eq 1 ] || set +m
+  # A TERM or INT aimed at the caller must not orphan the bounded group: reap
+  # both process groups, drop the status files, and exit the conventional
+  # 128+signal, exactly as an unbounded caller would have on the same signal.
+  # shellcheck disable=SC2064  # child_pid and watchdog_pid are expanded now, on purpose.
+  trap "kill -TERM -- -$child_pid -$watchdog_pid 2>/dev/null; kill -KILL -- -$child_pid 2>/dev/null; rm -f '$command_status' '$deadline_status' 2>/dev/null; exit 143" TERM
+  # shellcheck disable=SC2064
+  trap "kill -TERM -- -$child_pid -$watchdog_pid 2>/dev/null; kill -KILL -- -$child_pid 2>/dev/null; rm -f '$command_status' '$deadline_status' 2>/dev/null; exit 130" INT
 
   if wait "$child_pid" 2>/dev/null; then
     command_rc=0
@@ -82,6 +90,7 @@ fm_run_bash_timeout() {
     recorded_rc=$(cat "$command_status" 2>/dev/null || true)
     case "$recorded_rc" in ''|*[!0-9]*) ;; *) command_rc=$recorded_rc ;; esac
   fi
+  trap - TERM INT
   rm -f "$command_status" "$deadline_status" 2>/dev/null || true
   return "$command_rc"
 }

@@ -52,6 +52,7 @@ set -u
 case "${1:-}" in
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_TMUX_HANG:-0}" = 1 ] && exec /bin/sleep 3717
     shift
     literal=0
     while [ $# -gt 0 ]; do
@@ -80,9 +81,14 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  # Sub-second pauses are skipped; a whole-second sleep is a real deadline
+  # (fm-send's ring budget watchdog) and must keep its meaning.
   cat >"$fb/sleep" <<'SH'
 #!/usr/bin/env bash
-exit 0
+case "${1:-}" in
+  0|0.*) exit 0 ;;
+esac
+exec /bin/sleep "$@"
 SH
   chmod +x "$fb/sleep"
   printf '%s\n' "$fb"
@@ -411,6 +417,69 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+wait_hang_gone() { # <max-tenths>
+  local i=0
+  while [ "$i" -lt "$1" ]; do
+    pgrep -f "sleep 3717" >/dev/null 2>&1 || return 0
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_hung_doorbell_is_bounded() {
+  # A pane whose send never returns (a doorbell into a pane that swallows
+  # input) must cost fm-send a bounded wait, still leave the steer durably
+  # recorded, and leave nothing running behind it.
+  local dir err rc start elapsed
+  dir=$(setup_case hung-bounded)
+  err="$dir/send.err"
+  start=$SECONDS
+  run_send "$dir" "$err" FM_FAKE_TMUX_HANG=1 FM_SEND_RING_BUDGET=2 -- t1 "steer while the pane hangs"
+  rc=$?
+  elapsed=$((SECONDS - start))
+  expect_code 0 "$rc" "a hung doorbell must not change the exit of a durably recorded steer"
+  [ "$elapsed" -lt 20 ] || fail "a hung doorbell held fm-send for ${elapsed}s despite a 2s ring budget"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not durably recorded"
+  assert_contains "$(cat "$err")" "doorbell did not reach" "the bounded ring should report an unreached doorbell"
+  wait_hang_gone 50 || fail "the timed-out doorbell left its hung tmux send running"
+  pass "fm-send inbox: a hung doorbell is bounded, reported, and leaves the durable record and no stray process"
+}
+
+test_sigterm_ends_a_hung_doorbell() {
+  # fm-send must honour SIGTERM while the ring is hung: exit promptly and take
+  # the hung child with it, rather than ignoring the signal until SIGKILL.
+  local dir err pid i=0 rc
+  dir=$(setup_case sigterm)
+  err="$dir/send.err"
+  : >"$dir/send.log"
+  env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
+    FM_SEND_LOG="$dir/send.log" FM_SEND_SETTLE=0 FM_FAKE_TMUX_HANG=1 FM_SEND_RING_BUDGET=120 \
+    "$SEND" t1 "steer to terminate" >/dev/null 2>"$err" &
+  pid=$!
+  while [ "$i" -lt 100 ] && ! pgrep -f "sleep 3717" >/dev/null 2>&1; do
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  pgrep -f "sleep 3717" >/dev/null 2>&1 || { kill -KILL "$pid" 2>/dev/null; fail "the doorbell never hung, so SIGTERM was not tested"; }
+  kill -TERM "$pid"
+  i=0
+  while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null
+    pkill -f "sleep 3717" 2>/dev/null || true
+    fail "fm-send ignored SIGTERM while its doorbell was hung"
+  fi
+  wait "$pid" 2>/dev/null
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a SIGTERMed fm-send must not exit 0"
+  wait_hang_gone 50 || fail "SIGTERM left the hung tmux send running"
+  pass "fm-send inbox: SIGTERM ends a hung doorbell promptly and reaps its child"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -424,3 +493,5 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_hung_doorbell_is_bounded
+test_sigterm_ends_a_hung_doorbell

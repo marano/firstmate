@@ -156,6 +156,76 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- copy mode ---------------------------------------------------------------
+# A pane left in tmux copy mode routes every key to the mode, so a doorbell, an
+# exit command, or a relaunch typed into it is swallowed while the agent idles
+# at its prompt. Every typing primitive must leave copy mode first when nobody
+# is using the pane, and refuse with the exact cause when somebody is.
+
+pane_mode() { tmux display-message -p -t "$TARGET" '#{pane_in_mode}'; }
+
+enter_copy_mode() {
+  tmux copy-mode -t "$TARGET" || fail "could not put $TARGET into copy mode"
+  [ "$(pane_mode)" = 1 ] || fail "$TARGET did not enter copy mode"
+}
+
+enter_copy_mode
+fm_backend_tmux_send_text_line "$TARGET" "printf 'copymode-%s\\n' line" \
+  || fail "send_text_line into a copy-mode pane failed"
+wait_for_capture_text "$TARGET" "copymode-line" \
+  || fail "send_text_line into a copy-mode pane was swallowed instead of executed"
+[ "$(pane_mode)" = 0 ] || fail "send_text_line left the pane in copy mode"
+pass "real tmux: send_text_line leaves an unattended copy-mode pane and the line executes"
+
+enter_copy_mode
+fm_backend_tmux_send_literal "$TARGET" "printf 'copymode-%s\\n' literal" \
+  || fail "send_literal into a copy-mode pane failed"
+fm_backend_tmux_send_key "$TARGET" Enter || fail "send_key into a copy-mode pane failed"
+wait_for_capture_text "$TARGET" "copymode-literal" \
+  || fail "send_literal + send_key into a copy-mode pane was swallowed"
+enter_copy_mode
+fm_backend_tmux_send_key "$TARGET" Enter || fail "send_key alone into a copy-mode pane failed"
+[ "$(pane_mode)" = 0 ] || fail "send_key left the pane in copy mode"
+pass "real tmux: send_literal and send_key leave an unattended copy-mode pane first"
+
+enter_copy_mode
+verdict=$(fm_backend_tmux_send_text_submit "$TARGET" "printf 'copymode-%s\\n' submit" 3 0.2 0.2)
+[ "$verdict" != send-failed ] || fail "the submit core refused an unattended copy-mode pane"
+wait_for_capture_text "$TARGET" "copymode-submit" \
+  || fail "the submit core's text into a copy-mode pane was swallowed (verdict=$verdict)"
+[ "$(pane_mode)" = 0 ] || fail "the submit core left the pane in copy mode"
+pass "real tmux: the submit core (doorbell and exit path) leaves an unattended copy-mode pane first"
+
+# An attached client with recent input owns the pane: it is not yanked out of
+# copy mode, nothing is typed, and the refusal names the exact cause.
+enter_copy_mode
+mkfifo "$SHIM_DIR/client.fifo"
+tmux -C attach-session -t "$SESSION" < "$SHIM_DIR/client.fifo" >/dev/null 2>&1 &
+CLIENT_PID=$!
+exec 9> "$SHIM_DIR/client.fifo"
+for _ in $(seq 1 50); do
+  [ -n "$(tmux list-clients -t "$SESSION" -F x 2>/dev/null)" ] && break
+  sleep 0.1
+done
+[ -n "$(tmux list-clients -t "$SESSION" -F x 2>/dev/null)" ] || fail "the control client did not attach"
+err=$(fm_backend_tmux_send_text_line "$TARGET" "printf 'copymode-%s\\n' active" 2>&1) \
+  && fail "send_text_line typed into a copy-mode pane an attached client just used"
+case "$err" in
+  *"copy mode (pane_in_mode=1)"*"client used it"*) : ;;
+  *) fail "the refusal did not name copy mode and the active client: $err" ;;
+esac
+[ "$(pane_mode)" = 1 ] || fail "an actively used copy-mode pane was pulled out of copy mode"
+verdict=$(fm_backend_tmux_send_text_submit "$TARGET" "printf 'copymode-%s\\n' active" 3 0.2 0.2 2>/dev/null)
+[ "$verdict" = send-failed ] || fail "the submit core should report send-failed for an actively used copy-mode pane, got '$verdict'"
+if fm_backend_tmux_capture "$TARGET" 200 | grep -q "copymode-active"; then
+  fail "text reached a copy-mode pane an attached client was using"
+fi
+exec 9>&-
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+tmux send-keys -t "$TARGET" -X cancel 2>/dev/null || true
+pass "real tmux: an actively used copy-mode pane is left alone and the refusal names the cause"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

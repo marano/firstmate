@@ -45,6 +45,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
@@ -64,6 +66,41 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # family, and verdict decision lives in the shared owner
 # (bin/fm-composer-lib.sh, fm_composer_classify_screen), so a new harness
 # shape is taught there once and never here.
+
+# fm_tmux_pane_input_ready: make <target> take typed input, or say exactly why
+# not. A pane left in tmux copy mode (or any pane mode: view, choose-tree)
+# routes every key to that mode, so a doorbell, an exit command, or a relaunch
+# typed into it is silently swallowed while the agent sits idle at its prompt.
+# Reads #{pane_in_mode}: 0 (or an unreadable pane, left to the caller's own
+# send to fail) returns 0. In a mode, leaves it with `send-keys -X cancel`
+# ONLY when no client attached to the pane's session had input within
+# FM_TMUX_COPY_MODE_IDLE_SECS (default 30), so a person actively scrolling the
+# window is never yanked out of it; then it re-reads the flag and returns 0
+# once the mode is gone. Otherwise it prints the cause on stderr and returns 1
+# without sending anything. Every tmux call is bounded, so a wedged server can
+# not hold the caller past a few seconds.
+fm_tmux_pane_input_ready() {  # <target>
+  local target=$1 idle_s=${FM_TMUX_COPY_MODE_IDLE_SECS:-30} in_mode now act newest=0 age
+  in_mode=$(fm_run_timed 5 tmux display-message -p -t "$target" '#{pane_in_mode}' 2>/dev/null) || return 0
+  [ "$in_mode" = 1 ] || return 0
+  now=$(date +%s)
+  while IFS= read -r act; do
+    case "$act" in ''|*[!0-9]*) continue ;; esac
+    [ "$act" -le "$newest" ] || newest=$act
+  done < <(fm_run_timed 5 tmux list-clients -t "$target" -F '#{client_activity}' 2>/dev/null)
+  age=$((now - newest))
+  if [ "$newest" -gt 0 ] && [ "$age" -lt "$idle_s" ]; then
+    echo "error: pane $target is in tmux copy mode (pane_in_mode=1) and a client used it ${age}s ago (under ${idle_s}s); not leaving copy mode under an active user" >&2
+    return 1
+  fi
+  fm_run_timed 5 tmux send-keys -t "$target" -X cancel >/dev/null 2>&1 || true
+  in_mode=$(fm_run_timed 5 tmux display-message -p -t "$target" '#{pane_in_mode}' 2>/dev/null) || return 0
+  if [ "$in_mode" = 1 ]; then
+    echo "error: pane $target is in tmux copy mode (pane_in_mode=1) and send-keys -X cancel did not leave it; input would be swallowed" >&2
+    return 1
+  fi
+  return 0
+}
 
 # fm_tmux_composer_capture: the visible pane WITH ANSI styling. The styled
 # capture is consumed internally by the classifier and is NEVER surfaced
@@ -349,6 +386,7 @@ fm_tmux_composer_held_text_var() {  # <out-varname> <target> <text>
 # conversion needs the idle baseline read here. Never retypes and never clears.
 fm_tmux_resubmit_own_text() {  # <target> <text> <retries> <enter-sleep>
   local target=$1 text=$2 retries=$3 sleep_s=$4 baseline_idle=''
+  fm_tmux_pane_input_ready "$target" || { printf 'not-own'; return 0; }
   if ! fm_tmux_composer_holds_text "$target" "$text"; then
     printf 'not-own'
     return 0
@@ -359,6 +397,7 @@ fm_tmux_resubmit_own_text() {  # <target> <text> <retries> <enter-sleep>
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  fm_tmux_pane_input_ready "$target" || { printf 'send-failed'; return 0; }
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.

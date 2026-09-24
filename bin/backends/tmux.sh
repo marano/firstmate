@@ -47,6 +47,7 @@ fm_backend_tmux_capture() {  # <target> <lines>
 # `tmux send-keys -t "$T" "$2"`.
 fm_backend_tmux_send_key() {  # <target> <key>
   tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
+  fm_tmux_pane_input_ready "$1" || return 1
   tmux send-keys -t "$1" "$2"
 }
 
@@ -117,6 +118,7 @@ fm_backend_tmux_current_path() {  # <target>
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
+  fm_tmux_pane_input_ready "$1" || return 1
   tmux send-keys -t "$1" "$2" Enter
 }
 
@@ -125,6 +127,7 @@ fm_backend_tmux_send_text_line() {  # <target> <text>
 # send pauses between the literal send and Enter for the harness to settle).
 # Mirrors `tmux send-keys -t "$T" -l "<text>"`.
 fm_backend_tmux_send_literal() {  # <target> <text>
+  fm_tmux_pane_input_ready "$1" || return 1
   tmux send-keys -t "$1" -l "$2"
 }
 
