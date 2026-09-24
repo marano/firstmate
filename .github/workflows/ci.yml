@@ -122,6 +122,10 @@ jobs:
     # this 10-minute cap on 2026-09-17, leaving about 43% headroom on the
     # heaviest lane; the prior two-lane split ran 8.27-8.34 min with almost no
     # margin left to rebalance.
+    # Re-packed on 2026-09-24 from the slowest per-script durations of four
+    # green main runs: measured job walls had reached 439-533 s on lane 2
+    # while the stale hints predicted 5.5 min. The hints now pack all three
+    # lanes at about 405 s; tests/fm-pr-merge.test.sh (398 s) is the floor.
     # Compare it with the derived hints from fm-test-run.sh --check-coverage
     # and completed job timings, allowing for setup and runner-speed spread.
     # A packed hint sum is not a measured job wall time or proof of headroom.

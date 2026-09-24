@@ -687,28 +687,28 @@ EOF
 # refresh procedure are owned by docs/fm-test-portable-shards.md.
 portable_parallel_weight_hints() {
   cat <<'EOF'
-tests/fm-arm-pretool-check.test.sh 32149
-tests/fm-backend-herdr.test.sh 30387
-tests/fm-brief.test.sh 5317
-tests/fm-captain-hold-lifecycle.test.sh 339763
-tests/fm-cd-pretool-check.test.sh 15149
-tests/fm-composer-ghost.test.sh 2002
-tests/fm-composer-lib.test.sh 6401
+tests/fm-arm-pretool-check.test.sh 31176
+tests/fm-backend-herdr.test.sh 28778
+tests/fm-brief.test.sh 6807
+tests/fm-captain-hold-lifecycle.test.sh 357273
+tests/fm-cd-pretool-check.test.sh 16060
+tests/fm-composer-ghost.test.sh 2125
+tests/fm-composer-lib.test.sh 8133
 tests/fm-crew-state.test.sh 31724
 tests/fm-ensure-agents-md.test.sh 937
 tests/fm-grok-harness.test.sh 6587
-tests/fm-herdr-lab.test.sh 17251
-tests/fm-lint.test.sh 168715
+tests/fm-herdr-lab.test.sh 16918
+tests/fm-lint.test.sh 35383
 tests/fm-pi-primary-types.test.sh 3933
-tests/fm-pr-merge.test.sh 182253
+tests/fm-pr-merge.test.sh 397518
 tests/fm-review-diff.test.sh 3191
 tests/fm-send-popup-settle.test.sh 6372
 tests/fm-send-settle.test.sh 2446
-tests/fm-send-strict.test.sh 4831
-tests/fm-spawn-batch.test.sh 2574
+tests/fm-send-strict.test.sh 5350
+tests/fm-spawn-batch.test.sh 2635
 tests/fm-supervision-instructions.test.sh 355
-tests/fm-test-run.test.sh 100217
-tests/fm-tmux-submit-busy.test.sh 2732
+tests/fm-test-run.test.sh 214591
+tests/fm-tmux-submit-busy.test.sh 4495
 tests/fm-transition-lib.test.sh 97
 tests/fm-x-mode.test.sh 31783
 EOF
@@ -750,16 +750,17 @@ portable_parallel_lane_weight() {
 # workflow step moved with it.
 list_portable_parallel_1() {
   cat <<'EOF'
-tests/fm-lint.test.sh
 tests/fm-test-run.test.sh
+tests/fm-lint.test.sh
+tests/fm-x-mode.test.sh
+tests/fm-crew-state.test.sh
+tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
-tests/fm-grok-harness.test.sh
-tests/fm-composer-lib.test.sh
-tests/fm-brief.test.sh
-tests/fm-pi-primary-types.test.sh
+tests/fm-cd-pretool-check.test.sh
+tests/fm-send-popup-settle.test.sh
 tests/fm-tmux-submit-busy.test.sh
-tests/fm-spawn-batch.test.sh
-tests/fm-composer-ghost.test.sh
+tests/fm-pi-primary-types.test.sh
+tests/fm-supervision-instructions.test.sh
 EOF
 }
 
@@ -767,18 +768,9 @@ EOF
 list_portable_parallel_2() {
   cat <<'EOF'
 tests/fm-pr-merge.test.sh
-tests/fm-arm-pretool-check.test.sh
-tests/fm-x-mode.test.sh
-tests/fm-crew-state.test.sh
-tests/fm-herdr-lab.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-send-popup-settle.test.sh
-tests/fm-send-strict.test.sh
 tests/fm-review-diff.test.sh
-tests/fm-send-settle.test.sh
-tests/fm-ensure-agents-md.test.sh
-tests/fm-supervision-instructions.test.sh
-tests/fm-transition-lib.test.sh
+tests/fm-spawn-batch.test.sh
+tests/fm-composer-ghost.test.sh
 EOF
 }
 
@@ -787,6 +779,14 @@ EOF
 list_portable_parallel_3() {
   cat <<'EOF'
 tests/fm-captain-hold-lifecycle.test.sh
+tests/fm-herdr-lab.test.sh
+tests/fm-composer-lib.test.sh
+tests/fm-brief.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-send-strict.test.sh
+tests/fm-send-settle.test.sh
+tests/fm-ensure-agents-md.test.sh
+tests/fm-transition-lib.test.sh
 EOF
 }
 
