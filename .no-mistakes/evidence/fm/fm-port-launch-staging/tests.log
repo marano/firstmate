@@ -1,0 +1,21 @@
+== fm-spawn-launch-confirm
+ok - a spawn whose launch never started fails and closes its pane
+ok - a spawn stages its launch command 0600 in a 0700 task temp root
+ok - a spawn refuses a temp root others can write and tightens one it owns
+ok - a relaunch stages a new launch file and leaves the earlier one untouched
+ok - a spawn clears a cut launch's continuation prompt and starts the agent
+ok - a relaunch clears a continuation prompt before typing its launch
+ok - a launch typed while the pane shell runs a slow prompt hook starts the agent
+ok - the longest launch types no line over 86 bytes while the command itself is 4772
+== fm-spawn-compact-adviser-disable
+ok - ship launch with no allowlist starts its agent with the compact-adviser switch on
+ok - ship launch under an enabled allowlist keeps the compact-adviser switch through the cleared environment
+ok - the launch command sets the switch on its own, whichever allowlist posture is in force
+ok - the cleared-environment boundary sets the compact-adviser switch on its own
+ok - a secondmate launch carries the compact-adviser switch in both allowlist postures
+ok - relaunch rebuilds the compact-adviser switch for the replacement agent in both allowlist postures
+ok - a compound raw launch-command still starts its agent with the compact-adviser switch on
+== fm-spawn-compact-adviser-disable-remote
+ok - a remote-routed second mate starts with the compact adviser disabled, from the pane export and from the launch command alike
+ok - the remote route keeps the compact-adviser switch through the cleared allowlisted environment
+ALL TESTS PASSED
