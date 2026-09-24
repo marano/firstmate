@@ -1616,6 +1616,137 @@ test_current_pid_probe_keeps_pending_traps() {
   pass "the pid probe every lock operation runs keeps each pending trap"
 }
 
+# Install a PATH shim for <command> in <fakebin> that signals its own process
+# group once - only while <lock> is a symlink and the call names the lock or one
+# of its owner directories - so the signal lands on a child that lock creation
+# runs right after publishing the lock. A read is killed before it produces
+# anything; ln is killed after it made the link, the one case where the child
+# has already done its work. The owner directory is matched by name because the
+# library records it through a resolved (pwd -P) path. <armed> is consumed to
+# <armed>.fired when the signal is sent.
+install_lock_fault_shim() {  # <fakebin> <command> <lock> <armed>
+  local fakebin=$1 command=$2 lock=$3 armed=$4 real
+  real=$(command -v "$command") || fail "no $command to shim"
+  cat > "$fakebin/$command" <<SH
+#!/bin/sh
+fault() {
+  for arg in "\$@"; do
+    case "\$arg" in "$lock"|*/"${lock##*/}".owner.*) ;; *) continue ;; esac
+    if [ -L "$lock" ] && mv "$armed" "$armed.fired" 2>/dev/null; then
+      kill -TERM 0
+      exit 143
+    fi
+  done
+}
+[ "$command" = ln ] || fault "\$@"
+"$real" "\$@"
+rc=\$?
+fault "\$@"
+exit "\$rc"
+SH
+  chmod +x "$fakebin/$command"
+  : > "$armed"
+}
+
+# A group signal - a checkpoint deadline - that lands on a child lock creation
+# runs right after it publishes the lock: the readlink that reads the fresh link
+# back, the cat that reads the claimed pid back, or the ln that made the link,
+# killed after it already had. Each child's failure read as "not my lock", so
+# the creator gave up a lock that was its own, and a killed readlink or ln also
+# discarded the owner directory its own link still pointed at, leaving the lock
+# dangling. The creator here defers the signal the way the watcher does.
+# Mutant: decide the fresh lock's ownership from ln's exit status again.
+# Mutant: read the fresh lock's link back with readlink again.
+# Mutant: read the claimed pid back with cat again.
+test_lock_create_keeps_own_lock_through_group_signal() {
+  local command dir state fakebin lock armed out
+  for command in readlink cat ln; do
+    dir=$(make_case "lock-create-signal-lib-$command")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    lock="$state/.fault.lock"
+    armed="$dir/fault.armed"
+    install_lock_fault_shim "$fakebin" "$command" "$lock" "$armed"
+    out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+      perl -e 'setpgrp(0, 0); exec @ARGV or die "exec failed: $!\n"' bash -c '
+        # A handler, not an ignore: an ignored signal stays ignored in the
+        # children, so the one the shim sends would kill nothing.
+        trap "pending=1" TERM
+        . "$1"
+        if fm_lock_try_create "$2"; then
+          if [ -L "$2" ] && [ "$2" -ef "$FM_LOCK_OWNER_DIR" ]; then echo won; else echo won-unlinked; fi
+        else
+          echo lost
+        fi
+      ' _ "$LIB" "$lock" 2>/dev/null)
+    # Lock creation reads nothing back through a child any more, so only ln is
+    # certain to meet the signal; a read that does meet it must not cost the lock.
+    [ -e "$armed.fired" ] || [ "$command" != ln ] \
+      || fail "ln fault: the group signal never landed after the lock was linked ($out)"
+    [ "$out" = won ] \
+      || fail "$command fault: lock creation gave up its own fresh lock ($out; lock $([ -L "$lock" ] && echo "left linked to $(readlink "$lock")" || echo absent))"
+  done
+  pass "a group signal killing a child of lock creation never costs the creator its own fresh lock"
+}
+
+# The same fault through the watcher, the process the checkpoint deadline
+# actually signals: a watcher that lost its own fresh lock this way printed
+# "already running", exited 0, and left the lock dangling for the next watcher.
+# Mutant: decide the fresh lock's ownership from ln's exit status again.
+# Mutant: read the fresh lock's link back with readlink again.
+watcher_lock_fault_outcome() {  # <case-name> <command>
+  local name=$1 command=$2 dir state fakebin out lock armed watcher holder i rc
+  dir=$(make_case "$name")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  lock="$state/.watch.lock"
+  armed="$dir/fault.armed"
+  install_lock_fault_shim "$fakebin" "$command" "$lock" "$armed"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    perl -e 'setpgrp(0, 0); exec @ARGV or die "exec failed: $!\n"' "$WATCH" > "$out" 2>&1 &
+  watcher=$!
+  i=0
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$watcher" && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  rm -f "$armed"
+  if is_live_non_zombie "$watcher"; then
+    # No such child ran while the lock was being created, so the signal had
+    # nothing to kill there: the watcher must simply be holding its own lock.
+    holder=$(cat "$lock/pid" 2>/dev/null || true)
+    kill -TERM -- "-$watcher" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 100 ] && is_live_non_zombie "$watcher"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -KILL -- "-$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    [ ! -e "$armed.fired" ] || fail "$command fault: the watcher kept supervising after the signal: $(cat "$out")"
+    [ "$holder" = "$watcher" ] \
+      || fail "$command fault: an uninjected watcher was not holding its own lock (holder '$holder', watcher $watcher): $(cat "$out")"
+    return 0
+  fi
+  rc=0
+  wait "$watcher" || rc=$?
+  [ -e "$armed.fired" ] || fail "$command fault: the watcher exited before the fault was injected (rc=$rc): $(cat "$out")"
+  if grep -F 'already running' "$out" >/dev/null; then
+    fail "$command fault: the watcher read its own fresh lock as another watcher's (rc=$rc, lock $([ -L "$lock" ] && echo "left linked to $(readlink "$lock")" || echo absent)): $(cat "$out")"
+  fi
+  [ "$rc" -ne 0 ] || fail "$command fault: the watcher exited 0 after a signal during its lock creation: $(cat "$out")"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "$command fault: the watcher left its singleton lock behind: $(cat "$out")"
+  [ ! -e "$state/.last-watcher-beat" ] || fail "$command fault: the watcher entered supervision after the signal"
+}
+
+test_signal_during_lock_creation_keeps_own_lock() {
+  watcher_lock_fault_outcome lock-create-signal-readlink readlink
+  watcher_lock_fault_outcome lock-create-signal-ln ln
+  pass "a group signal killing the lock-creation read or link never costs the watcher its own fresh lock"
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -1645,6 +1776,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_signal_during_startup_releases_watch_lock
 test_current_pid_probe_keeps_pending_traps
+test_signal_during_lock_creation_keeps_own_lock
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
@@ -1657,6 +1789,7 @@ test_lock_collects_owner_dirs_stranded_by_a_dead_acquirer
 test_lock_reap_spares_the_owner_a_held_lock_links
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_create_keeps_own_lock_through_group_signal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watch_restart_waits_out_a_default_poll_sleep
