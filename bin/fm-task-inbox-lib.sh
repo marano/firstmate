@@ -455,6 +455,18 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Every backend but tmux answers `not-own` today (bin/fm-backend.sh), so they
 # keep the previous behaviour unchanged rather than acting on an unprovable
 # screen.
+# fm_task_inbox_surface_cause: run a backend send with its stderr held back,
+# then let through only the copy-mode cause (fm_tmux_pane_input_ready), so a
+# swallowed doorbell names its reason while other backend noise stays quiet.
+fm_task_inbox_surface_cause() {
+  local errf rc=0
+  errf=$(mktemp "${TMPDIR:-/tmp}/fm-ring-err.XXXXXX") || { "$@" 2>/dev/null; return; }
+  "$@" 2>"$errf" || rc=$?
+  grep 'tmux copy mode' "$errf" >&2 || true
+  rm -f "$errf"
+  return "$rc"
+}
+
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pane-state]
   local backend=$1 target=$2 rec=$3 label=${4:-} pane_state=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -470,7 +482,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pan
       # cleared, and only on the caller's positive idle assertion. Every other
       # pane state - busy, unknown, unasserted - defers exactly as before.
       [ "$pane_state" = idle ] || return 1
-      case "$(fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 2>/dev/null || printf 'not-own')" in
+      case "$(fm_task_inbox_surface_cause fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 || printf 'not-own')" in
         empty) return 0 ;;
         not-own) return 1 ;;
         pending) return 5 ;;
@@ -483,7 +495,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pan
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_task_inbox_surface_cause fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label"); then
     return 2
   fi
   # The verdict is never delivery proof. Beyond a failed keystroke, only an

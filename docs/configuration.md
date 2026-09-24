@@ -1207,6 +1207,8 @@ GROK_HOME=              # optional Grok config home for firstmate's global grok 
 FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing the line once; agy typed targets use a longer per-harness default owned by bin/fm-send.sh
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
+FM_SEND_RING_BUDGET=30  # seconds fm-send lets the steering-inbox doorbell ring run before abandoning it as not delivered; the watcher re-rings from the durable record
+FM_TMUX_COPY_MODE_IDLE_SECS=30   # seconds without client input before a tmux send primitive leaves a pane's copy mode (send-keys -X cancel); a more recently used pane is refused with the cause on stderr
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
