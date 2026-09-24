@@ -126,18 +126,27 @@ fm_procevent_owner_lease_path() {  # <state-root>
 
 # Record owner-presence activity in this home's process-event state. Best
 # effort by design: a home with no registry directory yet owns no runner.
+# The write happens from inside the registry directory, entered and then proved
+# to be the physical registry, never through its path: a registry swapped for a
+# symlink between the check and the write would otherwise receive the lease.
 fm_procevent_owner_lease_touch() {  # <state-root>
-  local reg lease tmp now
+  local reg registry lease now
   reg=$(fm_procevent_registry_dir "$1")
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  registry=$(CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  registry=$(fm_procevent_registry_dir "$registry")
   lease=$(fm_procevent_owner_lease_path "$1")
   now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
     'printf "%.6f\n", clock_gettime(CLOCK_MONOTONIC)') || return 1
-  tmp=$(umask 077; mktemp "$reg/.owner-lease.XXXXXX") || return 1
-  if ! printf '%s\n' "$now" > "$tmp" || ! mv -f -- "$tmp" "$lease"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
+  (
+    CDPATH='' cd -P -- "$reg" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$registry" ] || exit 1
+    tmp=$(umask 077; mktemp ./.owner-lease.XXXXXX) || exit 1
+    if ! printf '%s\n' "$now" > "$tmp" || ! mv -f -- "$tmp" "./${lease##*/}"; then
+      rm -f -- "$tmp"
+      exit 1
+    fi
+  )
 }
 
 # Seconds since the last refresh. Fails when the lease is absent or unreadable,
