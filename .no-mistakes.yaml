@@ -44,8 +44,8 @@ test:
     For a change to the watcher (bin/fm-watch.sh, bin/fm-classify-lib.sh and the
     scripts they call), run only the tests/fm-watch-triage-*.test.sh files whose
     area the diff touches, each as its own run, and never the whole set of them.
-    The areas are named in each file's header: absorb (classifier, absorb, runs), stale,
-    declared, busy, heartbeat (procevent, heartbeat, away mode).
+    The four areas are named in each file's header: absorb (classifier, absorb, runs),
+    stale, declared, busy (which also holds procevent, heartbeat and away mode).
     Prefer the single most relevant file, and run a second only when the diff
     clearly reaches its area.
   # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
