@@ -56,10 +56,12 @@ jobs:
     # Hang tripwire only: lint executions measured at 14-16 minutes in the
     # September 12 starvation report, so this leaves deliberate margin.
     timeout-minutes: 25
-    # One lint shard per runner. A full-set ShellCheck process holds several GB,
-    # and running both shards on one hosted runner exhausted its memory: the
-    # runner shut down and killed the job with exit 143 part-way through lint,
-    # three times in a day (e.g. run 35950711794). bin/fm-lint.sh owns the
+    # One lint shard per runner. Three Lint jobs in a day (e.g. run
+    # 35950711794) ended mid-ShellCheck with "The runner has received a
+    # shutdown signal" and exit 143, so the runner sent that TERM. Why it shut
+    # down is not proven; the leading hypothesis is memory, because a full-set
+    # ShellCheck process holds several GB and both shards used to run on one
+    # 16 GB runner (docs/verification/lint-option-a.md). bin/fm-lint.sh owns the
     # shard split and refuses a matrix whose job-total disagrees with it.
     strategy:
       # Every shard reports so one failure never hides another shard's result.

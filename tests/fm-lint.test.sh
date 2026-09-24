@@ -1471,6 +1471,10 @@ SH
       fi
       [ "$parent_rc" -eq 143 ] \
         || fail "jobs=$jobs telemetry=$telemetry signal exit was $parent_rc, expected 143"
+      # A stopped lint names the signal and the memory at that moment, so a
+      # CI job killed part-way through leaves its cause in the log.
+      grep -Eq '^fm-lint\.sh: stopped by SIGTERM part-way through lint; .*; [0-9]+ ShellCheck processes hold [0-9]+ MiB$' "$out_file" \
+        || fail "jobs=$jobs telemetry=$telemetry did not report the signal and memory:"$'\n'"$(cat "$out_file")"
       [ "$survivor" -eq 0 ] \
         || fail "jobs=$jobs telemetry=$telemetry left ShellCheck running"
       [ -z "$(find "$lint_tmp" -mindepth 1 -maxdepth 1 -name 'fm-lint.*' -print -quit)" ] \

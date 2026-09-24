@@ -60,9 +60,11 @@
 # runs the same shards serially with byte-identical diagnostics and exit selection.
 # --shard <k>/2 runs only shard k's ShellCheck, so CI can give each shard its
 # own runner: one ShellCheck process of the full set holds several GB, and
-# two at once on one hosted runner exhausted its memory, which shut the runner
-# down and killed the job with SIGTERM part-way through lint. The
-# backend-purity, mutation-marker, and workflow checks still run in full.
+# memory pressure from two at once on one hosted runner is the leading, not yet
+# proven, explanation for runner shutdowns that killed CI lint with SIGTERM
+# part-way through. The backend-purity, mutation-marker, and workflow checks
+# still run in full. A signal that stops the lint prints which one it was and
+# the host's memory at that moment, so the next such kill records its cause.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -764,10 +766,41 @@ fm_lint_cleanup() {
   done
   rm -rf "$TMP_ROOT"
 }
+# fm_lint_memory_report prints the host's free memory and what this host's
+# ShellCheck processes hold, or says a source is unavailable on this platform.
+# shellcheck disable=SC2329 # Called by fm_lint_signal_report from the signal traps.
+fm_lint_memory_report() {
+  local host shellcheck
+  if [ -r /proc/meminfo ]; then
+    host=$(awk '
+      /^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {v[$1] = int($2 / 1024)}
+      END {
+        printf "host memory available %s of %s MiB, swap free %s of %s MiB",
+          v["MemAvailable:"], v["MemTotal:"], v["SwapFree:"], v["SwapTotal:"]
+      }
+    ' /proc/meminfo 2>/dev/null) || host=
+  fi
+  [ -n "${host:-}" ] || host='host memory unavailable'
+  shellcheck=$(ps -A -o rss= -o comm= 2>/dev/null | awk '
+    $2 ~ /(^|\/)shellcheck$/ {count++; rss += $1}
+    END {printf "%d ShellCheck processes hold %d MiB", count, rss / 1024}
+  ') || shellcheck=
+  [ -n "$shellcheck" ] || shellcheck='ShellCheck memory unavailable'
+  printf '%s; %s' "$host" "$shellcheck"
+}
+
+# A signal that stops the lint names itself and the memory at that moment, so a
+# job killed part-way through records why instead of ending silently. It runs
+# before the EXIT cleanup, while the workers still hold their memory.
+# shellcheck disable=SC2329 # Registered by the signal traps below.
+fm_lint_signal_report() {  # <signal-name>
+  printf 'fm-lint.sh: stopped by SIG%s part-way through lint; %s\n' \
+    "$1" "$(fm_lint_memory_report)" >&2
+}
 trap fm_lint_cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'fm_lint_signal_report HUP; exit 129' HUP
+trap 'fm_lint_signal_report INT; exit 130' INT
+trap 'fm_lint_signal_report TERM; exit 143' TERM
 
 TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"

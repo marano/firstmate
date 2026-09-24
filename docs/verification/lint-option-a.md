@@ -196,3 +196,8 @@ A per-root variant of the full lint on two workers measured a 7,647 MB concurren
 The garbage collector is not tunable from outside: `GHCRTS=-s` reports `bin/fm-teardown.sh` at 3,663,006,728 bytes maximum residency and 8,967 MiB total memory in use, but the pinned binary refuses `-c` and `-M` with `Most RTS options are disabled`.
 So CI gives each of the two shards its own job through `bin/fm-lint.sh --shard <k>/2`, and one runner holds one ShellCheck process of about 6 GiB at a time.
 Darwin RSS is not Linux RSS, so treat these as the scale of the cost rather than the runner's exact figure.
+
+That memory pressure caused the CI kills is the leading hypothesis, not a proven cause.
+The killed jobs' logs prove only the sender: each ends with `The runner has received a shutdown signal.` just before `Process completed with exit code 143`, and in the last 100 CI runs no job other than Lint carried that line.
+No log shows an out-of-memory message, so a runner shutdown for another reason, such as preemption, is not excluded.
+`bin/fm-lint.sh` now prints the stopping signal and the host's available memory and swap when a signal stops it, so the next such kill records whether memory was exhausted.
