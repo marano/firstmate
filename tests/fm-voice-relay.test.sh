@@ -3743,8 +3743,8 @@ pass "a home with no records answers nothing rather than failing"
 #   the round trip completes at all, in both of its shapes, a status answer and a
 #   handover, and a second turn is not treated as an interruption of the first;
 #   the headline figure is measured from the captain's talk end rather than from
-#   the start of their speech, which on this clip is the difference between half
-#   a second and two and a half;
+#   the start of their speech, which on the speech clock below is the difference
+#   between half a second and two thousand, on a runner of any speed;
 #   the talk-end silence padding really is sent, which is trap 2 and the
 #   difference between an answer and no answer;
 #   the laptop needs no AWS credential: the client runs with an environment that
@@ -3798,6 +3798,8 @@ with and what it was asked. tests/fm-voice-relay.test.sh reads that record.
   FM_FAKE_LOG      where to append the per-session record
   FM_FAKE_REQUEST  the words the captain uses when asking for real work
   FM_FAKE_EARLY    1 to answer from the first audio in, not from the talk end
+  FM_FAKE_SPEECH_WARP  clock seconds each second of the captain's speech moves
+                   the relay's own clock on by, on top of the real second
 
 A clean-end turn is a session the model finishes with while the captain is still
 speaking: the output stream simply ends, with no error and no answer. That is an
@@ -3809,6 +3811,16 @@ a clip that already ends in silence: the answer begins before this end of the
 stream has said the turn is over. Nova Sonic really does that, and the relay's
 own timing figures are negative when it happens, which is the one case where a
 fast-looking number is meaningless.
+
+FM_FAKE_SPEECH_WARP stands in for the relay's clock, not the model: every chunk
+of the captain's speech that reaches the model moves the relay's own monotonic
+clock on by that many seconds per second of audio. Silence, which is all the
+relay's talk-end padding is, moves it nothing. The relay stamps its talk end
+after the last chunk of speech and before its padding, so a figure measured from
+there is the real wait, while one started anywhere inside the captain's speech
+carries the stretch. Only the relay module's own readings move, through the time
+name it looks up at every reading; the event loop and every other module keep the
+real clock. Each session records the stretch it applied as speech_warp_s.
 """
 
 import asyncio
@@ -3831,6 +3843,34 @@ STATE = os.environ.get("FM_FAKE_STATE", "")
 LOG = os.environ.get("FM_FAKE_LOG", "")
 REQUEST = os.environ.get("FM_FAKE_REQUEST", "open a pull request for the retry")
 EARLY = os.environ.get("FM_FAKE_EARLY", "") == "1"
+SPEECH_WARP = float(os.environ.get("FM_FAKE_SPEECH_WARP", "") or 0)
+IN_BYTES_PER_SECOND = 16000 * 2
+
+
+class _SpeechClock:
+    """The time module, with a monotonic clock that the captain's speech moves on."""
+
+    def __init__(self, real):
+        self._real = real
+        self.ahead = 0.0
+
+    def monotonic(self):
+        return self._real.monotonic() + self.ahead
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _relay_clock():
+    """Put the relay on the speech clock, once, and return that clock."""
+    relay = sys.modules.get("__main__")
+    clock = getattr(relay, "time", None)
+    if not isinstance(clock, _SpeechClock):
+        if getattr(clock, "monotonic", None) is None:
+            raise RuntimeError("FM_FAKE_SPEECH_WARP found no relay clock to move")
+        clock = _SpeechClock(clock)
+        relay.time = clock
+    return clock
 
 HEARD = {"status": "how is the fleet doing right now", "handover": REQUEST}
 
@@ -3951,6 +3991,7 @@ class _Stream:
             "heard": "",
             "said": [],
             "reply_audio_bytes": 0,
+            "speech_warp_s": 0.0,
         }
 
     async def await_output(self):
@@ -3972,8 +4013,12 @@ class _Stream:
                 self._pending_use = body.get(
                     "toolResultInputConfiguration", {}).get("toolUseId")
             elif name == "audioInput":
-                self.record["audio_bytes_in"] += len(
-                    base64.b64decode(body.get("content", "")))
+                pcm = base64.b64decode(body.get("content", ""))
+                self.record["audio_bytes_in"] += len(pcm)
+                if SPEECH_WARP and pcm.strip(b"\x00"):
+                    moved = SPEECH_WARP * len(pcm) / IN_BYTES_PER_SECOND
+                    _relay_clock().ahead += moved
+                    self.record["speech_warp_s"] += moved
                 self._maybe_end_cleanly()
                 if EARLY and not self._replied and not self._ended_early:
                     # Answering while the captain's clip is still arriving, which
@@ -4162,6 +4207,76 @@ exec env -i "${desktop_env[@]}" "$@"
 SH
 chmod +x "$E2E/bin/ssh"
 
+# The clock every headline figure is read on. A figure is the difference of two
+# readings of one end's monotonic clock, and on real time the only thing between
+# a clock started at the talk end and one started at the talk start is the two
+# seconds of the captain's speech - less than a loaded shared runner adds to one
+# reply on its own (4.8 s on a CI runner whose shard took 916 s). No window on
+# real time tells those apart on every runner. So each end runs on a clock that
+# the captain's speech stretches: every second they spend talking moves it on a
+# further SPEECH_WARP seconds, and nothing from the talk end on is stretched. A
+# figure measured from the talk end is then the real wait, which the client's own
+# reply timeout keeps far below SPEECH_CHUNK_ON_CLOCK on any runner, while one
+# started even one 100 ms chunk before the talk end reads at least that much.
+SPEECH_WARP=1000
+SPEECH_CHUNK_ON_CLOCK=100
+
+# The laptop end's stretch. The client stays exactly the file the guide says to
+# copy; this runs it as a module with its own time name pointed at that clock.
+cat > "$E2E/speech-clock.py" <<'PY'
+"""Run the laptop client on a clock that the captain's speech stretches.
+
+  speech-clock.py <warp> <stretch-record> <fm-voice-client.py> [client args...]
+
+The client's time name is swapped for a clock equal to the real one, except
+that every sleep taken off the main thread also moves it on <warp> times as far.
+The in-file capture paces the captain's clip in exactly such sleeps, off the
+main thread, and nothing else the client runs does: the turn's own thread waits
+on events between the talk end and the first audio. So the speech is stretched
+and the wait for the reply is not. Only the client's own readings move; the
+threading and queue timeouts underneath it keep the real clock.
+
+The total stretch applied is written to <stretch-record>, so a run it never
+landed on reads as one rather than as a clock that happened to agree.
+"""
+
+import importlib.util
+import sys
+import threading
+import time
+
+
+class SpeechClock:
+    def __init__(self, warp):
+        self.warp = warp
+        self.ahead = 0.0
+
+    def monotonic(self):
+        return time.monotonic() + self.ahead
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
+        if threading.current_thread() is not threading.main_thread():
+            self.ahead += self.warp * seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+warp, record, path = float(sys.argv[1]), sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("fm_voice_client", path)
+client = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(client)
+clock = SpeechClock(warp)
+client.time = clock
+try:
+    code = client.main(sys.argv[4:])
+finally:
+    with open(record, "w", encoding="utf-8") as handle:
+        handle.write("{!r}\n".format(clock.ahead))
+sys.exit(code)
+PY
+
 # Two seconds of speech-shaped audio ending on speech, not silence: the relay's
 # own 400 ms of padding is what makes a push-to-talk release answerable, and a
 # clip this long makes a clock started at the wrong end unmistakable.
@@ -4185,7 +4300,8 @@ laptop_aws=$(env -i PATH="$E2E/bin:$PATH" HOME="$E2E/laptop-home" env \
 
 set +e
 env -i PATH="$E2E/bin:$PATH" HOME="$E2E/laptop-home" PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$E2E/laptop/fm-voice-client.py" \
+  python3 "$E2E/speech-clock.py" "$SPEECH_WARP" "$E2E/speech-warp" \
+    "$E2E/laptop/fm-voice-client.py" \
     --host desktop.example \
     --relay "$ROOT/bin/fm-voice-relay.py" \
     --relay-python python3 \
@@ -4205,10 +4321,12 @@ independent=$(python3 "$ROOT/bin/fm_voice_records.py" status \
 printf '%s' "$independent" > "$E2E/independent.json"
 
 python3 - "$E2E" "$E2E_KEY" "$E2E_REGION" "$E2E_MODEL" "$E2E_REQUEST" \
-  "$NEVER_TOKEN" <<'PY' || fail "the spoken round trip did not hold"
+  "$NEVER_TOKEN" "$SPEECH_WARP" "$SPEECH_CHUNK_ON_CLOCK" <<'PY' \
+  || fail "the spoken round trip did not hold"
 import json, os, sys
 
 root, key, region, model, request, never = sys.argv[1:7]
+warp, chunk_on_clock = float(sys.argv[7]), float(sys.argv[8])
 
 
 def check(cond, label):
@@ -4309,14 +4427,21 @@ check(request in open(note, encoding="utf-8").read(),
       "the note does not carry the captain's words")
 
 # THE NUMBER THIS BUILD EXISTS TO PRODUCE, and the instant it is measured from.
-# The clip is two seconds long and the stand-in waits 0.4 s before speaking, so a
-# figure measured from the captain's talk end lands near half a second and one
-# measured from the start of their speech lands near two and a half. The bound is
-# loose enough for a loaded machine and nowhere near the wrong clock.
+# The laptop ran on the speech clock, so the captain's two seconds read as two
+# thousand and the wait after them reads as itself. A figure measured from the
+# talk end is the real wait: no earlier than the stand-in's 0.4 s of thought, and
+# never near a hundred seconds, since the client gives up on a reply long before.
+# One measured from the start of their speech, or from any 100 ms chunk of it,
+# reads at least a hundred however fast the runner is.
+stretched = float(open(os.path.join(root, "speech-warp")).read())
+check(abs(stretched - len(runs) * 2 * warp) < 1e-3,
+      "the laptop's clock was stretched by %r s, not the %r s of %d turns of "
+      "speech, so no figure below is known to be measured from the talk end"
+      % (stretched, len(runs) * 2 * warp, len(runs)))
 for run in runs:
     first = run["first_audio_s"]
     check(first is not None, "turn %s reported no first audio" % run["run"])
-    check(0.2 < first < 1.6,
+    check(0.2 < first < chunk_on_clock,
           "turn %s reported first audio at %.3fs, which is not measured from the "
           "captain's talk end" % (run["run"], first))
     marks = run["relay_marks_since_talk_end"]
@@ -4401,7 +4526,8 @@ printf '0\n' > "$SURVIVE/turn-counter"
 # was lost, because the model stopped listening part way through it.
 set +e
 env -i PATH="$SURVIVE/bin:$PATH" HOME="$E2E/laptop-home" PYTHONDONTWRITEBYTECODE=1 \
-  python3 "$E2E/laptop/fm-voice-client.py" \
+  python3 "$E2E/speech-clock.py" "$SPEECH_WARP" "$SURVIVE/speech-warp" \
+    "$E2E/laptop/fm-voice-client.py" \
     --host desktop.example \
     --relay "$ROOT/bin/fm-voice-relay.py" \
     --relay-python python3 \
@@ -4414,11 +4540,13 @@ set -e
   fail "a lost turn and a good one should exit 1, not $survive_code"
 }
 
-python3 - "$SURVIVE" "$E2E/independent.json" <<'PY' \
+python3 - "$SURVIVE" "$E2E/independent.json" "$SPEECH_WARP" \
+  "$SPEECH_CHUNK_ON_CLOCK" <<'PY' \
   || fail "a model session ending did not leave the relay serving"
 import json, os, sys
 
 root, records_path = sys.argv[1:3]
+warp, chunk_on_clock = float(sys.argv[3]), float(sys.argv[4])
 
 CLIP_BYTES = 16000 * 2 * 2
 
@@ -4497,7 +4625,14 @@ said = " ".join(sessions[1]["said"])
 check("{} in flight".format(records["in_flight"]) in said,
       "the answer did not carry the count: %r" % said)
 check(said in transcript, "the captain never heard the answer: %r" % transcript)
-check(good["first_audio_s"] is not None and 0.2 < good["first_audio_s"] < 1.6,
+# Measured on the speech clock, as in the round trip above: both key presses
+# ran the whole clip, so the stretch is two turns of speech.
+stretched = float(open(os.path.join(root, "speech-warp")).read())
+check(abs(stretched - 2 * 2 * warp) < 1e-3,
+      "the laptop's clock was stretched by %r s, not by two turns of speech"
+      % stretched)
+check(good["first_audio_s"] is not None
+      and 0.2 < good["first_audio_s"] < chunk_on_clock,
       "the recovered turn reported first audio at %r, which is not measured from "
       "the captain's talk end" % good["first_audio_s"])
 check(os.path.getsize(os.path.join(root, "reply.pcm"))
@@ -4652,6 +4787,7 @@ relay_self_test() {
     PYTHONDONTWRITEBYTECODE=1 FM_HOME="$E2E/home" \
     FM_FAKE_STATE="$SELFTEST/turn-counter" FM_FAKE_LOG="$SELFTEST/sessions.jsonl" \
     FM_FAKE_THINK=0.4 FM_FAKE_REPLY_SECONDS=0.4 FM_FAKE_SCRIPT=status \
+    FM_FAKE_SPEECH_WARP="$SPEECH_WARP" \
     AWS_ACCESS_KEY_ID="$E2E_KEY" \
     AWS_SECRET_ACCESS_KEY=desktop-secret-not-a-real-key \
     "$@" python3 "$ROOT/bin/fm-voice-relay.py" --self-test "$clip"
@@ -4665,12 +4801,16 @@ expect_code 0 "$ok_code" "the documented desktop check should answer"
 printf '%s\n' "$ok_out" > "$SELFTEST/ok.json"
 
 python3 - "$SELFTEST/ok.json" "$E2E/independent.json" "$E2E_REGION" "$E2E_MODEL" \
+  "$SELFTEST/sessions.jsonl" "$SPEECH_WARP" "$SPEECH_CHUNK_ON_CLOCK" \
   <<'PY' || fail "the desktop check did not report a usable measurement"
 import json, sys
 
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 records = json.load(open(sys.argv[2], encoding="utf-8"))
 region, model = sys.argv[3:5]
+with open(sys.argv[5], encoding="utf-8") as handle:
+    session = json.loads(handle.readline())
+warp, chunk_on_clock = float(sys.argv[6]), float(sys.argv[7])
 
 
 def check(cond, label):
@@ -4689,12 +4829,20 @@ check("{} in flight".format(records["in_flight"]) in report["said"],
       "the spoken answer did not carry the count")
 check(report["heard"], "it reported nothing heard")
 # The figure the direct column of the latency table is made of, measured from the
-# talk end: the clip is two seconds and the stand-in thinks for 0.4 s, so a clock
-# started at the wrong end lands near 2.4.
+# talk end. The relay ran on the speech clock, moved on by the model stand-in as
+# each chunk of the captain's speech reached it, so its two seconds read as two
+# thousand and the wait after them as itself: a clock started at the talk end
+# reads the stand-in's 0.4 s of thought and whatever the runner adds, inside the
+# self-test's own forty second wait for a reply, and one started at the wrong end,
+# or anywhere inside the speech, reads at least a hundred however fast the runner
+# is.
+check(abs(session["speech_warp_s"] - 2 * warp) < 1e-3,
+      "the relay's clock was stretched by %r s, not by the clip's two seconds of "
+      "speech" % session["speech_warp_s"])
 check(report["clock_unusable"] == [], "it flagged a clip that ends on speech")
 for mark in ("tool_use_s", "first_audio_s", "reply_end_s"):
     check(report[mark] is not None, "no %s figure" % mark)
-check(0.2 < report["first_audio_s"] < 1.6,
+check(0.2 < report["first_audio_s"] < chunk_on_clock,
       "first audio at %r is not measured from the talk end" % report["first_audio_s"])
 check(report["tool_use_s"] <= report["first_audio_s"] <= report["reply_end_s"],
       "the figures are out of order")
