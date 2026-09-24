@@ -53,7 +53,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-aggregate` artifacts of three green `main` runs, refreshed on 2026-09-21 with `--refresh-serial-hints`; the refresh refuses unless the inputs cover every hinted script, so no serial member is left unmeasured.
+The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-aggregate` artifacts of several green `main` runs, refreshed on 2026-09-24 with `--refresh-serial-hints`; the refresh refuses unless the inputs cover every hinted script, so no serial member is left unmeasured.
 Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
@@ -68,14 +68,13 @@ A stale hint that pushes a shard toward its job cap now reds the seconds-long co
 Refresh the hints under "When hints are refreshed" below rather than waiting for either bound to trip.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size, shard composition, and balance rather than a copied table.
-The hints refreshed on 2026-09-21 from three green `main` runs pack all five shards within 40 ms of 1276450 ms, about 21.3 minutes, against the 1440000 ms per-shard budget.
+The hints refreshed on 2026-09-24 pack the heaviest shard at 1402289 ms, about 23.4 minutes, against the 1440000 ms per-shard budget.
 That budget is derived from the job cap rather than chosen: shard 1 was killed at 30m15s from a 25.2-minute packed baseline, so a slow runner costs about 20% over the packed weight, and 30 minutes divided by that factor less the measured job setup rounds down to 24 minutes.
 Job setup is small enough to ignore in that arithmetic but not to assume: on run 35215053588 the whole shard-1 job spanned 25.21 minutes around a 25.00-minute suite step, so every step before and after the suite cost about 0.21 minutes together.
 
-The single longest script, `tests/fm-watch-triage.test.sh` at 708653 ms, is the floor for any shard count.
-It bounds the useful shard count at eight before the split stops buying anything.
+The single longest script is the floor for any shard count; `tests/fm-watch-triage.test.sh` was split into `tests/fm-watch-triage-*.test.sh`, and the longest of those, `tests/fm-watch-triage-stale.test.sh` at 391394 ms, is now that floor.
 
-Refresh with `bin/fm-test-run.sh --refresh-serial-hints <timing.json...>` over the `fm-test-timing-aggregate` artifacts of several green `main` runs (`gh run download <run-id> -R <owner>/<repo> --name fm-test-timing-aggregate`); it rewrites the table with the slowest completed duration per script.
+Refresh with `bin/fm-test-run.sh --refresh-serial-hints <timing.json...>` over the `fm-test-timing-aggregate` artifacts of several green `main` runs (`gh run download <run-id> -R <owner>/<repo> --name fm-test-timing-aggregate`); it rewrites the table with the slowest completed duration per script, and keeps the existing hint of every member this home excludes by default, because CI never runs those and no artifact can measure them.
 `--derive-serial-hints` prints the same table without writing it.
 
 A timed-out shard uploads no artifact, so pick runs where every serial shard is green or the lane's slowest scripts go unmeasured in exactly the shard that needs them most.
@@ -167,7 +166,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2/3 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
-| portable serial 1-5 | job `timeout-minutes: 30` | Balanced shards pack about 21 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. `PORTABLE_SERIAL_MAX_SHARD_MS` keeps the packed weight inside that margin, so growth is answered by re-sharding rather than by raising this cap. |
+| portable serial 1-5 | job `timeout-minutes: 30` | Balanced shards pack about 23 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. `PORTABLE_SERIAL_MAX_SHARD_MS` keeps the packed weight inside that margin, so growth is answered by re-sharding rather than by raising this cap. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 Timeouts are intended as hang tripwires; a passing coverage guard does not establish a healthy job duration.

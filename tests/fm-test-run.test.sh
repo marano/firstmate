@@ -1565,7 +1565,7 @@ test_portable_serial_hint_gap_is_reported_not_gated() {
 }
 
 test_portable_serial_hints_refresh_in_place() {
-  local tmp
+  local tmp held
   # The refresh owner rewrites the table in a copy of the runner and the copy's
   # own drift check then passes against the same timings.
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-refresh.XXXXXX")
@@ -1582,6 +1582,10 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(sys.
   assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE="" "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
   grep -qx 'tests/zz-refresh.test.sh 77777' "$tmp/fm-test-run.sh" || fail "refresh must write the measured hint into the table"
   ! grep -q '^tests/fm-watch-triage-absorb.test.sh [0-9]*$' "$tmp/fm-test-run.sh" || fail "refresh must replace the whole table"
+  # A member excluded by default never runs in CI, so its hint survives the refresh.
+  held=$("$RUNNER" --list-default-exclusions | awk -F'\t' '$1 ~ /^tests\// { print $1; exit }')
+  [ -n "$held" ] || fail "the exclusion table must name a script to hold"
+  grep -q "^$held [0-9]*\$" "$tmp/fm-test-run.sh" || fail "refresh must keep the hint of a default-excluded member"
   rm -rf "$tmp"
   pass "hint refresh rewrites the table from measured timings"
 }
