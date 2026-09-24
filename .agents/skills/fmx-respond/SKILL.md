@@ -15,10 +15,11 @@ metadata:
 # fmx-respond
 
 Relay lets a firstmate instance answer and act on public mentions routed through the shared `@myfirstmate` relay.
+Older docs and some emitted lines still call it "X mode", and its identifiers keep the `FMX_`, `x-`, and `fm-x-` spellings.
 A mention arrives through the watcher as a `check:` wake whose payload is `x-mention <request_id>`.
 The full mention is stashed locally; this skill acts on any request it carries and turns it into one public reply, or deliberately skips it when there is nothing to answer.
 
-This runs only when Relay is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; see AGENTS.md "Relay").
+This runs only when Relay is on (the user dropped `FMX_PAIRING_TOKEN` into `.env`; `docs/configuration.md` "Relay (.env)" owns activation).
 If you ever see an `x-mention` wake without Relay configured, do nothing.
 A `check:` wake can also carry `x-mode-error ...` instead of `x-mention <request_id>` - that is a poll or relay configuration problem, not a mention to answer.
 Report it directly to the captain as a Relay configuration blocker and do not treat it as a mention to answer.
@@ -231,7 +232,7 @@ A non-final dry-run follow-up increments `x_followups` and keeps the link while 
 ## Completion follow-up (posted on milestone and done wakes, not this turn)
 
 When an actionable request spawned a task and you linked it (step 2c), progress and the **outcome** are delivered later as follow-up replies, not in this turn.
-This skill is the sole owner of the completion-follow-up procedure below; AGENTS.md §13 declares the load trigger for Relay-linked milestone or terminal wakes, and AGENTS.md §8 reinforces the terminal final-follow-up step before teardown.
+This skill is the sole owner of the completion-follow-up procedure below, including posting the terminal final follow-up before the task's cleanup; `AGENTS.md` section 13 declares only its load trigger.
 This skill's own responsibility during the mention-handling turn is linking the task in step 2c; the full completion path is:
 
 - Firstmate has **up to three** follow-ups per mention, within a 7-day window, chained in the same thread - it spends them only on genuine milestones the captain would want surfaced (e.g. investigation done and a build started, work shipped or ready, or the task failing), never on routine internal churn.
@@ -266,7 +267,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
    It prints the exact reporting command for that binding, including the obligation's actual required deliverable keys.
    When the work is routed to a second mate rather than spawned here, the routed item's own note MUST carry that same `brief` output so it survives the routing and reaches whoever ends up doing the work.
    A header-only routed item loses the emit command.
-   Never ask a worker to find the thread or post the reply: only this home holds the relay consent and the thread binding.
+   Never ask a worker, crewmate or secondmate alike, to find the thread or post the reply: only this home holds the relay consent and the thread binding.
 
 **When work reports back, or on a `public-followup ...` check wake, or when the session-start digest lists a public commitment or an open public loop:**
 
@@ -296,6 +297,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 
 Cleanup refuses while a commitment is still owed for that exact work, so never reach for `--force` to get past it.
 Treat a commitment as kept only after a validated posted receipt or an explicit captain waiver.
+Recover a terminal result only from the typed result `consume` reconciles, never by reading a `done:` sentence.
 Treat a public loop as closed only after `retire`.
 
 ## Notes
