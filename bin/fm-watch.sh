@@ -2003,8 +2003,8 @@ triage_log_surfaced_stale() {  # <window> <path>
 # wake naming that decision, its identity is recorded in .stale-stopped-<key>, and
 # every later poll over the same record only absorbs. Returns 0 when it handled
 # the window (the caller skips the rest of stale triage), 1 when the task has no
-# stop record, holds a declared wait, or the landing owner has a class for it. A relaunch removes the record (bin/fm-spawn.sh) and the identity
-# with it, so the next stop surfaces afresh.
+# stop record, holds a declared wait, or the landing owner has a class for it. A relaunch removes the record (bin/fm-spawn.sh)
+# and the identity with it, so the next stop surfaces afresh.
 stopped_agent_hold() {  # <window> <task> <window-key> <hash>
   local win=$1 task=$2 key=$3 h=$4 marker="$STATE/$2.agent-stopped" mark identity reason
   mark="$STATE/.stale-stopped-$key"

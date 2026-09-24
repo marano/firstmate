@@ -65,6 +65,8 @@ That record licenses exactly one thing: reading a terminal status event (`done:`
 An agent stopped with work still open keeps reading unknown, because a half-finished task genuinely needs firstmate and must never be laundered into a free slot.
 The record is removed whenever an agent is launched for the id ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh)) and by [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), so it can never outlive the incarnation it describes.
 
+The watcher also reads it: a stopped task whose work is not landed (for example a cancelled card whose local copy waits to be discarded) is surfaced to firstmate once per stop as "agent stopped deliberately ... not a wedge" and afterwards only absorbed, never walked up the wedge-escalation ladder.
+
 [`bin/fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh)'s `capacity` object turns that reading into the count firstmate actually judges against: `occupies_capacity` per task, the ids in progress, the finished work still awaiting landing with the PR to land, and the queued items with no blocker or hold that a freed slot can take.
 A task whose state cannot be read counts as occupied, because a slot wrongly believed free over-dispatches while one wrongly believed busy only delays.
 
