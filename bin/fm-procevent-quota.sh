@@ -2,8 +2,8 @@
 # Quota-exhaustion process-event adapter.
 #
 # Usage:
-#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>]
-#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--timeout <secs>]
+#   fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--max-failures <n>]
+#   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--timeout <secs>] [--max-failures <n>]
 #   fm-procevent-quota.sh classify <result-file>
 #   fm-procevent-quota.sh terminal <result-file>
 #   fm-procevent-quota.sh source-id
@@ -18,6 +18,10 @@
 # poll       The blocking child the generic runner executes; never run this
 #            directly in a conversational turn. It polls `quota-axi --json`
 #            until quota drops below the threshold or an error stops the watch.
+#            A failed `quota-axi --json` call is retried on the next interval;
+#            <n> (default 3) consecutive failures end the watch with status
+#            error, and any successful call resets the count. The result
+#            carries the last failure's stderr on a `stderr:` line.
 # classify   Print the captured outcome class: low, exhausted, error, or unknown.
 # terminal   Every quota poll is terminal because the source fires at most once.
 # source-id  Print the canonical source id.
@@ -47,6 +51,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 DEFAULT_INTERVAL=60
 DEFAULT_THRESHOLD=10
+DEFAULT_MAX_FAILURES=3
 
 SOURCE_ID_BASE=quota
 
@@ -92,17 +97,19 @@ valid_percent() {
   jq -en --arg n "$n" '($n | tonumber) <= 100' >/dev/null 2>&1
 }
 
-# quota_json [timeout]
-# Run `quota-axi --json` bounded by the given timeout. A missing or incompatible
-# quota-axi is an error condition, not a signal to fire.
+# quota_json [timeout] [stderr-file]
+# Run `quota-axi --json` bounded by the given timeout, writing the failing
+# command's stderr to the optional file. A missing or incompatible quota-axi is
+# an error condition, not a signal to fire.
 quota_json() {
-  local timeout=${1:-} output
+  local timeout=${1:-} errfile=${2:-/dev/null} output
+  : > "$errfile" 2>/dev/null
   if [ -n "$timeout" ]; then
-    fm_quota_axi_compatible "$timeout" >/dev/null 2>&1 || return 2
-    output=$(fm_run_timed "$timeout" quota-axi --json 2>/dev/null </dev/null) || return 2
+    fm_quota_axi_compatible "$timeout" >/dev/null 2>>"$errfile" || return 2
+    output=$(fm_run_timed "$timeout" quota-axi --json 2>>"$errfile" </dev/null) || return 2
   else
-    fm_quota_axi_compatible >/dev/null 2>&1 || return 2
-    output=$(quota-axi --json 2>/dev/null </dev/null) || return 2
+    fm_quota_axi_compatible >/dev/null 2>>"$errfile" || return 2
+    output=$(quota-axi --json 2>>"$errfile" </dev/null) || return 2
   fi
   printf '%s\n' "$output"
 }
@@ -178,9 +185,10 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD max_failures=$DEFAULT_MAX_FAILURES
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --max-failures) positive_int "${2-}" || die "--max-failures needs a positive integer"; max_failures=$2; shift 2 ;;
       --interval)  positive_number "${2-}" || die "--interval needs a positive number"; interval=$2; shift 2 ;;
       --threshold) valid_percent "${2-}" || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
       --provider)  [ -n "${2-}" ] || die "--provider needs a value"; resolve_provider "$2"; shift 2 ;;
@@ -193,7 +201,7 @@ cmd_arm() {
   timeout=$(perl -e 'print int($ARGV[0] * 0.8 + 0.5)' "$interval") || timeout=30
   [ "$timeout" -ge 5 ] || timeout=5
   "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
-    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" --timeout "$timeout" || exit 1
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" --timeout "$timeout" --max-failures "$max_failures" || exit 1
   printf 'armed: %s\n' "$CANONICAL_SOURCE_ID"
   printf 'provider: %s\n' "${PROVIDER:-(aggregate)}"
   printf 'threshold: %s%%\n' "$threshold"
@@ -204,9 +212,10 @@ cmd_arm() {
 # This is intentionally not the public `arm` path; the runner calls this command
 # directly, so the argv must match the registration.
 cmd_poll() {
-  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout=
+  local interval=$DEFAULT_INTERVAL threshold=$DEFAULT_THRESHOLD timeout='' max_failures=$DEFAULT_MAX_FAILURES
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --max-failures) [ "$#" -ge 2 ] || die "--max-failures needs a positive integer"; max_failures=$2; shift 2 ;;
       --interval)  [ "$#" -ge 2 ] || die "--interval needs a positive number"; interval=$2; shift 2 ;;
       --threshold) [ "$#" -ge 2 ] || die "--threshold needs a percent 0-100"; threshold=$2; shift 2 ;;
       --provider)  [ "$#" -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
@@ -217,17 +226,28 @@ cmd_poll() {
   positive_number "$interval" || die "--interval needs a positive number"
   valid_percent "$threshold" || die "--threshold needs a percent 0-100"
   [ -z "$timeout" ] || positive_int "$timeout" || die "--timeout needs a positive integer"
+  positive_int "$max_failures" || die "--max-failures needs a positive integer"
   resolve_provider "$PROVIDER"
-  local json detail status polls=0
+  local json detail status polls=0 failures=0 errfile errtext
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-procevent-quota-err.XXXXXX") || die "cannot create a stderr capture file"
+  trap 'rm -f "$errfile"' EXIT
   while :; do
     polls=$((polls + 1))
-    if ! json=$(quota_json "${timeout:-}"); then
+    if ! json=$(quota_json "${timeout:-}" "$errfile"); then
+      failures=$((failures + 1))
+      if [ "$failures" -lt "$max_failures" ]; then
+        sleep "$interval"
+        continue
+      fi
+      errtext=$(tr '\n\r' '  ' < "$errfile" | cut -c1-500 | sed 's/ *$//')
       printf 'quota: %s\n' "$CANONICAL_SOURCE_ID"
       printf 'status: error\n'
-      printf 'detail: quota-axi --json failed or quota-axi is missing/incompatible\n'
+      printf 'detail: quota-axi --json failed or quota-axi is missing/incompatible (%s consecutive failures)\n' "$failures"
+      printf 'stderr: %s\n' "$errtext"
       printf 'condition_polls: %s\n' "$polls"
       exit 0
     fi
+    failures=0
     status=$(condition_status "$json" "$PROVIDER" "$threshold")
     case "$status" in
       healthy) sleep "$interval"; continue ;;
