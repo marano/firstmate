@@ -522,9 +522,10 @@ run_extension_section_lanes() {
   # sets the aggregate's wall time whatever the concurrency, so concurrency stays
   # low enough that sections' own bounded waits are not starved on a small
   # runner; six still lets the scheduler probe below start a fifth lane beside
-  # four blocked ones.
+  # four blocked ones. The real aggregate lowers that ceiling to the machine's
+  # core count through section_lane_ceiling (see its caller).
   maximum_sections=17
-  maximum_concurrent=6
+  maximum_concurrent=${section_lane_ceiling:-6}
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
@@ -634,6 +635,17 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
+      # Handshakes have a fixed product bound, and six lanes of node and python
+      # launches on a three-core macOS runner still busy from boot (load
+      # average 37 to 99) starved every first-wave bind past it: six lanes
+      # failed 3 of 3 such runners, core-count lanes passed 3 of 3. More lanes
+      # than cores only queues work, so the sections never run wider than the
+      # machine.
+      section_lane_ceiling=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+      case "$section_lane_ceiling" in
+        ''|*[!0-9]*|0) section_lane_ceiling=1 ;;
+      esac
+      [ "$section_lane_ceiling" -le 6 ] || section_lane_ceiling=6
       # Longest first, so the slowest sections start in the first wave.
       run_extension_section_lanes lifecycle-state lifecycle-lock lifecycle-runner matrix \
         matrix-runtime remote-activation remote-retirement lifecycle-flow remote-lifecycle \
@@ -818,7 +830,8 @@ make_package "$P_CONSENT" org.example.consent ext-consent good network
 H_CONSENT="$HOMES/consent"
 new_home "$H_CONSENT"
 expect_failure "requires explicit --consent network" bind_package "$H_CONSENT" "$P_CONSENT" ext-consent
-bind_package "$H_CONSENT" "$P_CONSENT" ext-consent --consent network >/dev/null
+bind_package "$H_CONSENT" "$P_CONSENT" ext-consent --consent network >/dev/null \
+  || fail "the consent home could not bind its ext-consent fixture"
 assert_contains "$(FM_HOME="$H_CONSENT" "$HOST" inspect org.example.consent)" '"network": true' "required consent is not recorded explicitly"
 pass "package trust and manifest-required capability consent are separate explicit facts"
 fi
@@ -942,7 +955,8 @@ P_GOOD="$PACKAGES/good"
 make_package "$P_GOOD" org.example.good ext-good
 H_GOOD="$HOMES/good"
 new_home "$H_GOOD"
-bind_package "$H_GOOD" "$P_GOOD" ext-good >/dev/null
+bind_package "$H_GOOD" "$P_GOOD" ext-good >/dev/null \
+  || fail "the good home could not bind its ext-good fixture"
 package_root=$(binding_value "$H_GOOD" org.example.good package_root)
 chmod 0644 "$H_GOOD/config/extensions.d/org.example.good.json"
 expect_failure "mode 0600" env FM_HOME="$H_GOOD" "$HOST" verify org.example.good
@@ -967,7 +981,8 @@ pass "binding mode and complete installed code-tree digest are revalidated"
 P_IDENTITY="$PACKAGES/identity"
 make_package "$P_IDENTITY" org.example.identity ext-identity
 H_IDENTITY="$HOMES/identity"; new_home "$H_IDENTITY"
-bind_package "$H_IDENTITY" "$P_IDENTITY" ext-identity >/dev/null
+bind_package "$H_IDENTITY" "$P_IDENTITY" ext-identity >/dev/null \
+  || fail "the identity home could not bind its ext-identity fixture"
 identity_root=$(binding_value "$H_IDENTITY" org.example.identity package_root)
 chmod 0755 "$identity_root"
 chmod 0755 "$identity_root/entrypoint.py"
@@ -1078,7 +1093,8 @@ if section_enabled matrix matrix-runtime; then
 P_MATRIX="$PACKAGES/matrix"
 make_package "$P_MATRIX" org.example.matrix ext-matrix
 H_MATRIX="$HOMES/matrix"; new_home "$H_MATRIX"
-bind_package "$H_MATRIX" "$P_MATRIX" ext-matrix --timeout-ms 5000 >/dev/null
+bind_package "$H_MATRIX" "$P_MATRIX" ext-matrix --timeout-ms 5000 >/dev/null \
+  || fail "the matrix home could not bind its ext-matrix fixture"
 resolution=$(FM_HOME="$H_MATRIX" "$HOST" resolve-process-event ext-matrix)
 IFS=$'\t' read -r resolution_schema resolution_id resolution_version resolution_cap resolution_package resolution_binding resolution_extra <<< "$resolution"
 [ "$resolution_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$resolution_extra" ] \
@@ -1172,7 +1188,8 @@ out_two=$(invoke_matrix replay "$fixed_request")
 pass "an exact request id is matched and supports idempotent replay"
 
 H_CORE_REPLAY="$HOMES/core-replay"; new_home "$H_CORE_REPLAY"
-bind_package "$H_CORE_REPLAY" "$P_MATRIX" ext-matrix >/dev/null
+bind_package "$H_CORE_REPLAY" "$P_MATRIX" ext-matrix >/dev/null \
+  || fail "the core-replay home could not bind its ext-matrix fixture"
 core_registration=$(FM_HOME="$H_CORE_REPLAY" "$PROCEVENT" register-extension ext-matrix replay-source --config-ref replay-no-result)
 core_token=$(printf '%s\n' "$core_registration" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_CORE_REPLAY" "$PROCEVENT" start replay-source >/dev/null
@@ -1189,7 +1206,8 @@ pass "the generic runner reuses one request id until that source sequence is dur
 P_TIMEOUT="$PACKAGES/timeout"
 make_package "$P_TIMEOUT" org.example.timeout ext-timeout
 H_TIMEOUT="$HOMES/timeout"; new_home "$H_TIMEOUT"
-bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 5000 >/dev/null
+bind_package "$H_TIMEOUT" "$P_TIMEOUT" ext-timeout --timeout-ms 5000 >/dev/null \
+  || fail "the timeout home could not bind its ext-timeout fixture"
 timeout_resolution=$(FM_HOME="$H_TIMEOUT" "$HOST" resolve-process-event ext-timeout)
 IFS=$'\t' read -r timeout_schema timeout_id timeout_version timeout_cap timeout_package timeout_binding timeout_extra <<< "$timeout_resolution"
 [ "$timeout_schema" = fm-extension-process-event-resolution.v1 ] && [ -z "$timeout_extra" ] \
@@ -1217,7 +1235,8 @@ pass "timeout escalates through invocation-group cleanup and reaps descendants"
 P_MISSING="$PACKAGES/missing"
 make_package "$P_MISSING" org.example.missing ext-missing
 H_MISSING="$HOMES/missing"; new_home "$H_MISSING"
-bind_package "$H_MISSING" "$P_MISSING" ext-missing >/dev/null
+bind_package "$H_MISSING" "$P_MISSING" ext-missing >/dev/null \
+  || fail "the missing home could not bind its ext-missing fixture"
 missing_root=$(binding_value "$H_MISSING" org.example.missing package_root)
 chmod 0755 "$missing_root"
 rm -f "$missing_root/entrypoint.py"
@@ -1626,7 +1645,8 @@ if section_enabled lifecycle-runner; then
 P_FLOW="$PACKAGES/flow"
 make_package "$P_FLOW" org.example.flow ext-flow
 H_ACTIVE_RUNNER="$HOMES/active-runner"; new_home "$H_ACTIVE_RUNNER"
-bind_package "$H_ACTIVE_RUNNER" "$P_FLOW" ext-flow >/dev/null
+bind_package "$H_ACTIVE_RUNNER" "$P_FLOW" ext-flow >/dev/null \
+  || fail "the active-runner home could not bind its ext-flow fixture"
 active_runner_marker="$TMP_ROOT/active-runner.marker"
 active_runner_release="$TMP_ROOT/active-runner.release"
 active_config="active-block|$active_runner_marker|$active_runner_release"
@@ -1660,7 +1680,8 @@ make_package "$P_LOCK_ORDER" org.example.lock-order ext-lock-order \
   "$(printf 'handshake-block\n%s\n%s' "$lock_order_marker" "$lock_order_release")"
 H_LOCK_ORDER="$HOMES/lock-order"; new_home "$H_LOCK_ORDER"
 touch "$lock_order_release"
-bind_package "$H_LOCK_ORDER" "$P_LOCK_ORDER" ext-lock-order >/dev/null
+bind_package "$H_LOCK_ORDER" "$P_LOCK_ORDER" ext-lock-order >/dev/null \
+  || fail "the lock-order home could not bind its ext-lock-order fixture"
 FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" register-extension ext-lock-order order-source --config-ref good >/dev/null
 FM_HOME="$H_LOCK_ORDER" "$PROCEVENT" start order-source > "$TMP_ROOT/lock-order-start.out" 2>&1
 lock_order_result="$H_LOCK_ORDER/state/procevent-inbox/order-source.1.result"
@@ -1714,7 +1735,8 @@ if section_enabled lifecycle-state; then
 P_FLOW="$PACKAGES/flow"
 make_package "$P_FLOW" org.example.flow ext-flow
 H_OWNER_SAFE="$HOMES/owner-safe"; new_home "$H_OWNER_SAFE"
-bind_package "$H_OWNER_SAFE" "$P_FLOW" ext-flow >/dev/null
+bind_package "$H_OWNER_SAFE" "$P_FLOW" ext-flow >/dev/null \
+  || fail "the owner-safe home could not bind its ext-flow fixture"
 first=$(FM_HOME="$H_OWNER_SAFE" "$PROCEVENT" register-extension ext-flow replace-source --config-ref first)
 first_token=$(printf '%s\n' "$first" | sed -n 's/^owner-token: //p')
 second=$(FM_HOME="$H_OWNER_SAFE" "$PROCEVENT" register-extension ext-flow replace-source --config-ref second)
@@ -2104,7 +2126,8 @@ FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$STATE_OVERRIDE" "$HOST" retire-b
 pass "overridden state confines extension work and captured-result operations"
 
 H_SWEEP="$HOMES/sweep"; new_home "$H_SWEEP"
-bind_package "$H_SWEEP" "$P_FLOW" ext-flow >/dev/null
+bind_package "$H_SWEEP" "$P_FLOW" ext-flow >/dev/null \
+  || fail "the sweep home could not bind its ext-flow fixture"
 FM_HOME="$H_SWEEP" "$PROCEVENT" register-extension ext-flow sweep-source --config-ref good >/dev/null
 assert_contains "$(FM_HOME="$H_SWEEP" "$PROCEVENT" sweep-home)" "swept: attempted=1" \
   "home sweep did not use the extension registration's owner identity"
@@ -2580,7 +2603,8 @@ cp -R "$ROOT/docs/examples/process-event-extension" "$P_EXAMPLE"
 chmod 0755 "$P_EXAMPLE" "$P_EXAMPLE/file-signal.mjs"
 chmod 0644 "$P_EXAMPLE/firstmate-extension.json"
 H_EXAMPLE="$HOMES/example"; new_home "$H_EXAMPLE"
-bind_package "$H_EXAMPLE" "$P_EXAMPLE" file-signal --consent artifact-references >/dev/null
+bind_package "$H_EXAMPLE" "$P_EXAMPLE" file-signal --consent artifact-references >/dev/null \
+  || fail "the example home could not bind its file-signal fixture"
 SIGNAL_FILE="$TMP_ROOT/example-result.txt"
 example_registration=$(FM_HOME="$H_EXAMPLE" "$PROCEVENT" register-extension file-signal example-file --config-ref "file:$SIGNAL_FILE")
 example_token=$(printf '%s\n' "$example_registration" | sed -n 's/^owner-token: //p')
@@ -2640,7 +2664,8 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 handshake_orphan_pid=
-bind_package "$H_HANDSHAKE_ORPHAN" "$P_HANDSHAKE_RECOVER" ext-handshake-orphan >/dev/null
+bind_package "$H_HANDSHAKE_ORPHAN" "$P_HANDSHAKE_RECOVER" ext-handshake-orphan >/dev/null \
+  || fail "the handshake-orphan home could not bind its ext-handshake-orphan fixture"
 assert_contains "$(FM_HOME="$H_HANDSHAKE_ORPHAN" "$HOST" verify org.example.handshake-orphan)" "verified: org.example.handshake-orphan@1.2.3" \
   "cleaned handshake state did not permit safe binding"
 pass "handshake execution rejects and reaps foreground descendants"
