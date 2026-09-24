@@ -38,6 +38,10 @@ cleanup() {
   [ -z "$LAB" ] || {
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
+    # Sweep the lab's registered process-event sources before removing it, so
+    # the board's runner cannot write its result back into a lab the rm just
+    # emptied (tests/lib.sh fm_test_track_procevent_home contract).
+    fm_test_reap_procevent_homes
     rm -rf "$LAB" || note "cleanup could not remove $LAB; it is left in place"
   }
 }
@@ -51,6 +55,18 @@ on_exit() {
   local rc=$?
   set +e
   cleanup
+  # A lab that survives cleanup is the leak this guard must not have; it fails
+  # a clean pass by name but never overrides a failure already being reported.
+  # The runner's late write lands a moment after the rm, so watch briefly.
+  local settle=0
+  while [ -n "$LAB" ] && [ ! -e "$LAB" ] && [ "$settle" -lt 10 ]; do
+    sleep 0.3
+    settle=$((settle + 1))
+  done
+  if [ -n "$LAB" ] && [ -e "$LAB" ]; then
+    printf 'not ok - the guard lab survived cleanup: %s\n' "$LAB" >&2
+    [ "$rc" -ne 0 ] || rc=1
+  fi
   exit "$rc"
 }
 trap on_exit EXIT
@@ -61,6 +77,7 @@ note "lavish-axi ${VERSION:-version-unknown}"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-lavish-live.XXXXXX") || fail "cannot create the guard lab"
 LAB=$(cd -P -- "$LAB" && pwd -P)
 mkdir -p "$LAB/state" "$LAB/data"
+fm_test_track_procevent_home "$LAB" "$LAB/procevent-claims"
 
 cat > "$LAB/payload.json" <<'JSON'
 {
