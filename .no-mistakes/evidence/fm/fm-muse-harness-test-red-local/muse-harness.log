@@ -1,0 +1,26 @@
+ok - Muse preflight respects the allowlist while retaining stored authentication
+ok - muse is detected through any versioned muse-bin ancestor
+ok - muse detection does not claim unrelated muse-containing commands
+ok - muse launch clears foreign harness markers before ancestry detection
+ok - muse spawn launches with autonomy, privacy control, and a positional brief
+ok - muse maps the shared effort vocabulary and reaches ultra only via explicit max
+ok - muse spawn refuses when no credential can reach the provider
+ok - muse spawn refuses a META_API_KEY that cannot reach the worker
+ok - muse spawn accepts a stored credential without META_API_KEY
+ok - muse resolves relative XDG roots before preflight and launch
+ok - muse is refused as a secondmate harness
+ok - muse spawn writes a session binding that teardown removes
+ok - every accepted muse Escape alias clears the restored composer
+ok - the composer clear is scoped to muse and does not touch other adapters
+ok - a failed muse composer clear fails loudly instead of leaving stale input
+ok - the run fold tracks open, settled, interrupted, reopened, and run-free logs
+ok - a nested terminal record never settles an in-flight run
+ok - the session binding folds only the log matching this task's worktree
+ok - workspace bindings compare decoded paths literally
+ok - spawn-time exclusions select the current session across equal mtimes
+ok - the Muse session cache avoids rescans and refreshes safely across incarnations
+ok - a changed Muse namespace revalidates cached session uniqueness
+ok - sub-agent session logs are excluded from the parent's busy fold
+ok - every unproven muse binding classifies unknown rather than idle
+ok - a settled session log reads idle for both completed and interrupted turns
+ok - muse trusts no busy record source
