@@ -458,6 +458,10 @@ stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|->
       fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT"
 }
 
+# A pid no process can hold on any supported kernel, for a process view whose
+# shell must be absent from the real process table.
+UNALLOCATABLE_PID=2147483646
+
 shell_only_process_info() {  # <shell-pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"],"cmdline":"-zsh"}]}}}' "$1" "$1" "$1"
 }
@@ -625,10 +629,19 @@ test_registered_agent_with_an_unreadable_process_view_is_unknown() {
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w9:p9","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh","argv0":"zsh"}]}}}')
   [ "$out" = "unknown unreadable refused" ] \
     || fail "a process view for a different pane must read unknown/unreadable, got '$out'"
+  # An empty foreground list is settled by the descendant walk over the real
+  # process table (the companion case below), so what makes this view
+  # unreadable is a shell pid the process table does not hold. A small
+  # synthetic pid can be a live, childless process on a busy machine, and the
+  # same view then correctly reads stale-agent, so the pid here is one no
+  # kernel can allocate: above Linux's PID_MAX_LIMIT (4194304) and macOS's
+  # 99999.
+  ! ps -p "$UNALLOCATABLE_PID" >/dev/null 2>&1 \
+    || fail "the unallocatable fixture pid $UNALLOCATABLE_PID is a live process, so this case cannot prove anything"
   out=$(stale_registration_case unreadable-no-foreground idle \
-    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[]}}}')
+    "$(printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[]}}}' "$UNALLOCATABLE_PID" "$UNALLOCATABLE_PID")")
   [ "$out" = "unknown unreadable refused" ] \
-    || fail "an empty foreground list must read unknown/unreadable, got '$out'"
+    || fail "an empty foreground list whose shell pid is not a live process must read unknown/unreadable, got '$out'"
   pass "herdr stale registration: an unreadable process view refuses instead of guessing either way"
 }
 
@@ -637,8 +650,8 @@ test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_des
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   # A real, childless shell process stands in for the pane's shell, and the
   # foreground list is empty - the exec-to-shell handoff shape the flake fix
-  # targets. Unlike unreadable-no-foreground above (a synthetic pid absent
-  # from `ps`), this shell_pid is real, so the descendant walk can run to
+  # targets. Unlike unreadable-no-foreground above (a pid no process can
+  # own), this shell_pid is real, so the descendant walk can run to
   # completion and prove the empty array settles to stale-agent, not
   # unreadable.
   "$sleep_bin" 300 &
