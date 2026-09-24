@@ -1,0 +1,13 @@
+92:8. Run every command that meaningfully loads this machine - lint, test, build, codegen, an e2e
+93-   suite, a full CI script - prefixed with `mutex`, as in `mutex pnpm run ci`. Other workers
+94-   share these cores and this memory, and an unwrapped build racing another worker's suite has
+95-   produced false test failures on unmodified code. Leave obviously cheap commands unwrapped.
+96-   The criterion is local CPU and memory, never duration:
+97-   a command that is slow because it waits on a network or an external API does not take the
+98-   lock, however long it runs, so `terraform plan` stays unwrapped beside the `pnpm` build
+99-   that does take it. Wrapping one held the lock for over eleven minutes while it waited on a
+100-   remote API and blocked another worker's real build.
+101-   ONE `mutex` PER RUN: a run is one build or suite command you would otherwise issue once.
+102-   Never split one run into per-test, per-file or per-module invocations just to wrap them.
+103-   Never put one `mutex` around a loop, script or `&&` chain of several runs, such as a
+104-   baseline plus mutants; wrap each run in the loop instead, so a queued worker's run can go
