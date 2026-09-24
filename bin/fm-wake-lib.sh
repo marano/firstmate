@@ -701,12 +701,20 @@ _fm_recovery_marker_write_locked() {
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
+  local marker=$1 kind=${2:-downtime} lock rc
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
+  rc=0
+  _fm_recovery_marker_publish_locked "$marker" "$kind" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+# The publish itself, for a caller already holding the marker's lock.
+_fm_recovery_marker_publish_locked() {  # <marker> <kind>
+  local marker=$1 kind=$2 saved_token generation='' status=pending
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
-    fm_lock_release "$lock"
     return 1
   fi
   if [ "$kind" = downtime ]; then
@@ -728,11 +736,7 @@ _fm_recovery_marker_publish() {
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
   fi
-  if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
-    fm_lock_release "$lock"
-    return 1
-  fi
-  fm_lock_release "$lock"
+  _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"
 }
 
 _fm_recovery_marker_begin_handling() {
@@ -903,8 +907,11 @@ _fm_recovery_marker_reopen_announced() {
   fm_lock_release "$lock"
 }
 
+# fm_recovery_transition <marker> <action> [target] [value] [lock-bound-seconds]
+# The release-lock actions accept a lock bound; when it runs out they return 1
+# and leave <target> held, so the recovery evidence is never cleared unpublished.
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
   case "$action" in
     publish)
       _fm_recovery_marker_publish "$marker" "${target:-downtime}"
@@ -920,13 +927,30 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      # The bounded acquire lives only in these release-lock transitions:
+      # reaching it from _fm_recovery_marker_publish (which fm_lock_try_acquire
+      # calls) would make ShellCheck's analysis of every sourcing root ~3x costlier.
+      if [ -z "$bound" ]; then
+        _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      else
+        local lock="${marker}.lock"
+        fm_lock_acquire_wait_bounded "$lock" "$bound" || return 1
+        if ! _fm_recovery_marker_publish_locked "$marker" "${value:-downtime}"; then
+          fm_lock_release "$lock"
+          return 1
+        fi
+        fm_lock_release "$lock"
+      fi
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      fm_lock_acquire_wait "$lock" || return 1
+      if [ -z "$bound" ]; then
+        fm_lock_acquire_wait "$lock" || return 1
+      else
+        fm_lock_acquire_wait_bounded "$lock" "$bound" || return 1
+      fi
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
@@ -1151,9 +1175,10 @@ _fm_lock_deadline_verdict() {  # <lockdir>
 # still held: FM_LOCK_HELD_PID names the live holder, or is empty when the
 # holder is an acquirer that has not recorded its pid yet. It returns 1 when the
 # lock stays unacquirable with no holder at all (_fm_lock_deadline_verdict).
-# Use it where a caller must refuse rather than block: wake presentation, and
-# the guarded remote link clear, whose whole contract is to return a
-# reconciliation refusal instead of wedging an unattended close.
+# Use it where a caller must refuse rather than block: wake presentation, the
+# watcher's exit-path recovery transition, and the guarded remote link clear,
+# whose whole contract is to return a reconciliation refusal instead of wedging
+# an unattended close.
 # Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid

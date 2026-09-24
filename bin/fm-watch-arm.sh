@@ -23,7 +23,8 @@
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
-# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
+# single source of truth, shared with fm-watch.sh and fm-guard.sh; unset, the
+# poll-derived default fm-watch.sh itself uses), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
@@ -58,6 +59,11 @@
 # watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
+# It sends TERM and waits up to one poll interval for the holder to exit. A holder
+# that survives that wait with a stale beacon is not supervising, and would make
+# every restart and arm fail forever, so it gets KILL - by the same recorded pid,
+# only after its lock record, identity, and staleness are re-verified, and never
+# while its beacon is fresh. A plain arm never signals anything.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,8 +73,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
-# "Fresh" reuses the guard's threshold so there is one definition of liveness.
-GRACE=${FM_GUARD_GRACE:-300}
+# "Fresh" reuses the guard's threshold, defaulting through fm_poll_derived_grace
+# (bin/fm-wake-lib.sh) exactly as fm-watch.sh does, so this arm and the watcher
+# child it starts agree on whether a holder's beacon is stale at any poll cadence.
+GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 # Git Bash/MSYS pays a much higher fork cost while the watcher completes its
 # required pre-lock migration, so its bounded default covers that cold start.
@@ -382,6 +390,58 @@ handling_successor_generation() {
   esac
 }
 
+# --restart's stop wait, in 0.1s ticks. The watcher defers a trapped TERM until
+# its current foreground command returns, and every cycle ends in a POLL-long
+# terminal wait, so a healthy watcher TERM'd early in that wait exits up to one
+# poll interval later. A shorter wait sees that dying watcher as a live holder,
+# attaches to it, and reports FAILED once it exits, leaving no watcher. Cover
+# one whole poll interval plus a second for its exit path, never less than the
+# historical five seconds. A tick never sleeps less than 0.1s, so this is a floor.
+restart_stop_ticks() {
+  local poll=${FM_POLL:-15} seconds
+  case "$poll" in
+    ''|*[!0-9.]*|.*|*.|*.*.*) poll=15 ;;
+  esac
+  seconds=$((10#${poll%%.*} + 1))
+  case "$poll" in *.*[1-9]*) seconds=$((seconds + 1)) ;; esac
+  [ "$seconds" -ge 5 ] || seconds=5
+  printf '%s\n' "$((seconds * 10))"
+}
+
+# True when a beacon <age> is stale by this arm's GRACE and by the watcher's own
+# refusal threshold alike, so no holder either of them calls fresh is killed.
+restart_holder_is_stale() {  # <age>
+  local age=$1 watcher_grace=${FM_WATCHER_STALE_GRACE:-}
+  case "$GRACE" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -ge "$GRACE" ] || return 1
+  case "$watcher_grace" in
+    '') return 0 ;;
+    *[!0-9]*) return 1 ;;
+  esac
+  [ "$age" -ge "$watcher_grace" ]
+}
+
+# After --restart's TERM and stop wait, KILL the holder only while it still holds
+# this home's lock under the same recorded pid, its beacon is stale, and its
+# process identity still matches the lock. Each is re-read immediately before
+# the signal, identity last, so a holder that beat again during the wait is left
+# alone and a recycled pid is never signaled.
+kill_stale_restart_holder() {  # <pid>
+  local pid=$1 age i
+  fm_pid_alive "$pid" || return 0
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$pid" ] || return 0
+  age=$(fm_path_age "$BEAT")
+  restart_holder_is_stale "$age" || return 0
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME" || return 0
+  kill -KILL "$pid" 2>/dev/null || return 0
+  echo "watcher: killed stale holder pid=$pid (beacon ${age}s, survived TERM)" >&2
+  i=0
+  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 mode=arm
 handling_generation=
 handling_watcher_pid=
@@ -416,11 +476,13 @@ if [ "$mode" = restart ]; then
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a now-dead-pid stale lock instead
       # of seeing the dying one as a live holder and no-opping.
+      stop_ticks=$(restart_stop_ticks)
       i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+      while [ "$i" -lt "$stop_ticks" ] && fm_pid_alive "$lock_pid"; do
         sleep 0.1
         i=$((i + 1))
       done
+      kill_stale_restart_holder "$lock_pid"
     else
       if ! clear_stale_recorded_watcher_lock; then
         echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2

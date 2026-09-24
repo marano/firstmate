@@ -54,6 +54,7 @@ An unacknowledged downtime generation is announced at most once: the first recov
 A non-successor watcher start after an announced-but-unacked episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
 Every watcher close and every durable queue append publishes downtime, so a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
 That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and trapping later arms in repeated recovery presentation.
+A closing watcher that cannot take the marker's lock within `FM_WATCHER_EXIT_LOCK_TIMEOUT` exits still holding its singleton lock, so a live process wedged on that lock cannot keep it alive and stale; the successor's stale-lock reclaim then publishes that close's downtime, and publication still always precedes the lock's removal.
 An acknowledgement carries two separable facts: queue-row consumption is bound to the monotonic `--ack-through` sequence (further scoped per actor - see "Per-actor acknowledgement" below), while only retiring the episode is bound to `--recovery-generation`.
 A generation mismatch therefore does not block consumption of rows through that sequence; it is a non-fatal result that names its own remedy - re-drain, then acknowledge the newer episode.
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
@@ -107,7 +108,10 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
-The default 300-second grace is unchanged.
+`--restart` signals only the pid recorded in this home's lock, and after its TERM it waits up to a whole poll interval for the holder to exit, because the watcher defers a trapped TERM until its poll sleep ends; a shorter wait would attach to the dying watcher and fail once it exits.
+A holder that survives that wait with a stale beacon is not supervising, so the restart kills that same recorded pid after re-reading its lock record, staleness, and identity, and starts a fresh watcher that surfaces the downtime.
+A holder whose beacon is fresh is never killed, and a plain arm never signals any holder.
+The arm's default grace is the poll-derived one the watcher uses ([`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence)), so the two agree on which holder is stale.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
 ## Regression coverage
@@ -117,6 +121,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, a signal during startup that must still release the singleton lock, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also covers a restart that waits out a default-poll sleep instead of attaching to the watcher it stopped, a stale TERM-surviving holder that a restart kills and a plain arm leaves alone, a holder that beat during the stop wait and is spared, the bounded exit-path marker-lock wait with its successor recovery, and the poll-derived arm grace.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, exit-2 translation, and host-timeout HUP/TERM/INT translation into the same durable failure handoff.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

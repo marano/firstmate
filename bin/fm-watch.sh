@@ -325,6 +325,15 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# The exit path publishes the downtime marker before it releases the singleton
+# lock, and waits at most this long for the marker's lock, so a live process
+# wedged on that lock cannot keep an exiting watcher alive, stale, and holding
+# the singleton. Past the bound it exits still holding the lock as dead-pid
+# evidence, and the successor's reclaim publishes the marker instead.
+EXIT_LOCK_TIMEOUT=${FM_WATCHER_EXIT_LOCK_TIMEOUT:-5}
+case "$EXIT_LOCK_TIMEOUT" in
+  ''|*[!0-9]*|0) EXIT_LOCK_TIMEOUT=5 ;;
+esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -2774,7 +2783,7 @@ watcher_cleanup() {
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
   if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime "$EXIT_LOCK_TIMEOUT"; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
