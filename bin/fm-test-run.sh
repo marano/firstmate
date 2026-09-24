@@ -202,13 +202,15 @@
 # the marker is inert, so a contributor with no pinned linter still gets the
 # ordinary suite result.
 #
-# Exit status is non-zero if any selected script exits non-zero, a configured
-# --fail-on-gate-skip token appears, a selected script reported a missing
-# pinned tool while those are required, the measured duration exceeds
-# --max-wall-ms, timing-artifact finalization fails, or a concurrent worker
-# violates its isolation check. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate; each one
-# is logged with its reason and recorded in the timing artifact.
+# Exit status is non-zero if any selected script exits non-zero, a selected
+# script exits 0 having run no case (no line starting "ok - " and no line
+# starting "skip:"), a configured --fail-on-gate-skip token appears, a selected
+# script reported a missing pinned tool while those are required, the measured
+# duration exceeds --max-wall-ms, timing-artifact finalization fails, or a
+# concurrent worker violates its isolation check. Other gate skips (first
+# meaningful line matching ^skip:) remain successful and are counted as
+# skipped_gate; each one is logged with its reason and recorded in the timing
+# artifact.
 #
 # expected_gate_skip classes name why a family is allowed to skip: herdr (the
 # pinned real-Herdr lane), optional-binary (a backend whose binary is optional),
@@ -3411,6 +3413,15 @@ record_script_result() {
     # A capability skip is the runner's only record of what this host could not
     # exercise, so name it rather than leaving a silent green.
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
+  fi
+
+  # A script that exits 0 having run no case proved nothing, and its exit status
+  # alone reads as a pass. A skip line, first or not, says why nothing ran.
+  # Measured: tests/fm-build-lock.test.sh banked zero of its 51 cases as a pass
+  # on the macOS lane for every run after its wrapper began dying mid-run.
+  if [ "$rc" -eq 0 ] && ! grep -q -e '^ok - ' -e '^skip:' "$out" 2>/dev/null; then
+    log "ran no cases: $script exited 0 without printing an \"ok - \" line or a skip: line"
+    rc=1
   fi
 
   # A missing pinned tool is silent coverage loss: the case passes as a skip and
