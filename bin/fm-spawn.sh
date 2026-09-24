@@ -3065,6 +3065,16 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# One bounded retry: a fetch that fails once and succeeds seconds later is the
+# common transient, and refusing the spawn on it costs the operator a relaunch.
+spawn_fetch_retry() { # <worktree> <fetch args...>
+  local worktree=$1
+  shift
+  git -C "$worktree" fetch --quiet "$@" && return 0
+  sleep 1
+  git -C "$worktree" fetch --quiet "$@"
+}
+
 freshen_spawn_worktree_base() { # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -3082,7 +3092,7 @@ freshen_spawn_worktree_base() { # <worktree>
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
-  if ! git -C "$worktree" fetch --quiet origin; then
+  if ! spawn_fetch_retry "$worktree" origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3095,7 +3105,7 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   }
   target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  if ! spawn_fetch_retry "$worktree" origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3955,7 +3965,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  # The endpoint was created for this spawn and holds nothing but the idle
+  # shell in the pooled worktree, so a refused refresh closes it; leaving it
+  # makes the retry fail on "window already exists".
+  freshen_spawn_worktree_base "$WT" || {
+    spawn_launch_endpoint_cleanup
+    exit 1
+  }
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
