@@ -1295,6 +1295,11 @@ test_ship_and_scout_teach_the_build_mutex() {
     # Mutant: drop the "Never split one run" line.
     assert_grep 'Never split one run into per-test, per-file or per-module invocations' "$brief" \
       "$kind brief did not say the mutex wraps a whole run rather than each unit inside it"
+    # Mutant: drop the network-bound sentence - workers then read long-running as heavy.
+    assert_grep 'a command that is slow because it waits on a network or an external API does not take the' "$brief" \
+      "$kind brief did not say a network-bound command stays out of the lock however long it runs"
+    assert_grep 'terraform plan' "$brief" \
+      "$kind brief did not give terraform plan as the network-bound example"
     # Mutant: drop the "Never put one mutex around a loop" line - every measured
     # hold over ten minutes was one mutex around a loop of separate runs.
     assert_grep "Never put one \`mutex\` around a loop, script or \`&&\` chain of several runs" "$brief" \
