@@ -1,0 +1,27 @@
+== eb1: 0 not-ok
+== eb-r1: 0 not-ok
+== eb-r2: 0 not-ok
+== eb-r3: 2 not-ok
+not ok - binding retirement bypassed result.silent lifecycle reservation
+not ok - an isolated extension conformance section failed
+== eb-r4: 2 not-ok
+not ok - binding retirement bypassed result.classify lifecycle reservation
+not ok - an isolated extension conformance section failed
+== eb-r5: 0 not-ok
+== eb-r6: 0 not-ok
+== dbg1: 0 not-ok
+== dbg2: 2 not-ok
+not ok - bypassed
+not ok - an isolated extension conformance section failed
+
+error: process-event state root is not a private directory
+ok - malformed, invalid UTF-8, BOM, control, multiple, duplicate, unknown, oversized, crash, nonzero, stderr, and foreground leaked-process responses are rejected
+ok - control-byte state roots cannot serialize claims or reservations
+error[retirement-failed]: error[binding-in-use]: error: binding still owns process-event registration: process-race-terminal
+total 24
+drwx------   5 marano  staff  160 Sep 24 00:04 .
+drwxr-xr-x  10 marano  staff  320 Sep 24 00:04 ..
+-rw-------   1 marano  staff   13 Sep 24 00:04 .owner-lease
+-rw-------   1 marano  staff   11 Sep 24 00:04 process-race-source.16777232-222890225.last-launch
+-rw-------   1 marano  staff  481 Sep 24 00:04 process-race-terminal.source
+not ok - bypassed

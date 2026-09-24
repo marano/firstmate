@@ -1,0 +1,113 @@
+ok - unknown extension conformance section selectors fail before setup
+ok - source configuration references cross one JSON envelope with no shell interpretation
+ok - an exact request id is matched and supports idempotent replay
+ok - owner-matched retirement refuses a stale generation and accepts the current one
+ok - registration publication and binding retirement share one lifecycle boundary
+tests/fm-extension-binding.test.sh: line 466: 15720 Killed: 9               FM_EXTENSION_BINDING_SECTION_CHILD=1 FM_EXTENSION_BINDING_SEGMENT="$section" bash "$0"
+ok - the section coordinator propagates ordered failures and bounded cleanup
+ok - all registration owner transitions wait for the prior extension runner
+ok - the generic runner reuses one request id until that source sequence is durably captured
+ok - process-event resolution reserves the lifecycle before invocation
+ok - caller environment, descriptors, and lifecycle entry cannot forge capture authority
+ok - extension capture reservations are bounded to their runner lifecycle
+ok - remote registration owner transitions observe the active runner boundary
+
+all extension-binding tests passed
+ok - malformed, invalid UTF-8, BOM, control, multiple, duplicate, unknown, oversized, crash, nonzero, stderr, and foreground leaked-process responses are rejected
+error: process-event state root is not a private directory
+ok - control-byte state roots cannot serialize claims or reservations
+ok - process cleanup never adopts a proven-unrelated same-user process
+
+all extension-binding tests passed
+ok - a progress wait outlasts any fixed poll budget while its producer lives and fails once it exits unpublished
+ok - timeout escalates through invocation-group cleanup and reaps descendants
+ok - a missing package executable refuses instead of falling back
+
+all extension-binding tests passed
+ok - registration and result re-announcement take the source and lifecycle locks in one order
+
+all extension-binding tests passed
+ok - every external result operation reserves the lifecycle before invocation
+ok - public extension dispatch exposes no unlocked retirement entry
+not-autohandled: flow-source (left for the handler; still unacknowledged)
+not-autohandled: remote-source (left for the handler; still unacknowledged)
+ok - retirement worker ownership survives wrapper death and recovers exactly
+not-autohandled: example-file (left for the handler; still unacknowledged)
+ok - one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end
+ok - the shipped file-signal package is a runnable end-to-end external adapter
+ok - signal interruption leaves lifecycle lock recovery to the next owner
+
+all extension-binding tests passed
+ok - crash recovery revalidates and cleans only the recorded state root
+ok - post-registration inbox symlink substitution cannot redirect extension evidence
+ok - a bind killed between publishing and sealing its package leaves a slot the next bind reclaims
+ok - remote retirement refuses ambiguous drift and resumes an exact crash cut
+not-autohandled: remote-source (left for the handler; still unacknowledged)
+not-autohandled: example-symlinked (left for the handler; still unacknowledged)
+ok - remote retirement and refusal checks run against an isolated addressed home
+
+all extension-binding tests passed
+ok - post-registration registry symlink substitution cannot redirect external evidence
+ok - a second install of the same package waits out the first one's unsealed window instead of refusing it
+
+all extension-binding tests passed
+ok - a home reached through a symlinked ancestor captures external evidence normally
+ok - inner result.silent host crash releases the parent lifecycle lock before terminal retry
+ok - an absent home-local registry is inert, state-free, and ignores project/environment discovery
+ok - serialized remote binding crosses fm-on through addressed-home capture and retirement
+
+all extension-binding tests passed
+ok - local binding retirement requires its exact identity and disables invocation
+
+all extension-binding tests passed
+ok - bind computes a content-addressed package, negotiates v1, and publishes an inspectable binding
+ok - unknown-only protocol and capability versions refuse without downgrade
+ok - group/world-writable package code is rejected
+ok - handshake execution rejects and reaps foreground descendants
+
+all extension-binding tests passed
+ok - a non-executable manifest entrypoint is rejected
+ok - source-root traversal and package-tree symlinks are rejected
+ok - hard-linked package code is rejected
+ok - external staging remains descriptor-bound across a registry directory swap
+ok - concurrent binds serialize adapter ownership through publication
+ok - binding mode and complete installed code-tree digest are revalidated
+ok - a project, task-copy, or operational-home package cannot register even when named explicitly
+ok - manifest entrypoint traversal is rejected before execution
+ok - the exact executable identity cannot change underneath a binding
+
+all extension-binding tests passed
+ok - package trust and manifest-required capability consent are separate explicit facts
+
+all extension-binding tests passed
+ok - manifest JSON rejects duplicate and unknown fields instead of widening into plugin hooks
+
+all extension-binding tests passed
+ok - handshake request identity, exact fields, JSON, and process exit are validated before enablement
+not run - foreign-owner fixture requires chown privilege
+
+all extension-binding tests passed
+ok - remote receiver rejects malformed, truncated, traversal, link, hash, size, duplicate, and incomplete envelopes
+ok - failed activation cannot partially publish and retains exact transfer evidence
+
+all extension-binding tests passed
+ok - extension launch uses a tracked static core barrier without dynamic code evaluation
+ok - signal interruption proves exact invocation-group extinction before host exit
+ok - external staging leaves remain no-follow descriptor-bound through capture
+ok - host-crash recovery retires only after exact invocation-group extinction
+
+all extension-binding tests passed
+ok - external publication remains descriptor-bound after capture
+ok - signal-terminated extension capture cannot publish an empty success
+ok - capture helper retains the inherited inbox descriptor before publication
+not-autohandled: legacy-link-source (left for the handler; still unacknowledged)
+ok - absent-registry built-in capture retains its legacy state-path behavior
+error[retirement-failed]: error[binding-in-use]: error: binding still owns process-event registration: inbox-swap-source
+ok - overridden state confines extension work and captured-result operations
+ok - bounded home sweep retires an extension source through its exact owner token
+ok - legacy built-in registrations retain behavior and gain exact conditional retirement
+
+all extension-binding tests passed
+ok - independent extension conformance sections complete through isolated public homes
+
+all extension-binding tests passed
