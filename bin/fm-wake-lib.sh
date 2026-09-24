@@ -591,7 +591,12 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  # -n, because the lock may have been published since the check above: a plain
+  # ln -s follows that link and creates this acquirer's link inside the winner's
+  # owner directory, where it stops the winner's release and the reaper from
+  # ever removing that directory. -n cannot keep ln out of a lock that is a real
+  # directory, the legacy shape, so a stray link made there is still removed.
+  if ln -sn "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -1094,11 +1099,58 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   trap - TERM INT
 }
 
+# _fm_lock_deadline_verdict <lockdir>
+# fm_lock_acquire_wait_bounded's answer once its deadline has passed. The first
+# attempt also gives ordinary stale-owner recovery a final chance, because the
+# deadline can kill the helper after it acquired and before its handoff.
+# A refused attempt is contention whenever it names a live holder or meets an
+# unrecorded claim. The lock counts as unsafe only when it stays unacquirable
+# with neither across repeated attempts, never on one read after a refusal: a
+# contended lock passes through instants with no live pid recorded - after one
+# holder's release and before the next one's link, and while a claimer records
+# its pid - and a verdict read at such an instant reported a lost race as an
+# unsafe lock.
+_fm_lock_deadline_verdict() {  # <lockdir>
+  local lockdir=$1 attempt=1 attempts=10 pid
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    fi
+    pid=${FM_LOCK_HELD_PID:-}
+    case "$pid" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        if [ "$pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$pid"; then
+          FM_LOCK_HELD_PID=$pid
+          return 124
+        fi
+        ;;
+    esac
+    # An acquirer that has published its link and not yet recorded its pid
+    # holds the lock for as long as fm_lock_try_acquire leaves such a claim
+    # alone. A regular file, or any other shape the lock never takes, is not a
+    # claim.
+    if [ -d "$lockdir" ] \
+      && fm_lock_mid_acquire_is_fresh "$lockdir" "$(cat "$lockdir/pid" 2>/dev/null || true)"; then
+      FM_LOCK_HELD_PID=
+      return 124
+    fi
+    [ "$attempt" -lt "$attempts" ] || break
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
+  FM_LOCK_HELD_PID=
+  return 1
+}
+
 # fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
 #
 # Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
-# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
-# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# until fm-timeout-lib.sh's hard deadline, then returns 124 while the lock is
+# still held: FM_LOCK_HELD_PID names the live holder, or is empty when the
+# holder is an acquirer that has not recorded its pid yet. It returns 1 when the
+# lock stays unacquirable with no holder at all (_fm_lock_deadline_verdict).
 # Use it where a caller must refuse rather than block: wake presentation, and
 # the guarded remote link clear, whose whole contract is to return a
 # reconciliation refusal instead of wedging an unattended close.
@@ -1130,26 +1182,14 @@ fm_lock_acquire_wait_bounded() {
     return 0
   fi
   [ "$rc" -ne 0 ] || rc=1
-  # A deadline can kill the helper just after it acquired and before handoff.
-  # Give ordinary stale-owner recovery one final non-blocking chance so that
-  # helper cleanup cannot manufacture a false contention advisory.
+  if [ "$rc" -eq 124 ]; then
+    _fm_lock_deadline_verdict "$lockdir"
+    return
+  fi
+  # The helper failed before its deadline; give ordinary stale-owner recovery
+  # one final non-blocking chance before reporting that failure.
   if fm_lock_try_acquire "$lockdir"; then
     return 0
-  fi
-  if [ "$rc" -eq 124 ]; then
-    owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-    case "$owner_pid" in
-      ''|*[!0-9]*|0) ;;
-      *)
-        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
-          FM_LOCK_HELD_PID=$owner_pid
-          return 124
-        fi
-        ;;
-    esac
-    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
-    FM_LOCK_HELD_PID=
-    return 1
   fi
   return "$rc"
 }
