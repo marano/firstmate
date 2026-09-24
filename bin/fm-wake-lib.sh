@@ -695,29 +695,26 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
-# Take a recovery-marker lock, waiting without limit unless a bound in whole
-# seconds is given. The watcher's exit path passes one so a live process wedged
-# on this lock cannot keep the exiting watcher alive holding its singleton.
-_fm_recovery_marker_lock_acquire() {  # <lock> [bound-seconds]
-  if [ -n "${2:-}" ]; then
-    fm_lock_acquire_wait_bounded "$1" "$2"
-  else
-    fm_lock_acquire_wait "$1"
-  fi
-}
-
 # Preserve a pending or announced episode's generation across downtime
 # republication so its outstanding acknowledgement remains usable, and keep an
 # already-announced generation announced so it cannot be re-presented until a
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
-_fm_recovery_marker_publish() {  # <marker> [kind] [lock-bound-seconds]
-  local marker=$1 kind=${2:-downtime} bound=${3:-} lock saved_token generation='' status=pending
+_fm_recovery_marker_publish() {
+  local marker=$1 kind=${2:-downtime} lock rc
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  _fm_recovery_marker_lock_acquire "$lock" "$bound" || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  rc=0
+  _fm_recovery_marker_publish_locked "$marker" "$kind" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+# The publish itself, for a caller already holding the marker's lock.
+_fm_recovery_marker_publish_locked() {  # <marker> <kind>
+  local marker=$1 kind=$2 saved_token generation='' status=pending
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
-    fm_lock_release "$lock"
     return 1
   fi
   if [ "$kind" = downtime ]; then
@@ -739,11 +736,7 @@ _fm_recovery_marker_publish() {  # <marker> [kind] [lock-bound-seconds]
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
   fi
-  if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
-    fm_lock_release "$lock"
-    return 1
-  fi
-  fm_lock_release "$lock"
+  _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"
 }
 
 _fm_recovery_marker_begin_handling() {
@@ -934,13 +927,30 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      # The bounded acquire lives only in these release-lock transitions:
+      # reaching it from _fm_recovery_marker_publish (which fm_lock_try_acquire
+      # calls) would make ShellCheck's analysis of every sourcing root ~3x costlier.
+      if [ -z "$bound" ]; then
+        _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      else
+        local lock="${marker}.lock"
+        fm_lock_acquire_wait_bounded "$lock" "$bound" || return 1
+        if ! _fm_recovery_marker_publish_locked "$marker" "${value:-downtime}"; then
+          fm_lock_release "$lock"
+          return 1
+        fi
+        fm_lock_release "$lock"
+      fi
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      _fm_recovery_marker_lock_acquire "$lock" "$bound" || return 1
+      if [ -z "$bound" ]; then
+        fm_lock_acquire_wait "$lock" || return 1
+      else
+        fm_lock_acquire_wait_bounded "$lock" "$bound" || return 1
+      fi
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
