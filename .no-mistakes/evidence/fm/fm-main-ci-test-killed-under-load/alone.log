@@ -1,0 +1,11 @@
+ok - arm registers a watch keyed on the merge commit that keeps supervision required
+ok - an unmerged pull request arms nothing and says so without failing
+ok - a red run of the merge commit wakes once and retires the watch
+ok - an all-green run of the merge commit retires silently
+ok - a later push to main does not mask the merge commit's red run
+ok - a run still in progress, or an unreadable list, stays armed without waking
+ok - no run within the window wakes once and retires the watch
+ok - a run still open when the window closes wakes once and retires the watch
+ok - the watcher delivers a red main CI run as one queued check wake
+ok - the watcher delivers the red from a check slowed by machine load
+rc=0

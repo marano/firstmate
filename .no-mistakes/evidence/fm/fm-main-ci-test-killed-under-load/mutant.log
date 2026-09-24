@@ -1,0 +1,11 @@
+ok - arm registers a watch keyed on the merge commit that keeps supervision required
+ok - an unmerged pull request arms nothing and says so without failing
+ok - a red run of the merge commit wakes once and retires the watch
+ok - an all-green run of the merge commit retires silently
+ok - a later push to main does not mask the merge commit's red run
+ok - a run still in progress, or an unreadable list, stays armed without waking
+ok - no run within the window wakes once and retires the watch
+ok - a run still open when the window closes wakes once and retires the watch
+ok - the watcher delivers a red main CI run as one queued check wake
+not ok - watcher-slow: watcher did not exit for the red main CI wake: timed out: still running when its wait budget ran out after 7s, then terminated; watcher stderr: /Users/marano/.no-mistakes/worktrees/2d7095a62a33/01M38PB4AAAXTRTNG3AT9ASSY8/bin/fm-watch.sh: line 2217: 11026 Killed: 9               ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2> /dev/null 
+rc=1
