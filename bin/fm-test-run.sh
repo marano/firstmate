@@ -936,12 +936,10 @@ tests/fm-claude-stop-autoarm.test.sh	cost:44392
 tests/fm-control-relaunch.test.sh	cost:106513
 tests/fm-control.test.sh	cost:37225
 tests/fm-crew-state.test.sh	cost:43247
-tests/fm-cursor-harness.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
 tests/fm-cursor-primary.test.sh	cost:65399
 tests/fm-daemon.test.sh	cost:46372
 tests/fm-fleet-sync.test.sh	cost:64518
 tests/fm-harness-liveness-drift-live-e2e.test.sh	cost:66361
-tests/fm-harness-precedence.test.sh	incompat:fakes a process name by copying the interpreter; macOS SIGKILLs a copied Apple-signed /bin/bash so the faked process never runs (detection itself verified working)
 tests/fm-home-summary-refresh.test.sh	cost:42611
 tests/fm-inactive-reconcile.test.sh	cost:41680
 tests/fm-lint.test.sh	cost:156636
