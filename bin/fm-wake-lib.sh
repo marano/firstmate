@@ -519,27 +519,29 @@ fm_lock_discard_owner() {
 # directory for the life of the machine. This is the same class of residue as a
 # lock left by a dead holder, and it is collected on the same liveness test.
 #
-# A live owner is never touched. The directory the lock currently links is
-# skipped by name, and one whose recorded pid is still alive belongs to a
-# process that is mid-acquire, which reaping would fail for no reason. One with
-# no pid recorded yet is in the same half-created state the lock itself can be
-# in between its link and its pid record, so it gets exactly that grace.
+# A live owner is never touched. One whose recorded pid is still alive belongs
+# to a process that is mid-acquire, which reaping would fail for no reason. One
+# with no pid recorded yet is in the same half-created state the lock itself can
+# be in between its link and its pid record, so it gets exactly that grace.
+#
+# The directory the lock links is skipped too, and that is decided after the
+# pid read, never from a look taken before the scan. A bounded acquire's helper
+# publishes the lock, hands its owner directory to the waiting caller and exits,
+# so a pid read before that handoff names a dead process for a lock that is
+# still held. Judged against an earlier look at the link, that collected the
+# caller's live owner directory and left its lock dangling. Only the process
+# that minted an owner directory ever links it, before any handoff, so once that
+# process is gone a link seen now is final.
 fm_lock_reap_stray_owners() {  # <lockdir>
-  local lockdir=$1 linked='' entry pid
-  if [ -L "$lockdir" ]; then
-    linked=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-  fi
-  linked=${linked##*/}
+  local lockdir=$1 entry pid
   for entry in "$lockdir".owner.*; do
     [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-    if [ -n "$linked" ] && [ "${entry##*/}" = "$linked" ]; then
-      continue
-    fi
     pid=$(cat "$entry/pid" 2>/dev/null || true)
     case "$pid" in
       ''|*[!0-9]*) fm_lock_mid_acquire_is_fresh "$entry" '' && continue ;;
       *) fm_pid_alive "$pid" && continue ;;
     esac
+    fm_lock_links_to_owner "$lockdir" "$entry" && continue
     fm_lock_clean_known_files "$entry"
     rmdir "$entry" 2>/dev/null || true
   done
