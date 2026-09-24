@@ -2591,6 +2591,21 @@ if ! fm_procevent_launch_confirm_seconds >/dev/null; then
   exit 1
 fi
 
+# The lock below is claimed before the recovery-marker transitions that follow
+# it, and its release trap is only installed after them. A HUP, INT, or TERM in
+# that window took the default disposition and killed this watcher holding the
+# lock, leaving the evidence of a crash that never happened for the next watcher
+# to recover. A bounded checkpoint's deadline lands there whenever load slows
+# startup, so defer such a signal until the release trap is armed, then honor it.
+WATCHER_SIGNAL_PENDING=0
+trap 'WATCHER_SIGNAL_PENDING=1' HUP INT TERM
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+# Set before the release trap so a signal honored the moment it is armed still
+# finds the lock this watcher owns.
+WATCHER_PID=${BASHPID:-$$}
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -2715,10 +2730,7 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
+[ "$WATCHER_SIGNAL_PENDING" -eq 0 ] || exit 1
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
