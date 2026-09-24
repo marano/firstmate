@@ -1979,7 +1979,7 @@ test_first_dispatch_of_a_held_queued_item_is_still_refused() {
   tasks-axi hold rl44 --reason "do not merge until the infra apply lands" --kind captain \
     --file "$dir/home/data/backlog.md" >/dev/null
 
-  out=$(run_spawn "$dir" rl44 "$dir/proj" --mode direct-PR --yolo off) || rc=$?
+  out=$(run_spawn "$dir" rl44 "$dir/proj" --harness claude --mode direct-PR --yolo off) || rc=$?
   expect_code 1 "$rc" "a first dispatch of a held item must be refused"$'\n'"$out"
   assert_contains "$out" "is not dispatchable in state" "the refusal should name the dispatch gate"
   pass "first dispatch of a held queued item is still refused"
