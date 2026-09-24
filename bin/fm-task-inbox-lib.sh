@@ -470,7 +470,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pan
       # cleared, and only on the caller's positive idle assertion. Every other
       # pane state - busy, unknown, unasserted - defers exactly as before.
       [ "$pane_state" = idle ] || return 1
-      case "$(fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 2>/dev/null || printf 'not-own')" in
+      case "$(fm_backend_resubmit_own_text "$backend" "$target" "$line" 1 0.4 || printf 'not-own')" in
         empty) return 0 ;;
         not-own) return 1 ;;
         pending) return 5 ;;
@@ -483,7 +483,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [pan
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label"); then
     return 2
   fi
   # The verdict is never delivery proof. Beyond a failed keystroke, only an

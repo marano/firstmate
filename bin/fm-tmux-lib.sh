@@ -386,7 +386,7 @@ fm_tmux_composer_held_text_var() {  # <out-varname> <target> <text>
 # conversion needs the idle baseline read here. Never retypes and never clears.
 fm_tmux_resubmit_own_text() {  # <target> <text> <retries> <enter-sleep>
   local target=$1 text=$2 retries=$3 sleep_s=$4 baseline_idle=''
-  fm_tmux_pane_input_ready "$target" || { printf 'not-own'; return 0; }
+  fm_tmux_pane_input_ready "$target" || { printf 'send-failed'; return 0; }
   if ! fm_tmux_composer_holds_text "$target" "$text"; then
     printf 'not-own'
     return 0
