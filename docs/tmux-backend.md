@@ -112,6 +112,11 @@ Typed content can impersonate structure, so a composer holding the caller's own 
 Its callers are the away daemon, for its own digest, and the steering-inbox re-ring ladder, for a doorbell an idle composer swallowed (`bin/fm-task-inbox-lib.sh`); both act only on that byte-identity proof, so neither can press Enter on content it did not type.
 `tests/fm-afk-inject-e2e.test.sh` (Scenario E), `tests/fm-composer-lib.test.sh`, and `tests/fm-task-inbox.test.sh` cover it, and the live composer guard proves it on a real Claude composer.
 
+A pane left in tmux copy mode (or any pane mode) routes every key to that mode, so typed input would be swallowed while the agent sits idle.
+Before typing, the send primitives and both submit cores call `fm_tmux_pane_input_ready` (`bin/fm-tmux-lib.sh`), which reads `#{pane_in_mode}` and leaves the mode with `send-keys -X cancel` only when no attached client had input within `FM_TMUX_COPY_MODE_IDLE_SECS`; otherwise it sends nothing and prints the exact cause on stderr.
+The doorbell ring in `fm-send.sh` is bounded by `FM_SEND_RING_BUDGET` through `fm_run_bash_timeout`, which also honours SIGTERM, so a pane that never answers cannot hold the caller; the watcher re-rings from the durable record.
+`tests/fm-backend-tmux-smoke.test.sh` and `tests/fm-send-inbox.test.sh` cover a pane put into copy mode.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
