@@ -252,6 +252,27 @@ assert_absent "$PARENT/data/handoff/ios.outbox.md" "confirmed retry did not clea
   || fail "receipt retry duplicated ios-b"
 pass "re-delivery after unknown completion converges without duplication"
 
+# A handoff whose every key is already staged in the outbox has nothing to move,
+# so the staging step iterates an empty array. Stock Bash 3.2 aborts that
+# expansion under set -u, which surfaced as a dead handoff instead of the
+# recovery it is meant to be.
+write_backlog '- [ ] ios-staged - staged before a dropped receipt (repo: alpha)'
+FM_FAKE_SSH_MODE=after-receive handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios ios-staged \
+  > "$TMP_ROOT/staged-first.out" 2>&1 && fail "handoff claimed success after ambiguous remote receipt"
+assert_present "$PARENT/data/handoff/ios.outbox.md" "ambiguous handoff lost its durable outbox"
+assert_no_grep 'ios-staged' "$PARENT/data/backlog.md" "ambiguous handoff left ios-staged dispatchable in the primary backlog"
+rc=0
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios ios-staged > "$TMP_ROOT/staged-retry.out" 2>&1 || rc=$?
+assert_not_contains "$(cat "$TMP_ROOT/staged-retry.out")" 'unbound variable' \
+  "a handoff with every key already staged aborted on an empty array"
+[ "$rc" -eq 0 ] || fail "handoff of already-staged keys failed: $(cat "$TMP_ROOT/staged-retry.out")"
+assert_contains "$(cat "$TMP_ROOT/staged-retry.out")" 'already staged (recovered): ios-staged' \
+  "handoff of already-staged keys did not report the recovery"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" "recovered handoff left its outbox pending"
+[ "$(grep -cF -- '- [ ] ios-staged' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "recovered handoff did not deliver ios-staged exactly once"
+pass "a handoff whose keys are all already staged recovers without an empty-array abort"
+
 # A dropped transfer can leave a complete atomically published scratch file but
 # cannot apply half a backlog mutation. The next explicit recovery overwrites
 # that scratch and receives it normally.

@@ -729,6 +729,120 @@ test_turn_ended_churning_pane_absorbed() {
   pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
 }
 
+# The three cases below drive the same churn-deferral bookkeeping through the
+# paths where one of its arrays is empty. Stock Bash 3.2 treats expanding an
+# empty array under set -u as an unbound variable and kills the watcher, so each
+# case is only meaningful on that shell (the stock-bash lane) and reds by name
+# there: the watcher exits with "unbound variable" instead of absorbing or
+# surfacing the wake.
+
+# A deferral window already open from an earlier poll leaves no key to create, so
+# the create pass iterates an empty array. This is every poll after the first.
+test_turn_ended_open_deferral_window_is_renewed_without_new_keys() {
+  local dir state fakebin out err capture_file window key pid marker_before
+  dir=$(make_case turn-ended-open-window); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
+  window="test:fm-codexwindow"
+  : > "$state/codexwindow.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexwindow.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  marker_before=$(date +%s)
+  printf '%s' "$marker_before" > "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a churning turn-end inside an already open deferral window was not absorbed: $(cat "$err")"; }
+  ! grep -Fq 'unbound variable' "$err" || { reap "$pid"; fail "the open-window churn absorb hit an unbound array: $(cat "$err")"; }
+  [ "$(cat "$state/.churn-since-$key")" = "$marker_before" ] \
+    || { reap "$pid"; fail "an open deferral window was restarted instead of kept"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a churning turn-end inside an already open deferral window is absorbed without new keys"
+}
+
+# The rollback after a failed reset walks the keys this poll created. When the
+# window was already open none were, and that walk is over an empty array.
+test_turn_ended_churn_reset_failure_with_no_created_keys_surfaces() {
+  local dir state fakebin out err capture_file window key pid
+  dir=$(make_case turn-ended-reset-fails); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
+  window="test:fm-codexreset"
+  : > "$state/codexreset.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexreset.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  date +%s > "$state/.churn-since-$key"
+  # rm -f cannot remove a non-empty directory, so the reset of the prior stale
+  # classification fails after the window check has already passed.
+  mkdir -p "$state/.stale-$key"
+  : > "$state/.stale-$key/keep"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher died instead of surfacing a turn-end whose churn reset failed: $(cat "$err")"; }
+  ! grep -Fq 'unbound variable' "$err" || fail "the failed churn reset hit an unbound array: $(cat "$err")"
+  grep -F "signal: $state/codexreset.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not surface the turn-end whose churn reset failed: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a failed churn reset with no keys created this poll surfaces the wake instead of aborting"
+}
+
+# Another writer can open a deferral window between this poll noticing it was
+# missing and creating it. The rollback then walks an empty created list. A fake
+# cat plays the other writer at the one point between those two passes where a
+# second task's window is read.
+test_turn_ended_churn_lost_create_race_with_no_created_keys_surfaces() {
+  local dir state fakebin out err capture_file first_window second_window first_key second_key pid real_cat
+  dir=$(make_case turn-ended-create-race); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
+  first_window="test:fm-aracea"; second_window="test:fm-araceb"
+  : > "$state/aracea.turn-ended"
+  : > "$state/araceb.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$first_window" > "$state/aracea.meta"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$second_window" > "$state/araceb.meta"
+  printf 'both tasks rendered after the prior poll' > "$capture_file"
+  first_key=$(printf '%s' "$first_window" | tr ':/.' '___')
+  second_key=$(printf '%s' "$second_window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'previous render')" > "$state/.hash-$first_key"
+  printf '%s' "$(hash_text 'previous render')" > "$state/.hash-$second_key"
+  printf '0\n' > "$state/.count-$first_key"
+  printf '0\n' > "$state/.count-$second_key"
+  date +%s > "$state/.churn-since-$second_key"
+  real_cat=$(command -v cat)
+  cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "$state/.churn-since-$second_key" ] && [ ! -e "$state/.churn-since-$first_key" ]; then
+  date +%s > "$state/.churn-since-$first_key"
+fi
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$fakebin/cat"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="$(printf 'fm-aracea\nfm-araceb')" \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher died instead of surfacing a turn-end that lost the window-create race: $(cat "$err")"; }
+  ! grep -Fq 'unbound variable' "$err" || fail "the lost create race hit an unbound array: $(cat "$err")"
+  grep -F "signal: " "$out" >/dev/null \
+    || fail "watcher did not surface the turn-end that lost the window-create race: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a lost deferral-window create race with no keys created this poll surfaces the wake instead of aborting"
+}
+
 test_turn_ended_churn_resets_prior_stale_classification() {
   local dir state fakebin out capture_file window key old_hash active_hash pid i
   dir=$(make_case turn-ended-churn-resets-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2931,6 +3045,9 @@ test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
+test_turn_ended_open_deferral_window_is_renewed_without_new_keys
+test_turn_ended_churn_reset_failure_with_no_created_keys_surfaces
+test_turn_ended_churn_lost_create_race_with_no_created_keys_surfaces
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_still_pane_surfaced
