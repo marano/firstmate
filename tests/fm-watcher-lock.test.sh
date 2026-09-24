@@ -591,6 +591,328 @@ test_watch_restart_attaches_to_healthy_peer() {
   pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
+# Start a node process that ignores TERM, recording its receipt, and write this
+# home's lock naming it with a matching identity, so it passes every restart
+# check a real watcher would. Sets TERM_PEER to its pid.
+TERM_PEER=
+start_identity_matched_term_resistant_peer() {  # <dir> <ready-file> <term-file>
+  local dir=$1 ready=$2 term=$3 state identity i
+  state="$dir/state"
+  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => fs.writeFileSync(process.argv[2], "term\n")); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$ready" "$term" &
+  TERM_PEER=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$ready" ]; then
+    kill -KILL "$TERM_PEER" 2>/dev/null || true
+    wait "$TERM_PEER" 2>/dev/null || true
+    fail "TERM-resistant peer did not become ready"
+  fi
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$TERM_PEER") || {
+    kill -KILL "$TERM_PEER" 2>/dev/null || true
+    wait "$TERM_PEER" 2>/dev/null || true
+    fail "could not identify peer pid"
+  }
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$TERM_PEER" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+# At the default poll a healthy watcher spends most of each cycle in its poll
+# sleep, which defers the restart's TERM until the sleep ends. The restart must
+# wait that out and start its own watcher; attaching to the dying one ends in
+# FAILED once it exits, with no watcher left (mutant: the fixed five-second stop
+# wait). The holder's beacon stays fresh, so it is never killed either.
+test_watch_restart_waits_out_a_default_poll_sleep() {
+  local dir state fakebin out holder armpid status i asleep
+  dir=$(make_case restart-default-poll)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env -u FM_POLL "$WATCH" > "$dir/holder.out" 2>&1 &
+  holder=$!
+  # Synchronize on the holder being inside its terminal poll sleep, then give the
+  # TERM a second so it lands early in that sleep with well over the old
+  # five-second stop wait still to run.
+  i=0
+  asleep=
+  while [ "$i" -lt 300 ]; do
+    asleep=$(ps -Ao ppid=,command= 2>/dev/null | awk -v p="$holder" '$1 == p && $2 == "sleep" && $3 == "15" { print "yes"; exit }')
+    [ -n "$asleep" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ -z "$asleep" ] || [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$holder" ]; then
+    term_and_reap "$holder"
+    fail "default-poll watcher never reached its poll sleep holding the lock"
+  fi
+  sleep 1
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env -u FM_POLL "$WATCH_ARM" --restart > "$out" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 400
+  status=$?
+  if is_live_non_zombie "$holder"; then
+    kill -KILL "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "restart left the TERM'd default-poll watcher running: $(cat "$out")"
+  fi
+  wait "$holder" 2>/dev/null || true
+  ! grep -qF 'watcher: attached' "$out" || fail "restart attached to the watcher it had just stopped: $(cat "$out")"
+  ! grep -qF 'watcher: FAILED' "$out" || fail "restart of a healthy default-poll watcher failed: $(cat "$out")"
+  [ "$status" -eq 0 ] || fail "restart of a healthy default-poll watcher exited $status: $(cat "$out")"
+  grep -qF 'check: rearm-resurface' "$out" || fail "restarted watcher did not surface the stop as downtime: $(cat "$out")"
+  ! grep -qF 'killed stale holder' "$out" || fail "restart killed a holder whose beacon was fresh: $(cat "$out")"
+  pass "watch restart waits out a default-poll sleep instead of attaching to the watcher it stopped"
+}
+
+# A live holder that survives TERM with a stale beacon is not supervising, and
+# made every arm and restart fail with no end. A plain arm still never signals
+# it (mutant: escalate in arm mode); --restart kills that exact pid after its
+# TERM and converges on a fresh watcher that surfaces the downtime (mutant: no
+# KILL escalation).
+test_watch_restart_replaces_a_stale_term_resistant_holder() {
+  local dir state fakebin out err peer_ready peer_term peer armpid status rc
+  dir=$(make_case restart-stale-holder)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  err="$dir/restart.err"
+  peer_ready="$dir/peer.ready"
+  peer_term="$dir/peer.term"
+  start_identity_matched_term_resistant_peer "$dir" "$peer_ready" "$peer_term"
+  peer=$TERM_PEER
+  touch -t 200001010000 "$state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$dir/arm.out" 2> "$dir/arm.err" &
+  armpid=$!
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  if ! is_live_non_zombie "$peer" || [ -e "$peer_term" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "a plain arm signaled the stale holder: $(cat "$dir/arm.out" "$dir/arm.err")"
+  fi
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || {
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "a plain arm behind a stale holder did not fail (status $status)"
+  }
+  grep -qF 'watcher: FAILED' "$dir/arm.out" || {
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "a plain arm behind a stale holder printed no typed failure: $(cat "$dir/arm.out")"
+  }
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$out" 2> "$err" &
+  armpid=$!
+  wait_for_exit "$armpid" 300
+  status=$?
+  if is_live_non_zombie "$peer"; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "restart left the stale TERM-resistant holder alive: $(cat "$out" "$err")"
+  fi
+  rc=0
+  wait "$peer" 2>/dev/null || rc=$?
+  [ "$rc" -eq 137 ] || fail "stale holder did not end on KILL (status $rc)"
+  [ -e "$peer_term" ] || fail "restart killed the stale holder without sending TERM first"
+  grep -qF "watcher: killed stale holder pid=$peer " "$err" || fail "restart did not name the stale holder it killed: $(cat "$err")"
+  [ "$status" -eq 0 ] || fail "restart did not converge after replacing the stale holder (status $status): $(cat "$out" "$err")"
+  ! grep -qF 'watcher: FAILED' "$out" || fail "restart reported FAILED after replacing the stale holder: $(cat "$out")"
+  grep -qF 'check: rearm-resurface' "$out" || fail "replacement watcher did not surface the downtime: $(cat "$out")"
+  pass "watch restart kills a stale TERM-resistant holder by its pid and converges, while a plain arm leaves it alone"
+}
+
+# The kill decision is re-read after the stop wait. A TERM-resistant holder
+# whose beacon was stale when the restart began but beat during the wait is
+# fresh, so the restart attaches to it and never kills it (mutant: judge
+# staleness once, before the TERM).
+test_watch_restart_spares_a_holder_that_beats_during_the_stop_wait() {
+  local dir state fakebin out err peer_ready peer_term peer armpid status i
+  dir=$(make_case restart-fresh-at-kill)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  err="$dir/restart.err"
+  peer_ready="$dir/peer.ready"
+  peer_term="$dir/peer.term"
+  start_identity_matched_term_resistant_peer "$dir" "$peer_ready" "$peer_term"
+  peer=$TERM_PEER
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" --restart > "$out" 2> "$err" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$peer_term" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$peer_term" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    term_and_reap "$armpid"
+    fail "restart never sent TERM to the recorded holder"
+  fi
+  touch "$state/.last-watcher-beat"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
+    is_live_non_zombie "$peer" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! is_live_non_zombie "$peer"; then
+    wait "$peer" 2>/dev/null || true
+    term_and_reap "$armpid"
+    fail "restart killed a holder whose beacon was fresh again at kill time: $(cat "$out" "$err")"
+  fi
+  grep -qF "watcher: attached pid=$peer" "$out" || {
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    term_and_reap "$armpid"
+    fail "restart did not attach to the holder that beat again: $(cat "$out" "$err")"
+  }
+  ! grep -qF 'killed stale holder' "$err" || fail "restart reported killing a fresh holder: $(cat "$err")"
+  kill -KILL "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached restart did not fail after its holder ended without a successor (status $status)"
+  pass "watch restart re-reads the beacon at kill time and spares a holder that beat during the stop wait"
+}
+
+# A watcher polling every 400s legitimately carries a beacon up to that old, and
+# its own stale grace grows with the poll. The arm must judge freshness the same
+# way, so it attaches to a 350s-old beacon the watcher child calls live instead
+# of failing between the two definitions (mutant: the arm's fixed 300s default).
+test_arm_grace_follows_the_poll_cadence() {
+  local dir state fakebin armout peer identity armpid status i
+  dir=$(make_case arm-poll-derived-grace)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "could not identify peer pid"
+  }
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  perl -e 'my $t = time - 350; utime($t, $t, $ARGV[0]) or die "utime: $!\n"' "$state/.last-watcher-beat" \
+    || fail "could not age the beacon"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=400 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    env -u FM_GUARD_GRACE -u FM_WATCHER_STALE_GRACE "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    term_and_reap "$armpid"
+    fail "arm judged a beacon inside the poll-derived grace stale: $(cat "$armout")"
+  }
+  is_live_non_zombie "$peer" || fail "plain arm signaled the long-poll holder"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached long-poll arm did not fail after its holder ended (status $status)"
+  pass "arm derives its stale grace from the poll cadence exactly as the watcher does"
+}
+
+# The exit path publishes the downtime marker before it releases the singleton
+# lock. With another live process wedged on the marker lock, one TERM must still
+# end the watcher within its bound, leaving the singleton lock behind as
+# dead-pid evidence that a successor reclaims and surfaces once the marker lock
+# frees (mutant: the unbounded marker-lock wait).
+test_watcher_exit_bounds_its_recovery_marker_lock_wait() {
+  local dir state fakebin err holder watcher armout armpid i rc
+  dir=$(make_case exit-marker-lock-bound)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  err="$dir/watch.err"
+  armout="$dir/successor.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_WATCHER_EXIT_LOCK_TIMEOUT=2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/watch.out" 2> "$err" &
+  watcher=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$watcher" ]; then
+    term_and_reap "$watcher"
+    fail "watcher did not take its singleton lock"
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_acquire_wait "$2" || exit 1; : > "$3"; exec sleep 600' \
+    _ "$LIB" "$state/.watcher-down.lock" "$dir/holder.ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/holder.ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/holder.ready" ]; then
+    kill -KILL "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    term_and_reap "$watcher"
+    fail "test could not hold the recovery-marker lock"
+  fi
+
+  kill -TERM "$watcher" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 150 ] && is_live_non_zombie "$watcher"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$watcher"; then
+    kill -KILL "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    term_and_reap "$watcher"
+    fail "one TERM left the watcher alive in its exit path while the marker lock was held"
+  fi
+  rc=0
+  wait "$watcher" 2>/dev/null || rc=$?
+  is_live_non_zombie "$holder" || fail "the marker-lock holder did not survive the watcher's bounded exit"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "watcher exited 0 after failing to publish its downtime"
+  grep -qF 'recovery state could not be persisted; retaining stale lock evidence' "$err" \
+    || fail "bounded exit did not report the unpersisted recovery state: $(cat "$err")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+    || fail "bounded exit released the singleton without publishing its downtime"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 300
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "successor did not reclaim the retained singleton (status $rc): $(cat "$armout")"
+  grep -qF 'check: rearm-resurface' "$armout" || fail "successor did not surface the downtime it reclaimed: $(cat "$armout")"
+  pass "one TERM ends the watcher within its marker-lock bound and a successor recovers the retained lock"
+}
+
 test_watcher_self_evicts_on_lock_takeover() {
   local dir state fakebin out pid i lock_pid
   dir=$(make_case self-evict)
@@ -1283,6 +1605,11 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
+test_watch_restart_waits_out_a_default_poll_sleep
+test_watch_restart_replaces_a_stale_term_resistant_holder
+test_watch_restart_spares_a_holder_that_beats_during_the_stop_wait
+test_watcher_exit_bounds_its_recovery_marker_lock_wait
+test_arm_grace_follows_the_poll_cadence
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher

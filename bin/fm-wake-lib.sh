@@ -695,16 +695,27 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
+# Take a recovery-marker lock, waiting without limit unless a bound in whole
+# seconds is given. The watcher's exit path passes one so a live process wedged
+# on this lock cannot keep the exiting watcher alive holding its singleton.
+_fm_recovery_marker_lock_acquire() {  # <lock> [bound-seconds]
+  if [ -n "${2:-}" ]; then
+    fm_lock_acquire_wait_bounded "$1" "$2"
+  else
+    fm_lock_acquire_wait "$1"
+  fi
+}
+
 # Preserve a pending or announced episode's generation across downtime
 # republication so its outstanding acknowledgement remains usable, and keep an
 # already-announced generation announced so it cannot be re-presented until a
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
-_fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
+_fm_recovery_marker_publish() {  # <marker> [kind] [lock-bound-seconds]
+  local marker=$1 kind=${2:-downtime} bound=${3:-} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  _fm_recovery_marker_lock_acquire "$lock" "$bound" || return 1
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
     return 1
@@ -903,8 +914,11 @@ _fm_recovery_marker_reopen_announced() {
   fm_lock_release "$lock"
 }
 
+# fm_recovery_transition <marker> <action> [target] [value] [lock-bound-seconds]
+# The release-lock actions accept a lock bound; when it runs out they return 1
+# and leave <target> held, so the recovery evidence is never cleared unpublished.
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
   case "$action" in
     publish)
       _fm_recovery_marker_publish "$marker" "${target:-downtime}"
@@ -920,13 +934,13 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      fm_lock_acquire_wait "$lock" || return 1
+      _fm_recovery_marker_lock_acquire "$lock" "$bound" || return 1
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
@@ -1151,9 +1165,10 @@ _fm_lock_deadline_verdict() {  # <lockdir>
 # still held: FM_LOCK_HELD_PID names the live holder, or is empty when the
 # holder is an acquirer that has not recorded its pid yet. It returns 1 when the
 # lock stays unacquirable with no holder at all (_fm_lock_deadline_verdict).
-# Use it where a caller must refuse rather than block: wake presentation, and
-# the guarded remote link clear, whose whole contract is to return a
-# reconciliation refusal instead of wedging an unattended close.
+# Use it where a caller must refuse rather than block: wake presentation, the
+# watcher's exit-path recovery transition, and the guarded remote link clear,
+# whose whole contract is to return a reconciliation refusal instead of wedging
+# an unattended close.
 # Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid
