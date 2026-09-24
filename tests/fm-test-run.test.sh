@@ -1564,7 +1564,7 @@ test_portable_serial_hints_refresh_in_place() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-refresh.XXXXXX")
   # Measurements must cover at least half the table or the refresh refuses, so
   # feed every member except the triage script plus one new script.
-  "$RUNNER" --lane portable-serial --list | grep -vxF tests/fm-watch-triage.test.sh | python3 -c '
+  "$RUNNER" --lane portable-serial --list | grep -vxF tests/fm-watch-triage-absorb.test.sh | python3 -c '
 import json, sys
 rows = [{"path": p, "duration_ms": 5000, "exit": 0} for p in sys.stdin.read().split()]
 rows.append({"path": "tests/zz-refresh.test.sh", "duration_ms": 77777, "exit": 0})
@@ -1574,7 +1574,7 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(sys.
   "$tmp/fm-test-run.sh" --refresh-serial-hints "$tmp/t.json" >/dev/null || fail "refresh must succeed"
   assert_contains "$(FM_PORTABLE_SERIAL_HINTS_FILE="" "$tmp/fm-test-run.sh" --derive-serial-hints "$tmp/t.json")" "tests/zz-refresh.test.sh 77777" "derive"
   grep -qx 'tests/zz-refresh.test.sh 77777' "$tmp/fm-test-run.sh" || fail "refresh must write the measured hint into the table"
-  ! grep -q '^tests/fm-watch-triage.test.sh [0-9]*$' "$tmp/fm-test-run.sh" || fail "refresh must replace the whole table"
+  ! grep -q '^tests/fm-watch-triage-absorb.test.sh [0-9]*$' "$tmp/fm-test-run.sh" || fail "refresh must replace the whole table"
   rm -rf "$tmp"
   pass "hint refresh rewrites the table from measured timings"
 }

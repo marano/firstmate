@@ -106,8 +106,7 @@ A long run yielding between phases is the shape that wins, and `bin/fm-test-run.
 What the measurements show is that those yields were being defeated from outside, by an outer hold that turned every one of them into a nested pass-through.
 So the change makes the existing yielding effective rather than adding a mechanism beside it, and no second locking primitive is introduced.
 
-## What is still unbounded
+## What was still unbounded
 
-One hold remains long by itself: `tests/fm-watch-triage.test.sh` is a single script of 238 cases, 709.9 s on CI and over 13 minutes measured locally, so it is one legitimate hold and no wrap rule reduces it.
-It is 11% of the portable-serial lane's total time and 2.3x the next longest script.
-Splitting it into units the runner can yield between is the remaining step, and it changes a test file rather than the lock.
+The one script that was a single long hold, `tests/fm-watch-triage.test.sh` (709.9 s on CI, 139 cases), has been split into `tests/fm-watch-triage-*.test.sh` sharing `tests/fm-watch-triage-lib.sh`.
+The longest of those parts is about 7 minutes locally, so a targeted run of the area a change touches finishes well inside the no-mistakes test step's limit, and the runner can yield the build lock between parts.

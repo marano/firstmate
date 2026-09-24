@@ -287,8 +287,9 @@ PER_SCRIPT_TIMEOUT_SECS=
 PER_SCRIPT_TIMEOUT_GIVEN=0
 # Bound applied to every executing mode whose caller names none, derived from
 # measured healthy runtimes with margin rather than picked. The slowest behavior
-# script is tests/fm-watch-triage.test.sh: 588-723s across 28 CI serial runs on
-# 2026-09-19, and 788s on a loaded local machine. 1800s leaves more than 2x
+# script was tests/fm-watch-triage.test.sh (since split into
+# tests/fm-watch-triage-*.test.sh, whose total is unchanged): 588-723s across 28
+# CI serial runs on 2026-09-19, and 788s on a loaded local machine. 1800s leaves more than 2x
 # headroom over that, so it cannot red-flag a healthy slow script, and it still
 # ends a stall that would otherwise run until someone notices - a blocked exec
 # once sat at 0% CPU for 18 minutes with nothing on its output. It is a guard,
@@ -484,7 +485,7 @@ family_for_basename() {
     fm-tool-update-check.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
-    fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
+    fm-watch-triage-absorb.test.sh|fm-watch-triage-stale.test.sh|fm-watch-triage-declared.test.sh|fm-watch-triage-busy.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -977,7 +978,10 @@ tests/fm-wake-drain-outcome-backstop.test.sh	cost:33734
 tests/fm-wake-queue.test.sh	cost:79740
 tests/fm-watch-arm.test.sh	cost:72925
 tests/fm-watch-recovery-loop.test.sh	cost:60342
-tests/fm-watch-triage.test.sh	cost:240043
+tests/fm-watch-triage-absorb.test.sh	cost:52100
+tests/fm-watch-triage-busy.test.sh	cost:49300
+tests/fm-watch-triage-declared.test.sh	cost:38500
+tests/fm-watch-triage-stale.test.sh	cost:100200
 tests/fm-watcher-lock.test.sh	cost:53686
 tests/fm-x-mode.test.sh	cost:56141
 EOF
@@ -1262,7 +1266,10 @@ tests/fm-wake-queue.test.sh 105179
 tests/fm-watch-arm.test.sh 57320
 tests/fm-watch-checkpoint.test.sh 6751
 tests/fm-watch-recovery-loop.test.sh 59548
-tests/fm-watch-triage.test.sh 709869
+tests/fm-watch-triage-absorb.test.sh 154000
+tests/fm-watch-triage-busy.test.sh 146000
+tests/fm-watch-triage-declared.test.sh 114000
+tests/fm-watch-triage-stale.test.sh 296000
 tests/fm-watcher-lock.test.sh 95935
 EOF
 }

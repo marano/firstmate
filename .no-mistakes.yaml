@@ -33,8 +33,22 @@ document:
 commands:
   lint: 'bin/fm-lint.sh'
 
-# Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
-# The evidence is not committed to the feature or default branch.
+# Test-step guidance for the gate agent, as instructions rather than a pinned
+# command (commands.test stays absent, see above).
+# The watcher triage suite is split into tests/fm-watch-triage-*.test.sh so a
+# targeted run finishes in minutes; the whole set takes over 15 minutes and
+# has outrun the test step's time limit, which ends the step with no verdict.
 test:
+  instructions: |
+    CI owns broad regression coverage, so run only the tests the diff touches.
+    For a change to the watcher (bin/fm-watch.sh, bin/fm-classify-lib.sh and the
+    scripts they call), run only the tests/fm-watch-triage-*.test.sh files whose
+    area the diff touches, each as its own run, and never the whole set of them.
+    The areas are named in each file's header: absorb (classifier, absorb, runs), stale,
+    declared, busy, heartbeat (procevent, heartbeat, away mode).
+    Prefer the single most relevant file, and run a second only when the diff
+    clearly reaches its area.
+  # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
+  # The evidence is not committed to the feature or default branch.
   evidence:
     store_in_repo: true

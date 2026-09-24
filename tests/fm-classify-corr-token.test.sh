@@ -14,7 +14,7 @@
 #
 # Coverage is split by the interface each claim lives behind: the fold is driven
 # through the REAL bin/fm-wake-drain.sh, the classifier predicates through the
-# library's own sourced entry points (as tests/fm-watch-triage.test.sh does), and
+# library's own sourced entry points (as tests/fm-watch-triage-*.test.sh does), and
 # the token grammar itself is pinned against the REAL writers so this library's
 # second statement of the shape cannot drift from the one that owns it.
 set -u
