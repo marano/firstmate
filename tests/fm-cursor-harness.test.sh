@@ -210,8 +210,10 @@ test_cursor_marker_outranks_inherited_claudecode() {
   local tree_dir
   tree_dir="$TMP_ROOT/marker-ordering-trees"
   mkdir -p "$tree_dir"
-  cp "$(command -v bash)" "$tree_dir/cursor-agent"
-  cp "$(command -v bash)" "$tree_dir/claude"
+  # Symlinks, not copies: macOS SIGKILLs a copied Apple-signed bash, while a
+  # symlink names the process after the link and runs the system binary in place.
+  ln -sf "$(command -v bash)" "$tree_dir/cursor-agent"
+  ln -sf "$(command -v bash)" "$tree_dir/claude"
   out=$(env -u CLAUDECODE "$tree_dir/cursor-agent" -c \
     "r=\$(CURSOR_AGENT=1 \"$HARNESS\"); printf '%s' \"\$r\"")
   [ "$out" = cursor ] || fail "a real cursor-agent ancestor must detect cursor, got '$out'"
