@@ -1464,23 +1464,22 @@ expect_failure "unknown command" env FM_HOME="$H_RETIRE_RACE" "$HOST" retire-bin
 expect_failure "unknown command" env FM_HOME="$H_RETIRE_RACE" "$HOST" retire-transfer-locked org.example.retire-race --if-transfer-digest "$wrong_binding_digest" --if-binding-digest "$race_binding_digest"
 pass "public extension dispatch exposes no unlocked retirement entry"
 
-# The two retirement-worker fixtures below need the worker stopped while it
-# holds the lifecycle lock and before it has retired anything. The worker races
-# the poll that finds it, and a STOP aimed at the pid just read from the lock can
-# land after the worker's retirement: kill -STOP still succeeds on a worker that
-# is exiting or not yet reaped, and a successful STOP takes effect only once
-# every thread returns from the kernel, so a rename already under way can still
-# complete after the stopped worker was found holding the lock with its binding
-# enabled. The helper below rejects the plain late stop cheaply - the stopped
-# worker must still own the lock and the binding must still be enabled - and
-# otherwise lets the retirement finish so the attempt is repeated on a fresh
-# home. A rename still completing after that check cannot be seen in time, so
-# the lock-owner fixture also checks afterwards: a completed retirement leaves
-# its retired record, which registration never writes, and an attempt whose
-# worker left one proves nothing about lock recovery and is repeated too. Its
-# first attempt forces the late stop, holding the wrapper so the finished worker
-# stays unreaped and handing that worker over as if it had been caught in time,
-# so the after-the-fact check decides an attempt on every run.
+# The two retirement-worker fixtures below need the retirement worker stopped
+# while it holds the lifecycle lock and before it has retired the binding.
+# The race: the worker can finish retiring between the poll that reads its pid
+# from the lock and the STOP aimed at that pid. kill -STOP still succeeds on an
+# exiting or unreaped worker, and a rename already under way completes anyway.
+# Three defences:
+# 1. The helper accepts a stopped worker only while it still owns the lock and
+#    the binding file still exists; otherwise it resumes the worker and the
+#    attempt is repeated on a fresh home.
+# 2. Both fixtures also check afterwards: a completed retirement leaves a
+#    retired record, which registration never writes, so an attempt whose
+#    worker left one proves nothing about lock recovery and is repeated.
+# 3. The lock-owner fixture's first attempt passes "late": the helper holds the
+#    wrapper so the worker finishes retiring but stays unreaped, then hands that
+#    finished worker over as if it had been caught in time, so defence 2 is
+#    exercised on every run.
 lifecycle_stop_attempts=5
 lifecycle_late_forced=
 binding_retired() {
