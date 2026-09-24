@@ -38,9 +38,17 @@ _fm_wake_require_timeout() {
 
 # Pass a variable name to capture this frame's pid without forking it in $().
 # On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
+# Never as ${BASHPID:-$(...)}: Bash 5.2 parses that unused fallback on every
+# call, and it drops a trap still pending when it starts parsing a command
+# substitution (fixed in 5.3). Every lock operation runs this, so a starting
+# watcher lost the signal it had deferred until its release trap was armed.
 fm_current_pid() {  # [output-variable]
   local fm_pid
-  fm_pid=${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')} || return 1
+  if [ -n "${BASHPID:-}" ]; then
+    fm_pid=$BASHPID
+  else
+    fm_pid=$(exec sh -c 'printf "%s\n" "$PPID"') || return 1
+  fi
   case "$fm_pid" in ''|*[!0-9]*|0) return 1 ;; esac
   if [ "$#" -gt 0 ]; then
     printf -v "$1" '%s' "$fm_pid"

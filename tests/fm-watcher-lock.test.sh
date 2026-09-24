@@ -1552,7 +1552,7 @@ test_signal_during_startup_releases_watch_lock() {
   if is_live_non_zombie "$watcher"; then
     kill -KILL -- "-$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true
-    fail "watcher kept running after a signal deferred through startup"
+    fail "watcher kept running after a signal deferred through startup: $(cat "$out" 2>/dev/null)"
   fi
   rc=0
   wait "$watcher" || rc=$?
@@ -1561,6 +1561,59 @@ test_signal_during_startup_releases_watch_lock() {
   [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
     || fail "signal during watcher startup left the singleton lock behind ($(cat "$state/.watch.lock/pid" 2>/dev/null || echo no-pid))"
   pass "a signal during watcher startup is honored after the lock's release trap is armed"
+}
+
+# Bash 5.2 drops a trap that is still pending when the shell starts parsing a
+# command substitution (fixed in 5.3). The watcher records a signal deferred
+# through startup in a trap while its lock operations run, and every one of them
+# asks fm_current_pid for this shell's pid, so that probe must not parse one in
+# the calling shell. Each signal waits for its acknowledgement, so one dropped
+# trap fails the case (mutant: the ${BASHPID:-$(...)} probe).
+test_current_pid_probe_keeps_pending_traps() {
+  local dir spinner sent ack i rc
+  dir=$(make_case current-pid-traps)
+  # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
+  bash -c '
+    . "$1"
+    ack_file=$2/ack
+    handled=0
+    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1
+    : > "$2/ready"
+    while [ ! -e "$2/stop" ]; do
+      fm_current_pid pid || exit 3
+      [ "$pid" = "${BASHPID:-$pid}" ] || exit 4
+    done
+  ' _ "$LIB" "$dir" 2> "$dir/spinner.err" &
+  spinner=$!
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/ready" ] || { term_and_reap "$spinner"; fail "pid-probe spinner never started"; }
+
+  sent=0
+  ack=
+  while [ "$sent" -lt 100 ]; do
+    sent=$((sent + 1))
+    kill -USR1 "$spinner" 2>/dev/null || break
+    i=0
+    while [ "$i" -lt 300 ]; do
+      ack=
+      { read -r ack < "$dir/ack"; } 2>/dev/null
+      [ "$ack" = "$sent" ] && break
+      is_live_non_zombie "$spinner" || break
+      sleep 0.01
+      i=$((i + 1))
+    done
+    [ "$ack" = "$sent" ] || break
+  done
+  : > "$dir/stop"
+  rc=0
+  wait "$spinner" || rc=$?
+  [ "$ack" = 100 ] && [ "$rc" -eq 0 ] \
+    || fail "pid probe lost a pending trap: signal $sent acknowledged as '${ack:-none}', spinner status $rc: $(cat "$dir/spinner.err" 2>/dev/null)"
+  pass "the pid probe every lock operation runs keeps each pending trap"
 }
 
 test_msys_pid_identity_uses_proc() {
@@ -1591,6 +1644,7 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_signal_during_startup_releases_watch_lock
+test_current_pid_probe_keeps_pending_traps
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
