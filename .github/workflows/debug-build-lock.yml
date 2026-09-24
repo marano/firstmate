@@ -1,0 +1,48 @@
+name: debug-build-lock
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  trace:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [direct, runner, lane]
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: stock bash shim
+        run: |
+          shim="$RUNNER_TEMP/stock-bash-bin"; mkdir -p "$shim"; ln -sf /bin/bash "$shim/bash"; echo "$shim" >> "$GITHUB_PATH"
+      - name: tools
+        if: matrix.mode == 'lane'
+        run: |
+          set -euo pipefail
+          bin/fm-stock-bash-lane.sh --required-tools | bin/fm-install-pinned-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          npm install -g tasks-axi@0.2.5 >/dev/null
+          echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
+      - name: env
+        run: |
+          echo "TMPDIR=$TMPDIR RUNNER_TEMP=$RUNNER_TEMP"; command -v timeout gtimeout perl || true; bash --version | head -1; sysctl -n hw.ncpu; ps -Aww -o pid=,ppid=,pgid=,stat=,command= | head -80
+      - name: run
+        shell: /bin/bash {0}
+        env:
+          FM_DEBUG_REAP_DIR: ${{ runner.temp }}/dbg
+        run: |
+          mkdir -p "$FM_DEBUG_REAP_DIR"
+          case "${{ matrix.mode }}" in
+            direct) bash -x tests/fm-build-lock.test.sh > "$FM_DEBUG_REAP_DIR/direct.log" 2>&1; echo "rc=$?"; grep -c '^ok - ' "$FM_DEBUG_REAP_DIR/direct.log"; grep -v '^+' "$FM_DEBUG_REAP_DIR/direct.log" | head -100 ;;
+            runner) bin/fm-test-run.sh --per-script-timeout-secs 1000 tests/fm-build-lock.test.sh; echo "rc=$?" ;;
+            lane) bin/fm-stock-bash-lane.sh; echo "rc=$?" ;;
+          esac
+          ls -la "$FM_DEBUG_REAP_DIR"
+          for f in "$FM_DEBUG_REAP_DIR"/reap.* "$FM_DEBUG_REAP_DIR"/probe-fail.err; do [ -e "$f" ] || continue; echo "=== $f"; head -60 "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dbg-${{ matrix.mode }}
+          path: ${{ runner.temp }}/dbg

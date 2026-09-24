@@ -83,6 +83,12 @@ suite_processes() {
 
 reap_suite_processes() {
   local found=' ' pid round=0 fresh
+  if [ -n "${FM_DEBUG_REAP_DIR:-}" ]; then
+    local dbg="$FM_DEBUG_REAP_DIR/reap.$$.$(date +%s).$RANDOM"
+    { printf 'self=%s root=%s probe=%s\n' "$$" "$TMP_ROOT" "${FM_BUILD_LOCK_TEST_PROBE:-}"
+      printf '== suite_processes:\n'; suite_processes
+      printf '== ps:\n'; ps -Aww -o pid=,ppid=,pgid=,stat=,command= 2>&1; } > "$dbg" 2>&1
+  fi
   while [ "$round" -lt 20 ]; do
     fresh=0
     for pid in $(suite_processes); do
@@ -110,6 +116,11 @@ suite_exit() {
 # tests/lib.sh arms these to clean up only; a signal's own trap exits with its
 # conventional status, which runs the EXIT trap again and finds nothing left.
 trap suite_exit EXIT
+if [ -n "${FM_DEBUG_REAP_DIR:-}" ]; then
+  mkdir -p "$FM_DEBUG_REAP_DIR"
+  { printf 'start self=%s root=%s probe=%s TMPDIR=%s BASH=%s\n' "$$" "$TMP_ROOT" "${FM_BUILD_LOCK_TEST_PROBE:-}" "${TMPDIR:-}" "$BASH"
+    ps -Aww -o pid=,ppid=,pgid=,stat=,command= 2>&1; } > "$FM_DEBUG_REAP_DIR/start.$$" 2>&1
+fi
 trap 'suite_exit; exit 130' INT
 trap 'suite_exit; exit 143' TERM
 trap 'suite_exit; exit 129' HUP
@@ -373,7 +384,10 @@ probe_run() {  # <mode> <probe-out>
 # whose command line never names the temp root, survives.
 PROBE_FAIL_OUT="$TMP_ROOT/probe-fail"
 ( probe_run fail "$PROBE_FAIL_OUT" ) >"$TMP_ROOT/probe-fail.out" 2>"$TMP_ROOT/probe-fail.err"
-expect_code 1 $? "a run with a deliberately failed case must fail"
+PROBE_FAIL_RC=$?
+[ -z "${FM_DEBUG_REAP_DIR:-}" ] || cp -R "$TMP_ROOT/probe-fail.out" "$TMP_ROOT/probe-fail.err" "$FM_DEBUG_REAP_DIR/" 2>/dev/null
+printf '# debug: probe-fail rc=%s\n' "$PROBE_FAIL_RC" >&2
+expect_code 1 "$PROBE_FAIL_RC" "a run with a deliberately failed case must fail"
 assert_grep 'not ok - deliberate failure with fixtures still running' "$TMP_ROOT/probe-fail.err" \
   "the probe run must have failed at its deliberate case, with its fixtures live"
 assert_probe_left_nothing "$PROBE_FAIL_OUT" "a run whose case failed"
