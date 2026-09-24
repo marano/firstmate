@@ -1,0 +1,30 @@
+== run 1
+ok - retirement worker ownership survives wrapper death and recovers exactly
+all extension-binding tests passed
+ok - signal interruption leaves lifecycle lock recovery to the next owner
+all extension-binding tests passed
+all extension-binding tests passed
+error[retirement-failed]: error[binding-in-use]: error: binding still owns process-event registration: inbox-swap-source
+all extension-binding tests passed
+all extension-binding tests passed
+rc=
+== run 2
+all extension-binding tests passed
+ok - retirement worker ownership survives wrapper death and recovers exactly
+all extension-binding tests passed
+ok - signal interruption leaves lifecycle lock recovery to the next owner
+all extension-binding tests passed
+error[retirement-failed]: error[binding-in-use]: error: binding still owns process-event registration: inbox-swap-source
+all extension-binding tests passed
+all extension-binding tests passed
+rc=
+== run 3
+ok - retirement worker ownership survives wrapper death and recovers exactly
+all extension-binding tests passed
+ok - signal interruption leaves lifecycle lock recovery to the next owner
+all extension-binding tests passed
+all extension-binding tests passed
+error[retirement-failed]: error[binding-in-use]: error: binding still owns process-event registration: inbox-swap-source
+all extension-binding tests passed
+all extension-binding tests passed
+rc=
