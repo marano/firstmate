@@ -1940,6 +1940,51 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# A captain hold on an In-flight item is typically a merge gate: the work is
+# authorised and only the landing waits. A relaunch replaces the agent of work
+# that is already running, so it must go through with the hold left exactly as
+# the captain wrote it.
+test_relaunch_of_a_held_in_flight_item_keeps_the_hold_byte_identical() {
+  local dir out rc=0 before after
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case heldrelaunch rl43)
+  add_ship_task "$dir" rl43 claude
+  seed_backlog "$dir" rl43 in_flight
+  tasks-axi hold rl43 --reason "do not merge until the infra apply lands" --kind captain \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  before=$(cat "$dir/home/data/backlog.md")
+
+  out=$(run_control "$dir" rl43 relaunch --note "picking the work back up") || rc=$?
+  expect_code 0 "$rc" "a merge-held In-flight task must relaunch"$'\n'"$out"
+  after=$(cat "$dir/home/data/backlog.md")
+  [ "$before" = "$after" ] || fail "a relaunch changed the held item's backlog record"$'\n'"$(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+  assert_contains "$after" "do not merge until the infra apply lands" "the hold reason must survive"
+  pass "relaunch of a merge-held In-flight task succeeds and leaves the hold byte-identical"
+}
+
+# The relaunch exemption must not leak into first dispatch: a held queued item
+# is still refused before any endpoint or local copy exists.
+test_first_dispatch_of_a_held_queued_item_is_still_refused() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case heldfirst rl44)
+  add_ship_task "$dir" rl44 claude
+  seed_backlog "$dir" rl44 queued
+  tasks-axi hold rl44 --reason "do not merge until the infra apply lands" --kind captain \
+    --file "$dir/home/data/backlog.md" >/dev/null
+
+  out=$(run_spawn "$dir" rl44 "$dir/proj" --mode direct-PR --yolo off) || rc=$?
+  expect_code 1 "$rc" "a first dispatch of a held item must be refused"$'\n'"$out"
+  assert_contains "$out" "is not dispatchable in state" "the refusal should name the dispatch gate"
+  pass "first dispatch of a held queued item is still refused"
+}
+
 # Relaunch is the only control verb that republishes a whole task record,
 # including the keys other producers own, and a task whose PR is already
 # recorded is the case that matters most: the work is finished, the PR is open,
@@ -2061,3 +2106,5 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_of_a_held_in_flight_item_keeps_the_hold_byte_identical
+test_first_dispatch_of_a_held_queued_item_is_still_refused

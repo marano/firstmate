@@ -3243,7 +3243,8 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
   fi
-  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE" \
+     && { [ "$RELAUNCH" -ne 1 ] || ! fm_backlog_row_relaunchable "$BACKLOG_ROW_STATE"; }; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
@@ -4596,7 +4597,7 @@ spawn_commit_backlog_transition() {
     && ! fm_backlog_body_append_line "$DATA" "$ID" "Shipped below the project's standing merge authority: $YOLO_DOWNGRADE_REASON"; then
     return 1
   fi
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE" "$RELAUNCH"
 }
 
 # The deferred-signal exit path's preservation report. A claim about preserved
