@@ -160,3 +160,44 @@ On 2026-09-18, with the pinned 0.11.0 Darwin arm64 build, 40 canonical roots wer
 Each probe was killed past 2.5 GB RSS or 90 seconds; three roots crossed the RSS cap and were left out of the correlation as censored, and all three have the three largest closures.
 Over the 37 completed roots, the Spearman rank correlation with CPU seconds was 0.96 for closure bytes and 0.35 for own-file bytes, and with peak RSS it was 0.96 against 0.37.
 `bin/fm-secondmate-report.sh`, a 3,250-byte root with a 427,927-byte closure, took 27.6 CPU seconds and 2.5 GB, while the 265,196-byte `tests/fm-pi-branch-extension.test.sh`, whose closure adds little, took 1.0 second and 186 MB.
+
+## Why CI runs one lint shard per runner
+
+The 2026-09-24 measurement ran CI's full canonical lint at commit `19729638263fd8ab746f2b700dd380a62c7ad91a`, 433 roots, with the pinned 0.11.0 Darwin arm64 build on a 16 GB 10-core Apple M-series host, reading `bin/fm-lint.sh`'s own telemetry:
+
+```bash
+mutex env GITHUB_ACTIONS=true FM_LINT_JOBS=1 bin/fm-lint.sh --telemetry <file>
+```
+
+| Field | Value |
+| --- | ---: |
+| `max_worker_rss_kib` | 6,326,320 (6.03 GiB) |
+| `worker_rss_sum_kib` | 12,255,936 (11.69 GiB) |
+| `max_worker_wall_seconds` | 853.65 |
+
+With one shard at a time those are the two shards' own peaks, about 6.0 and 5.7 GiB.
+CI used to run both shards at once on one `ubuntu-latest` runner, which has 16 GB, so their peaks could sum to about 11.7 GiB before the operating system and the runner itself.
+The heaviest single roots alone are in the same range, so running one root per process does not bound it:
+
+```bash
+mutex /usr/bin/time -lp shellcheck --norc --external-sources -- <root>
+```
+
+| Root | Wall | Peak RSS |
+| --- | ---: | ---: |
+| `bin/fm-teardown.sh` | 117.7 s | 7,166 MB |
+| `tests/fm-stat-shadowing.test.sh` | 84.5 s | 6,644 MB |
+| `bin/fm-watch.sh` | 73.1 s | 6,062 MB |
+| `tests/fm-daemon.test.sh` | 32.7 s | 5,067 MB |
+| `bin/fm-spawn.sh` | 41.1 s | 4,787 MB |
+| `tests/fm-backend-herdr.test.sh` | 39.9 s | 2,831 MB |
+
+A per-root variant of the full lint on two workers measured a 7,647 MB concurrent peak and took 1,046 s against 854 s for the slower whole shard, so it cost about a fifth more wall time and still left two heavy roots free to coincide.
+The garbage collector is not tunable from outside: `GHCRTS=-s` reports `bin/fm-teardown.sh` at 3,663,006,728 bytes maximum residency and 8,967 MiB total memory in use, but the pinned binary refuses `-c` and `-M` with `Most RTS options are disabled`.
+So CI gives each of the two shards its own job through `bin/fm-lint.sh --shard <k>/2`, and one runner holds one ShellCheck process of about 6 GiB at a time.
+Darwin RSS is not Linux RSS, so treat these as the scale of the cost rather than the runner's exact figure.
+
+That memory pressure caused the CI kills is the leading hypothesis, not a proven cause.
+The killed jobs' logs prove only the sender: each ends with `The runner has received a shutdown signal.` just before `Process completed with exit code 143`, and in the last 100 CI runs no job other than Lint carried that line.
+No log shows an out-of-memory message, so a runner shutdown for another reason, such as preemption, is not excluded.
+`bin/fm-lint.sh` now prints the stopping signal and the host's available memory and swap when a signal stops it, so the next such kill records whether memory was exhausted.

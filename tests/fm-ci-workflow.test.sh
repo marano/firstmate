@@ -184,7 +184,7 @@ test_failed_lint_ends_with_the_repair_note() {
   local reported
   reported=$(ruby -ryaml -e '
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch("lint").fetch("steps")
-lint = steps.index { |step| step["run"].to_s.strip == "bin/fm-lint.sh" }
+lint = steps.index { |step| step["run"].to_s.strip =~ /\Abin\/fm-lint\.sh(\s|\z)/ }
 note = steps.index { |step| step["run"].to_s.strip == "bin/fm-lint-repair-note.sh" }
 if lint.nil? || note.nil?
   puts "lint step #{lint.inspect}, note step #{note.inspect}"
