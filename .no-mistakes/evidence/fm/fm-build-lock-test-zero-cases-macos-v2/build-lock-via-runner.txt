@@ -1,0 +1,58 @@
+fm-build-lock: fm-test-run.sh takes a build hold per unit itself, so this invocation takes none and runs it straight through; wrapping it would hold one slot for its whole run
+FM_TEST_BEGIN 2026-09-24T10:33:21Z tests/fm-build-lock.test.sh family=unclassified expected_gate_skip=none
+ok - a run that fails a case or is interrupted leaves none of its processes running
+ok - exit status passes through unchanged for success, failure, and signal death
+ok - stdout and stdin pass through untouched
+ok - two concurrent invocations never overlap, and the lock is left clean
+ok - a blocked invocation names the holder, its age and its command, on stderr
+ok - --status reports the holder while held and free once released
+ok - the lock is released when the wrapped command is SIGKILLed, and the next waiter gets in
+ok - a lock left by a dead holder is reclaimed instead of blocking forever
+ok - a residue red names every leftover artifact, its owner, and whether that owner still runs
+ok - a tight release-then-reacquire loop never overtakes an earlier waiter
+ok - a waiter that dies while in line does not block the waiters behind it
+ok - a waiter that stops renewing its ticket loses its place instead of wedging the line
+ok - an unreadable ticket age is not treated as stale
+ok - a waiter killed while in line strands nothing in the lock root
+ok - CI stands down: the command runs, the lock is never taken, and it never queues
+ok - both ceilings warn loudly and neither kills the holder
+ok - the default lock is one machine-wide path, outside every home and independent of TMPDIR
+ok - workers with different TMPDIR values still exclude each other
+ok - the mutex entry point works as a bare word, installed elsewhere, and refuses to clobber
+ok - argument and environment handling refuses bad input instead of guessing
+ok - a nested invocation inside a hold runs straight through, and a foreign hold variable does not
+ok - a nested invocation under an owner that exported no hold variables runs straight through
+ok - a command that takes the lock itself is run straight through, leaving its per-unit holds live
+ok - a hold past its ceiling appends one informational note, and the worker's declaration stands
+ok - a wait past its ceiling declares a keyed pause and resolves it, leaving the worker's own declaration standing
+ok - a waiter that stops waiting without getting in resolves its own wait
+ok - without an absolute FM_TASK_STATUS a ceiling appends nothing
+ok - --label names the hold in place of the rendered command
+ok - --help states one invocation per run, never one around a loop of runs
+ok - a count of N runs exactly N invocations at once, never more, and leaves nothing behind
+ok - with several slots, only the oldest ticket may try, so an earlier arrival still goes first
+ok - a dead holder's slot is reclaimed while a live holder keeps its own, and nothing is left behind
+ok - a count of 1, configured or not, is today's lock in every observable respect
+ok - the slot count falls back to 1 and warns on every bad value, and never stops the build
+ok - a slot count above the online core count is clamped to it and says so
+ok - a waiting head picks up a raised slot count within a poll, and --slots-path names that file
+ok - a lowered count drains rather than being refilled, and admits nobody until it has
+ok - a slot left by a killed high holder is retired by the next acquisition, not left behind
+ok - a nested invocation under an ancestor holding a high slot runs straight through
+ok - hold variables naming a high slot pass an invocation through with no ancestor to fall back on
+ok - --status names every slot, its holder and what it runs, and the waiting count
+ok - a waiter at N>1 names the slot count and a holder, and declares its wait as paused
+ok - an ordinary hold at N>1 reports its share of the slots and claims to block nobody
+ok - on CI the slot count and the whole-machine patterns are never read and nothing is created
+ok - a run named with --exclusive holds every slot and never runs beside anything
+ok - the whole-machine pattern file names runs without any caller knowing, and is unread at a count of 1
+ok - an unusable whole-machine pattern file makes every run whole-machine and says so once
+ok - a whole-machine run that outlives a lowered count still starts, holding more than it needs
+ok - a whole-machine run interrupted while draining gives its reserved slots straight back
+tests/fm-build-lock.test.sh: line 251: 22104 Killed: 9               ( cd "$holders_wt" && exec env FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --label 'pinned test lane' sh -c 'printf "%s\n" "$$" > "$1"; exec sleep 60' _ "$TMP_ROOT/holders-child.pid" )
+ok - --holders reports live holders as parseable pid/elapsed/cwd/command lines and never a dead one
+ok - fm-build-lock behaves
+FM_TEST_END 2026-09-24T10:37:33Z tests/fm-build-lock.test.sh exit=0 duration_ms=251460 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=252160
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=251460 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-build-lock.test.sh duration_ms=251460
