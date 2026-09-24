@@ -50,6 +50,8 @@ owner_worker_pid=
 owner_register_pid=
 signal_retire_pid=
 signal_worker_pid=
+lifecycle_worker_pid=
+lifecycle_stopped_wrapper=
 active_runner_pid=
 active_runner_release=
 prompt_failure_pid=
@@ -97,6 +99,10 @@ extension_test_cleanup() {
   [ -z "$signal_worker_pid" ] || kill -CONT "$signal_worker_pid" 2>/dev/null || true
   [ -z "$signal_worker_pid" ] || kill -KILL "$signal_worker_pid" 2>/dev/null || true
   [ -z "$signal_retire_pid" ] || kill -TERM "$signal_retire_pid" 2>/dev/null || true
+  [ -z "$lifecycle_worker_pid" ] || kill -CONT "$lifecycle_worker_pid" 2>/dev/null || true
+  [ -z "$lifecycle_worker_pid" ] || kill -KILL "$lifecycle_worker_pid" 2>/dev/null || true
+  [ -z "$lifecycle_stopped_wrapper" ] || kill -TERM "$lifecycle_stopped_wrapper" 2>/dev/null || true
+  [ -z "$lifecycle_stopped_wrapper" ] || kill -CONT "$lifecycle_stopped_wrapper" 2>/dev/null || true
   [ -z "$active_runner_release" ] || touch "$active_runner_release" 2>/dev/null || true
   [ -z "$lock_order_release" ] || touch "$lock_order_release" 2>/dev/null || true
   [ -z "$active_runner_pid" ] || kill -TERM "$active_runner_pid" 2>/dev/null || true
@@ -1458,40 +1464,113 @@ expect_failure "unknown command" env FM_HOME="$H_RETIRE_RACE" "$HOST" retire-bin
 expect_failure "unknown command" env FM_HOME="$H_RETIRE_RACE" "$HOST" retire-transfer-locked org.example.retire-race --if-transfer-digest "$wrong_binding_digest" --if-binding-digest "$race_binding_digest"
 pass "public extension dispatch exposes no unlocked retirement entry"
 
-P_LOCK_OWNER="$PACKAGES/lock-owner"
-make_package "$P_LOCK_OWNER" org.example.lock-owner ext-lock-owner
-H_LOCK_OWNER="$HOMES/lock-owner"; new_home "$H_LOCK_OWNER"
-owner_bind=$(bind_package "$H_LOCK_OWNER" "$P_LOCK_OWNER" ext-lock-owner)
-owner_binding_digest=$(printf '%s\n' "$owner_bind" | sed -n 's/^binding-digest: //p')
-owner_lock="$H_LOCK_OWNER/state/procevent/.extension-binding-lifecycle.lock"
-FM_HOME="$H_LOCK_OWNER" "$HOST" retire-binding org.example.lock-owner --if-binding-digest "$owner_binding_digest" > "$TMP_ROOT/lock-owner-retire.out" 2>&1 &
-owner_retire_pid=$!
-owner_worker_pid=
-for _ in $(seq 1 400); do
-  if [ -e "$owner_lock/pid" ]; then
-    candidate=$(cat "$owner_lock/pid" 2>/dev/null || true)
-    if [ -n "$candidate" ] && kill -STOP "$candidate" 2>/dev/null; then
-      owner_worker_pid=$candidate
-      break
+# The two retirement-worker fixtures below need the worker stopped while it
+# holds the lifecycle lock and before it has retired anything. The worker races
+# the poll that finds it, and a STOP aimed at the pid just read from the lock can
+# land after the worker's retirement: kill -STOP still succeeds on a worker that
+# is exiting or not yet reaped, and a successful STOP takes effect only once
+# every thread returns from the kernel, so a rename already under way can still
+# complete after the stopped worker was found holding the lock with its binding
+# enabled. The helper below rejects the plain late stop cheaply - the stopped
+# worker must still own the lock and the binding must still be enabled - and
+# otherwise lets the retirement finish so the attempt is repeated on a fresh
+# home. A rename still completing after that check cannot be seen in time, so
+# the lock-owner fixture also checks afterwards: a completed retirement leaves
+# its retired record, which registration never writes, and an attempt whose
+# worker left one proves nothing about lock recovery and is repeated too. Its
+# first attempt forces the late stop, holding the wrapper so the finished worker
+# stays unreaped and handing that worker over as if it had been caught in time,
+# so the after-the-fact check decides an attempt on every run.
+lifecycle_stop_attempts=5
+lifecycle_late_forced=
+binding_retired() {
+  [ ! -e "$1" ]
+}
+lifecycle_stop_retirement_worker() {  # <lock> <binding-file> <wrapper-pid> [late]
+  local lock=$1 binding=$2 wrapper=$3 late=${4:-} candidate='' holder=''
+  local deadline=$((SECONDS + progress_wait_tripwire_seconds))
+  lifecycle_worker_pid=
+  lifecycle_late_forced=
+  while :; do
+    candidate=
+    [ ! -e "$lock/pid" ] || read -r candidate 2>/dev/null < "$lock/pid" || true
+    case "$candidate" in ''|*[!0-9]*) candidate= ;; *) break ;; esac
+    kill -0 "$wrapper" 2>/dev/null || break
+    [ "$SECONDS" -lt "$deadline" ] || fail "retirement worker never acquired its lifecycle lock"
+    sleep 0.005
+  done
+  if [ -n "$candidate" ]; then
+    [ "$candidate" != "$wrapper" ] || fail "retirement fixture did not cross the public wrapper boundary"
+    if [ -n "$late" ] && kill -STOP "$wrapper" 2>/dev/null; then
+      if kill -0 "$candidate" 2>/dev/null; then
+        lifecycle_stopped_wrapper=$wrapper
+        wait_until "$candidate" binding_retired "$binding" \
+          || fail "the held retirement never retired its binding"
+        if kill -STOP "$candidate" 2>/dev/null; then
+          lifecycle_late_forced=1
+          lifecycle_worker_pid=$candidate
+        fi
+      fi
+      kill -CONT "$wrapper" 2>/dev/null || true
+      lifecycle_stopped_wrapper=
+      [ -z "$lifecycle_late_forced" ] || return 0
+    elif kill -STOP "$candidate" 2>/dev/null; then
+      lifecycle_worker_pid=$candidate
+      [ ! -e "$lock/pid" ] || read -r holder 2>/dev/null < "$lock/pid" || true
+      if [ "$holder" = "$candidate" ] && [ -f "$binding" ]; then
+        return 0
+      fi
+      kill -CONT "$candidate" 2>/dev/null || true
+      lifecycle_worker_pid=
     fi
   fi
-  sleep 0.005
+  wait "$wrapper" 2>/dev/null || true
+  return 1
+}
+
+P_LOCK_OWNER="$PACKAGES/lock-owner"
+make_package "$P_LOCK_OWNER" org.example.lock-owner ext-lock-owner
+owner_attempt=0
+owner_late=late
+while :; do
+  owner_attempt=$((owner_attempt + 1))
+  [ "$owner_attempt" -le "$lifecycle_stop_attempts" ] \
+    || fail "no attempt stopped the retirement worker before it retired the binding"
+  H_LOCK_OWNER="$HOMES/lock-owner-$owner_attempt"; new_home "$H_LOCK_OWNER"
+  owner_bind=$(bind_package "$H_LOCK_OWNER" "$P_LOCK_OWNER" ext-lock-owner)
+  owner_binding_digest=$(printf '%s\n' "$owner_bind" | sed -n 's/^binding-digest: //p')
+  owner_lock="$H_LOCK_OWNER/state/procevent/.extension-binding-lifecycle.lock"
+  owner_retired_record="$H_LOCK_OWNER/data/extensions/retired-bindings/org.example.lock-owner/${owner_binding_digest#sha256:}.json"
+  FM_HOME="$H_LOCK_OWNER" "$HOST" retire-binding org.example.lock-owner --if-binding-digest "$owner_binding_digest" > "$TMP_ROOT/lock-owner-retire.out" 2>&1 &
+  owner_retire_pid=$!
+  if ! lifecycle_stop_retirement_worker "$owner_lock" "$H_LOCK_OWNER/config/extensions.d/org.example.lock-owner.json" "$owner_retire_pid" ${owner_late:+"$owner_late"}; then
+    owner_retire_pid=
+    continue
+  fi
+  owner_worker_pid=$lifecycle_worker_pid
+  lifecycle_worker_pid=
+  kill -TERM "$owner_retire_pid" 2>/dev/null || true
+  wait "$owner_retire_pid" 2>/dev/null || true
+  owner_retire_pid=
+  FM_HOME="$H_LOCK_OWNER" "$PROCEVENT" register-extension ext-lock-owner owner-source --config-ref good > "$TMP_ROOT/lock-owner-register.out" 2>&1 &
+  owner_register_pid=$!
+  sleep 0.2
+  owner_register_waited=1
+  kill -0 "$owner_register_pid" 2>/dev/null || owner_register_waited=0
+  kill -KILL "$owner_worker_pid" 2>/dev/null || true
+  wait "$owner_worker_pid" 2>/dev/null || true
+  owner_worker_pid=
+  owner_register_rc=0
+  wait "$owner_register_pid" || owner_register_rc=$?
+  owner_register_pid=
+  if { [ "$owner_register_waited" -eq 0 ] || [ "$owner_register_rc" -ne 0 ]; } && [ -e "$owner_retired_record" ]; then
+    owner_late=
+    continue
+  fi
+  [ -z "$owner_late" ] || fail "a worker that finished its retirement was taken for one stopped holding the lifecycle lock"
+  break
 done
-[ -n "$owner_worker_pid" ] || fail "retirement worker never acquired its lifecycle lock"
-[ "$owner_worker_pid" != "$owner_retire_pid" ] || fail "retirement fixture did not cross the public wrapper boundary"
-kill -TERM "$owner_retire_pid" 2>/dev/null || true
-wait "$owner_retire_pid" 2>/dev/null || true
-owner_retire_pid=
-FM_HOME="$H_LOCK_OWNER" "$PROCEVENT" register-extension ext-lock-owner owner-source --config-ref good > "$TMP_ROOT/lock-owner-register.out" 2>&1 &
-owner_register_pid=$!
-sleep 0.2
-kill -0 "$owner_register_pid" 2>/dev/null || fail "wrapper death released a live retirement worker's lifecycle lock"
-kill -KILL "$owner_worker_pid" 2>/dev/null || true
-wait "$owner_worker_pid" 2>/dev/null || true
-owner_worker_pid=
-owner_register_rc=0
-wait "$owner_register_pid" || owner_register_rc=$?
-owner_register_pid=
+[ "$owner_register_waited" -eq 1 ] || fail "wrapper death released a live retirement worker's lifecycle lock"
 [ "$owner_register_rc" -eq 0 ] || fail "registration did not recover the dead retirement worker's lifecycle lock"
 assert_present "$H_LOCK_OWNER/config/extensions.d/org.example.lock-owner.json" "dead retirement worker continued mutating after lock recovery"
 owner_token=$(sed -n 's/^owner-token: //p' "$TMP_ROOT/lock-owner-register.out")
@@ -1501,24 +1580,22 @@ pass "retirement worker ownership survives wrapper death and recovers exactly"
 
 P_SIGNAL_LOCK="$PACKAGES/signal-lock"
 make_package "$P_SIGNAL_LOCK" org.example.signal-lock ext-signal-lock
-H_SIGNAL_LOCK="$HOMES/signal-lock"; new_home "$H_SIGNAL_LOCK"
-signal_bind=$(bind_package "$H_SIGNAL_LOCK" "$P_SIGNAL_LOCK" ext-signal-lock)
-signal_binding_digest=$(printf '%s\n' "$signal_bind" | sed -n 's/^binding-digest: //p')
-signal_lock="$H_SIGNAL_LOCK/state/procevent/.extension-binding-lifecycle.lock"
-FM_HOME="$H_SIGNAL_LOCK" "$HOST" retire-binding org.example.signal-lock --if-binding-digest "$signal_binding_digest" > "$TMP_ROOT/signal-lock-retire.out" 2>&1 &
-signal_retire_pid=$!
-signal_worker_pid=
-for _ in $(seq 1 400); do
-  if [ -e "$signal_lock/pid" ]; then
-    candidate=$(cat "$signal_lock/pid" 2>/dev/null || true)
-    if [ -n "$candidate" ] && kill -STOP "$candidate" 2>/dev/null; then
-      signal_worker_pid=$candidate
-      break
-    fi
-  fi
-  sleep 0.005
+signal_attempt=0
+while :; do
+  signal_attempt=$((signal_attempt + 1))
+  H_SIGNAL_LOCK="$HOMES/signal-lock-$signal_attempt"; new_home "$H_SIGNAL_LOCK"
+  signal_bind=$(bind_package "$H_SIGNAL_LOCK" "$P_SIGNAL_LOCK" ext-signal-lock)
+  signal_binding_digest=$(printf '%s\n' "$signal_bind" | sed -n 's/^binding-digest: //p')
+  signal_lock="$H_SIGNAL_LOCK/state/procevent/.extension-binding-lifecycle.lock"
+  FM_HOME="$H_SIGNAL_LOCK" "$HOST" retire-binding org.example.signal-lock --if-binding-digest "$signal_binding_digest" > "$TMP_ROOT/signal-lock-retire.out" 2>&1 &
+  signal_retire_pid=$!
+  lifecycle_stop_retirement_worker "$signal_lock" "$H_SIGNAL_LOCK/config/extensions.d/org.example.signal-lock.json" "$signal_retire_pid" && break
+  signal_retire_pid=
+  [ "$signal_attempt" -lt "$lifecycle_stop_attempts" ] \
+    || fail "no attempt stopped the signal retirement worker before it retired the binding"
 done
-[ -n "$signal_worker_pid" ] || fail "signal retirement worker never acquired its lifecycle lock"
+signal_worker_pid=$lifecycle_worker_pid
+lifecycle_worker_pid=
 kill -TERM "$signal_worker_pid" 2>/dev/null || fail "cannot signal retirement worker"
 # A stopped process's pending fatal TERM can be reaped by the kernel before
 # this CONT runs, racing it: the exit check just below covers both orders, so
