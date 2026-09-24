@@ -19,6 +19,20 @@ if [ "${1:-}" = "--version" ]; then
   printf 'quota-axi 0.1.29\n'
   exit 0
 fi
+if [ -n "${QUOTA_AXI_FAIL_FIRST:-}${QUOTA_AXI_FAIL_ALTERNATE:-}" ]; then
+  calls=0
+  [ ! -f "$QUOTA_AXI_FAILCOUNT" ] || read -r calls < "$QUOTA_AXI_FAILCOUNT"
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > "$QUOTA_AXI_FAILCOUNT"
+  if [ -n "${QUOTA_AXI_FAIL_FIRST:-}" ] && [ "$calls" -le "$QUOTA_AXI_FAIL_FIRST" ]; then
+    printf 'boom: transient upstream failure\n' >&2
+    exit 1
+  fi
+  if [ -n "${QUOTA_AXI_FAIL_ALTERNATE:-}" ] && [ $((calls % 2)) -eq 1 ]; then
+    printf 'boom: transient upstream failure\n' >&2
+    exit 1
+  fi
+fi
 case "${QUOTA_AXI_MALFORMED:-}" in
   schema)
     printf '{"schemaVersion":4,"providers":[]}\n'
@@ -221,5 +235,34 @@ out=$(QUOTA_AXI_KNOWN_UNKNOWN_FIRST=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$P
 printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "known semantics with unknown headroom did not continue polling"
 printf '%s\n' "$out" | grep -qx 'condition_polls: 2' || fail "known semantics with unknown headroom stopped early"
 ok "poll preserves unknown headroom under known semantics"
+
+FAILCOUNT="$LAB/failcount"
+
+rm -f "$COUNT" "$FAILCOUNT"
+out=$(QUOTA_AXI_FAIL_FIRST=1 QUOTA_AXI_FAILCOUNT="$FAILCOUNT" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "a single transient failure ended the watch: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 3' || fail "transient failure was not retried as its own poll: $out"
+ok "one transient quota-axi failure keeps polling"
+
+rm -f "$COUNT" "$FAILCOUNT"
+out=$(QUOTA_AXI_FAIL_ALTERNATE=1 QUOTA_AXI_FAILCOUNT="$FAILCOUNT" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1 --max-failures 2)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "a success did not reset the failure count: $out"
+ok "a successful poll resets the consecutive failure count"
+
+rm -f "$COUNT" "$FAILCOUNT"
+out=$(QUOTA_AXI_FAIL_FIRST=100 QUOTA_AXI_FAILCOUNT="$FAILCOUNT" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1 --max-failures 3)
+printf '%s\n' "$out" | grep -qx 'status: error' || fail "persistent failure was not reported as error: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 3' || fail "persistent failure did not stop at the bound: $out"
+printf '%s\n' "$out" | grep -qx 'stderr: boom: transient upstream failure' || fail "failing command stderr was not captured: $out"
+ok "persistent failure reports error with the captured stderr"
+
+if err=$(QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --max-failures 0 2>&1); then
+  fail "zero max-failures unexpectedly started polling"
+fi
+[ "$err" = "error: --max-failures needs a positive integer" ] || fail "invalid max-failures returned: $err"
+ok "poll rejects a non-positive max-failures"
 
 printf '# all fm-procevent-quota tests passed\n'

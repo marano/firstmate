@@ -59,10 +59,10 @@ A continuity break is escalated once and stays unarmed until an operator deliber
 For a recurring mid-task quota check, arm the quota adapter:
 
 ```sh
-bin/fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>]
+bin/fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--max-failures <n>]
 ```
 
-It keeps polling through unknown quota and wakes when known quota drops below the configured threshold, runway becomes `exhausted_now`, or polling fails.
+It keeps polling through unknown quota and transient poll failures, and wakes when known quota drops below the configured threshold, runway becomes `exhausted_now`, or polling fails `--max-failures` times in a row (default 3).
 
 For a "do X as soon as Y is true" request whose condition AND action are both genuinely exact and deterministic, register a condition->action watch instead of re-checking in conversational turns:
 
