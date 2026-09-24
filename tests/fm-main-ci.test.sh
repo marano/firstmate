@@ -14,6 +14,9 @@
 #                            the merge commit's own run
 #   appear-window-ignored  - no run ever appearing never reports or retires
 #   conclude-window-ignored - a run that never concludes is polled forever
+#   watcher-wait-fixed     - the watcher case waits a fixed few seconds rather
+#                            than the watcher's own bounds on the cycle, so a
+#                            check slowed by machine load is killed mid-run
 #   arm-not-called         - bin/fm-pr-merge.sh no longer arms the watch
 #                            (tests/fm-pr-merge.test.sh)
 #   task-scoped-watch      - the watch is named after the task, so the merged
@@ -40,7 +43,8 @@ LATER_URL=https://github.com/example/repo/actions/runs/103
 # repos/<o>/<r>/pulls/<n> from pull.json and repos/<o>/<r>/actions/runs from
 # runs.json (an array, newest first), honoring the head_sha and branch query
 # fields exactly when they are passed, and applies --jq with jq -r as gh does.
-# A runs-fail marker makes the run list unreadable.
+# A runs-fail marker makes the run list unreadable, and FM_TEST_CI_RUNS_DELAY
+# holds the run list back that many seconds, the way a loaded machine slows it.
 make_ci_case() {
   local name=$1 dir fakebin
   dir=$(make_case "$name")
@@ -73,6 +77,7 @@ case "$path" in
     ;;
   repos/example/repo/actions/runs)
     [ ! -e "$FM_TEST_CI_DIR/runs-fail" ] || { echo 'gh: HTTP 502' >&2; exit 1; }
+    [ -z "${FM_TEST_CI_RUNS_DELAY:-}" ] || sleep "$FM_TEST_CI_RUNS_DELAY"
     jq --arg sha "$head_sha" --arg branch "$branch" \
       '[.[] | select(($sha == "" or .head_sha == $sha) and ($branch == "" or .head_branch == $branch))]
        | {total_count: length, workflow_runs: .}' "$FM_TEST_CI_DIR/runs.json" \
@@ -255,27 +260,56 @@ test_unconcluded_run_past_the_window_wakes_once_and_retires() {
   pass "a run still open when the window closes wakes once and retires the watch"
 }
 
-# The same red through the watcher's own custom-check sweep: the output
-# becomes one durable check wake, and the next sweep has nothing left to run.
-test_watcher_delivers_the_red_as_a_check_wake() {
-  local dir state out drain_out check_file
-  dir=$(make_ci_case watcher)
+# The watcher's own bounds on the one cycle these cases wait out: a poll, the
+# check it runs (which the watcher itself kills at WATCH_CHECK_TIMEOUT), and a
+# signal grace. The wait below covers all of them plus slack, so a loaded
+# machine stretches the cycle without the test killing a watcher that is still
+# doing its job, while a watcher that never delivers still fails.
+WATCH_POLL=1
+WATCH_SIGNAL_GRACE=1
+WATCH_CHECK_TIMEOUT=30
+WATCH_WAIT_TICKS=$(( (WATCH_POLL + WATCH_CHECK_TIMEOUT + WATCH_SIGNAL_GRACE + 10) * 10 ))
+
+# watch_red_once <case> [env assignments...]: arms a red run of the merge
+# commit, runs the watcher through its custom-check sweep until it exits, and
+# asserts the output became one durable check wake and the watch retired.
+watch_red_once() {
+  local name=$1 dir state out err drain_out check_file
+  shift
+  dir=$(make_ci_case "$name")
   state="$dir/state"
   out="$dir/watch.out"
+  err="$dir/watch.err"
   drain_out="$dir/drain.out"
   check_file=$(check_path "$dir")
   arm "$dir"
   write_runs "$dir" "$(run_json "$MERGE_SHA" completed failure "$RED_URL")"
-  PATH="$dir/fakebin:$PATH" FM_TEST_CI_DIR="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for the red main CI wake"
+  env PATH="$dir/fakebin:$PATH" FM_TEST_CI_DIR="$dir" FM_STATE_OVERRIDE="$state" "$@" \
+    FM_POLL="$WATCH_POLL" FM_SIGNAL_GRACE="$WATCH_SIGNAL_GRACE" FM_CHECK_TIMEOUT="$WATCH_CHECK_TIMEOUT" \
+    FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  wait_for_exit "$!" "$WATCH_WAIT_TICKS" \
+    || fail "$name: watcher did not exit for the red main CI wake: $(watcher_exit_detail "$err")"
   grep -F "check: $check_file: main CI red after merge" "$out" | grep -F "$RED_URL" >/dev/null \
-    || fail "watcher did not print the red main CI wake: $(cat "$out")"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the red main CI wake failed"
+    || fail "$name: watcher did not print the red main CI wake: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "$name: drain after the red main CI wake failed"
   [ "$(grep "$(printf '\tcheck\t')" "$drain_out" | grep -cF "$RED_URL")" -eq 1 ] \
-    || fail "the red main CI wake was not queued exactly once: $(cat "$drain_out")"
-  assert_retired "$dir" "watcher red"
+    || fail "$name: the red main CI wake was not queued exactly once: $(cat "$drain_out")"
+  assert_retired "$dir" "$name"
+}
+
+# The same red through the watcher's own custom-check sweep: the output
+# becomes one durable check wake, and the next sweep has nothing left to run.
+test_watcher_delivers_the_red_as_a_check_wake() {
+  watch_red_once watcher
   pass "the watcher delivers a red main CI run as one queued check wake"
+}
+
+# Mutant: watcher-wait-fixed. A check slowed well past the few seconds the
+# watcher case once allowed, yet far inside the watcher's own check timeout,
+# is what a loaded machine produces: the watcher is still running it, not stuck.
+test_watcher_delivers_the_red_from_a_slow_check() {
+  watch_red_once watcher-slow FM_TEST_CI_RUNS_DELAY=6
+  pass "the watcher delivers the red from a check slowed by machine load"
 }
 
 test_arm_registers_a_watch_keyed_on_the_merge_commit
@@ -287,3 +321,4 @@ test_running_run_stays_armed_silently
 test_no_run_within_the_window_wakes_once_and_retires
 test_unconcluded_run_past_the_window_wakes_once_and_retires
 test_watcher_delivers_the_red_as_a_check_wake
+test_watcher_delivers_the_red_from_a_slow_check
