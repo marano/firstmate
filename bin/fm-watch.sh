@@ -211,76 +211,75 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
+# Every library below is a canonical lint root in its own right, analysed by
+# bin/fm-lint.sh with its full source graph, so each `source=/dev/null` here is
+# an analysis boundary that adds no uncovered file. Following them from this
+# large runtime is what made this file the costliest lint root: ShellCheck
+# inlines a fresh copy of every followed source and its dataflow analysis grows
+# with the inlined total, which reached about 46k lines and 8 GB of heap here.
+# The trade is that this file's own dataflow does not see the libraries'
+# definitions, so a variable or exit status flowing through a library call is
+# checked only inside that library's root.
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
 # without sourcing the entire watcher graph.
-# The shared transition owner is a canonical lint root itself. Stop duplicate
-# source-graph expansion here: following its backend graph from this large
-# runtime can exceed the bounded CI lint worker while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
-# shellcheck source=bin/fm-procevent-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
 # The watcher still owns immediate delivery of its actionable poll result and
 # poll retirement.
-# This library is a canonical lint root in its own right, and it reaches the
-# wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
-# boundary here for the same reason as the transition and inbox owners above and
-# below: following its graph from this large runtime exceeds the bounded CI lint
-# worker while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # The durable merge-authority owner is shared with bin/fm-pr-merge.sh. The
 # watcher consumes only its identity-bound record after a poll observes landing.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
-# shellcheck source=bin/fm-x-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
 # (inbox_steer_check below).
-# shellcheck source=bin/fm-task-inbox-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
-# shellcheck source=bin/fm-afk-contract.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 # Idle-fleet detection: bin/fm-idle-fleet-lib.sh owns the condition itself, the
 # three numbers it compares, and why the detector lives in this watcher rather
 # than in the away-mode daemon. This watcher supplies only the cadence, the
-# sustain window, and the wake (idle_fleet_tick below). Its own helper owners are
-# already loaded above, so sourcing it here adds no further expansion.
-# shellcheck source=bin/fm-idle-fleet-lib.sh
+# sustain window, and the wake (idle_fleet_tick below).
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-idle-fleet-lib.sh"
 # Awaiting landing: bin/fm-awaiting-landing-lib.sh is the one owner of "finished,
 # held by firstmate, nothing says it cannot land", and the pane-staleness loop
 # below asks it rather than inferring that state from the status verb or the
-# deliberate-stop record. Its own helper owners (the classifier and PR libraries)
-# are already loaded above, so sourcing it here adds no further expansion.
-# shellcheck source=bin/fm-awaiting-landing-lib.sh
+# deliberate-stop record.
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-awaiting-landing-lib.sh"
 # Unrecorded-PR detection: bin/fm-unrecorded-pr-lib.sh owns the condition (an
 # open PR on a task's branch while its record carries no pr=) and its one forge
 # query per sweep; this watcher supplies the cadence, re-surface window, and
 # wake (unrecorded_pr_tick below).
-# shellcheck source=bin/fm-unrecorded-pr-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-unrecorded-pr-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
