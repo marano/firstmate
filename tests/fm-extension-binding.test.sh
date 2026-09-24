@@ -1583,32 +1583,37 @@ make_package "$P_SIGNAL_LOCK" org.example.signal-lock ext-signal-lock
 signal_attempt=0
 while :; do
   signal_attempt=$((signal_attempt + 1))
+  [ "$signal_attempt" -le "$lifecycle_stop_attempts" ] \
+    || fail "no attempt stopped the signal retirement worker before it retired the binding"
   H_SIGNAL_LOCK="$HOMES/signal-lock-$signal_attempt"; new_home "$H_SIGNAL_LOCK"
   signal_bind=$(bind_package "$H_SIGNAL_LOCK" "$P_SIGNAL_LOCK" ext-signal-lock)
   signal_binding_digest=$(printf '%s\n' "$signal_bind" | sed -n 's/^binding-digest: //p')
   signal_lock="$H_SIGNAL_LOCK/state/procevent/.extension-binding-lifecycle.lock"
+  signal_retired_record="$H_SIGNAL_LOCK/data/extensions/retired-bindings/org.example.signal-lock/${signal_binding_digest#sha256:}.json"
   FM_HOME="$H_SIGNAL_LOCK" "$HOST" retire-binding org.example.signal-lock --if-binding-digest "$signal_binding_digest" > "$TMP_ROOT/signal-lock-retire.out" 2>&1 &
   signal_retire_pid=$!
-  lifecycle_stop_retirement_worker "$signal_lock" "$H_SIGNAL_LOCK/config/extensions.d/org.example.signal-lock.json" "$signal_retire_pid" && break
+  if ! lifecycle_stop_retirement_worker "$signal_lock" "$H_SIGNAL_LOCK/config/extensions.d/org.example.signal-lock.json" "$signal_retire_pid"; then
+    signal_retire_pid=
+    continue
+  fi
+  signal_worker_pid=$lifecycle_worker_pid
+  lifecycle_worker_pid=
+  kill -TERM "$signal_worker_pid" 2>/dev/null || fail "cannot signal retirement worker"
+  # A stopped process's pending fatal TERM can be reaped by the kernel before
+  # this CONT runs, racing it: the exit check just below covers both orders, so
+  # CONT failing because the process is already gone is not itself a failure.
+  kill -CONT "$signal_worker_pid" 2>/dev/null || true
+  for _ in $(seq 1 400); do
+    kill -0 "$signal_worker_pid" 2>/dev/null || break
+    sleep 0.005
+  done
+  kill -0 "$signal_worker_pid" 2>/dev/null && fail "signalled retirement worker did not exit"
+  signal_worker_pid=
+  wait "$signal_retire_pid" 2>/dev/null || true
   signal_retire_pid=
-  [ "$signal_attempt" -lt "$lifecycle_stop_attempts" ] \
-    || fail "no attempt stopped the signal retirement worker before it retired the binding"
+  [ ! -e "$signal_retired_record" ] || continue
+  break
 done
-signal_worker_pid=$lifecycle_worker_pid
-lifecycle_worker_pid=
-kill -TERM "$signal_worker_pid" 2>/dev/null || fail "cannot signal retirement worker"
-# A stopped process's pending fatal TERM can be reaped by the kernel before
-# this CONT runs, racing it: the exit check just below covers both orders, so
-# CONT failing because the process is already gone is not itself a failure.
-kill -CONT "$signal_worker_pid" 2>/dev/null || true
-for _ in $(seq 1 400); do
-  kill -0 "$signal_worker_pid" 2>/dev/null || break
-  sleep 0.005
-done
-kill -0 "$signal_worker_pid" 2>/dev/null && fail "signalled retirement worker did not exit"
-signal_worker_pid=
-wait "$signal_retire_pid" 2>/dev/null || true
-signal_retire_pid=
 [ -L "$signal_lock" ] || fail "signalled retirement worker released its lifecycle lock before exit recovery"
 signal_registration=$(FM_HOME="$H_SIGNAL_LOCK" "$PROCEVENT" register-extension ext-signal-lock signal-source --config-ref good)
 signal_owner=$(printf '%s\n' "$signal_registration" | sed -n 's/^owner-token: //p')
