@@ -1992,9 +1992,12 @@ sweep_pid_two=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/sweep-two.claim")
 # claim - so the sweep would race that exit and see one source or two depending
 # on which won.
 kill -KILL -"$sweep_pid_two" 2>/dev/null || true
-for _ in $(seq 1 50); do kill -0 "$sweep_pid_two" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$sweep_pid_two" 2>/dev/null \
-  && fail "the claim-only sweep fixture runner did not stop"
+# Wait for the whole group, not just its leader: a killed member still awaiting
+# reaping keeps the numeric group present, which the product deliberately reads
+# as an ambiguous leaderless group and refuses to sweep.
+for _ in $(seq 1 50); do kill -0 -"$sweep_pid_two" 2>/dev/null || break; sleep 0.1; done
+kill -0 -"$sweep_pid_two" 2>/dev/null \
+  && fail "the claim-only sweep fixture runner group did not stop"
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/sweep-two.claim" \
   "a killed runner leaves its owned claim behind for the sweep"
 rm -f "$HM/state/procevent/sweep-two.source"
