@@ -24,7 +24,8 @@
 # stopped - whatever its last status says, because a worker that reported `done:`
 # still holds its context until firstmate stops it, and that context is exactly
 # what grouping exists to keep. Reading `state/<id>.agent-stopped` for that
-# purpose is this file's one licensed use of that record (AGENTS.md section 2).
+# purpose is this file's one licensed use of that record (bin/fm-control.sh's
+# record_agent_stopped lists every reader).
 #
 # CANNOT TELL IS NOT NONE. Every read here is bounded, and a read that times out
 # or fails returns status 2 with FM_GROUPING_ERROR set, never an empty sibling
