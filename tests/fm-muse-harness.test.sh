@@ -66,6 +66,15 @@ write_session_log() {
 
 # --- spawn scaffolding ------------------------------------------------------
 
+# named_shell <path>: a real bash process whose executable name is <path>'s
+# basename, which is what the ancestry walk reads through `ps -o comm=`. It is a
+# symlink, never a copy: macOS code-signature enforcement SIGKILLs a copied
+# system /bin/bash (exit 137), and a wrapper script would run under the
+# interpreter's own name. Both macOS and Linux report the symlink's own name.
+named_shell() {
+  ln -sf "$(command -v bash)" "$1"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -114,7 +123,7 @@ exit 0
 SH
   fm_test_fake_sourced_launch_fn "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  named_shell "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -192,7 +201,7 @@ test_detects_versioned_process_ancestor() {
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
+    named_shell "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -208,7 +217,12 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
+    named_shell "$dir/$bin"
+    # The process must really carry the unrelated name, or a non-muse verdict
+    # would pass without the anchoring ever being consulted.
+    out=$("$dir/$bin" -c "r=\$(ps -o comm= -p \$\$); printf '%s' \"\$r\"")
+    [ "$(basename -- "$out")" = "$bin" ] \
+      || fail "fixture process '$bin' ran under the name '$out', so the anchoring check is vacuous"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
