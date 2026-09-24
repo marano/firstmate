@@ -1,0 +1,59 @@
+ok - an abandoned same-process lock hold is reclaimed; a parent's live hold is not
+ok - without BASHPID a subshell cannot release or reclaim its parent lock and owns its own hold
+ok - bounded acquire hands ownership to the waiting caller after contention
+ok - presentation lock waits are bounded and retriable without weakening acknowledgement atomicity
+ok - malformed presentation locks report acquire failure instead of contention
+ok - a queue-lock deadline during an unrecorded claim skips for the next drain instead of refusing
+ok - foreign secondmate queue alerts once per no-progress episode without age-only or cascade noise
+ok - declared external-wait pause rows do not feed secondmate wake-loop escalation
+ok - a reprovisioned queue generation starts a fresh no-progress interval
+ok - an active turn defers the secondmate stall escalation without cancelling it
+ok - a long-lived mate mid-turn is not a stall, but a queue frozen past the busy bound still alarms
+ok - secondmate stall markers reject symlinks without touching their targets
+ok - stall publication acknowledgement closes the pre-marker crash window
+ok - empty prefix mate cleanup preserves another mate's stall receipt
+ok - self-announced appends suppress only their own bytes and fail toward waking
+ok - historical annotations replay nothing already announced and keep everything new
+ok - concurrent append plus drain preserves durable records through acknowledgement
+ok - signal written while no watcher runs is caught on next run
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 94474.1790214266.RV32Us
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - stale wake is queued before suppressor state is advanced
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 99714.1790214269.zkhiL9
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - a not-provably-working stale wake is queued before its suppressor is advanced
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 4273.1790214272.J7aGSd
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - registered custom check output is queued before cadence suppression
+ok - concurrent drains replay until one post-handling acknowledgement consumes records
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation 10841.1790214275.Bu6c9h
+ok - drain collapses obvious duplicate heartbeat and signal records
+ok - drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 8 --recovery-generation 13439.1790214277.gp8a3N
+ok - structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 13 --recovery-generation 15651.1790214279.ji5UlT
+ok - every readable unread status line is annotated in full while invalid status files preserve their raw wakes
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 19534.1790214282.yeDTmY
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 19534.1790214282.yeDTmY
+ok - slow annotation releases the append lock and a deleted status file fails open
+ok - a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains
+ok - main drain and acknowledgement exclude an active branch grant
+ok - a branch-held row raises no queued-wake warning for main, and the same row is presented and acknowledged once the grant clears
+ok - a queue that cannot be counted keeps the queued-wake alarm up
+ok - structurally unusable rows are retired by main alone, leaving every remaining row presentable and acknowledgeable
+ok - branch grant cannot take a row already claimed by main
+ok - actor ownership filtering precedes same-key deduplication
+ok - main reclaims rows granted to an exited branch owner
+ok - a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing
+fm_wake_append: recovery marker publish failed: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-wake-tests.4gjDcj/wake-publish-recovery-evidence/state/.watcher-down
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation existing
+ok - wake append publishes atomic recovery evidence before durable rows
+ok - wake drain: generation-less legacy wakes are adopted and acknowledged
+ok - wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode
+ok - wake drain: an acknowledgement that consumes nothing says so and names the exact command for the current wake
+ok - wake drain: a branch acknowledgement that consumes nothing names the exact command for its granted wake
+ok - wake drain: recovery acknowledgement failures are explicit and retryable
+ok - interruption: a lost first signal is re-sent, and the status the caller asserts on is the process's own
+tests/fm-wake-queue.test.sh: line 1618: 48136 Killed: 9               bash -c 'trap "" TERM; : > "$1/ready"; while :; do sleep 0.1; done' _ "$dir"
+ok - interruption: a process that ignores every signal fails by name instead of passing as interrupted
+ok - interruptions preserve durable rows until post-handling acknowledgement
