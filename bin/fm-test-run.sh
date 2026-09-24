@@ -187,6 +187,13 @@
 #   against. Inspection modes execute nothing and stay available, and a run with
 #   no FM_TASK_ID set is unchanged.
 #
+# Worker environment:
+#   Each script starts without the task-worker session environment (FM_TASK_ID,
+#   FM_TASK_STATUS, TMUX, TMUX_PANE), so a suite run from inside a worker takes
+#   its verdict from its own fixtures. tests/worker-env-helpers.sh owns the list.
+#   The runner itself keeps them: the placement refusal and the build-lock
+#   ceiling lines read them.
+#
 # A script that skipped a case for a missing pinned external tool prints
 # tests/lib.sh's FM_TEST_TOOL_MISSING marker. Where those tools are supposed to
 # be installed - CI, or FM_TEST_REQUIRE_DECLARED_TOOLS=1 - the run fails naming
@@ -2393,10 +2400,10 @@ families_for_changed_path() {
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
-    tests/git-config-helpers.sh)
+    tests/git-config-helpers.sh|tests/worker-env-helpers.sh)
       # The reference scan is not transitive, so match the two helpers that
       # source this one as well: most suites inherit it only through them.
-      families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
+      families_for_test_reference "$(basename "$path")" lib.sh herdr-test-safety.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*)
@@ -3441,6 +3448,11 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
+  # The task-worker session environment is dropped from the script alone, never
+  # from the runner, whose build-lock ceiling lines still need FM_TASK_STATUS.
+  # tests/worker-env-helpers.sh owns the list.
+  # shellcheck source=tests/worker-env-helpers.sh
+  . "$ROOT/tests/worker-env-helpers.sh" || return
   # The same scoping hands the script this runner's build-lock hold, so a
   # nested acquire inside it passes straight through instead of deadlocking.
   local FM_BUILD_LOCK_HELD_BY FM_BUILD_LOCK_HELD_LOCK
@@ -3454,11 +3466,11 @@ run_script_bounded() {  # <script> <out> <stream> <id>
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${FM_TEST_SCRUB_ENV_CMD[@]}" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      "${FM_TEST_SCRUB_ENV_CMD[@]}" bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
@@ -3466,11 +3478,11 @@ run_script_bounded() {  # <script> <out> <stream> <id>
     # 128+signal exit, as the streaming form above already does, because the
     # perl mechanism in bin/fm-timeout-lib.sh reports a signal death as 0.
     # shellcheck disable=SC2016
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c 'bash "$1"; exit "$?"' _ "$script" \
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${FM_TEST_SCRUB_ENV_CMD[@]}" bash -c 'bash "$1"; exit "$?"' _ "$script" \
       >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    "${FM_TEST_SCRUB_ENV_CMD[@]}" bash "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then

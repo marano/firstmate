@@ -32,7 +32,7 @@ test_git_config_isolation() (
   cd "$dir/caller" || exit 1
   cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-build-lock.sh" \
     "$ROOT/bin/fm-build-lock-key-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/runner/bin/"
-  cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
   fm_fake_exit0 "$fakebin" pi
   cat > "$fakebin/tmux" <<'SH'
@@ -157,6 +157,84 @@ SH
   assert_host_config_still_governs system
 
   pass "runner and shared helpers isolate host Git config and preserve explicit config and outside commits"
+)
+
+# A task worker's session carries FM_TASK_ID, FM_TASK_STATUS, TMUX and TMUX_PANE.
+# tests/worker-env-helpers.sh owns that list; this drives every entry point that
+# must reach it with hostile values planted AFTER this file's own library load
+# has already scrubbed its environment, and asserts both halves of the contract:
+# a suite sees none of them, and the runner still does.
+test_worker_env_isolation() (
+  local dir="$TMP_ROOT/worker-env" var value
+  mkdir -p "$dir/runner/bin" "$dir/runner/tests" "$dir/primary/bin" "$dir/primary/tests"
+  for tree in runner primary; do
+    cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-build-lock.sh" \
+      "$ROOT/bin/fm-build-lock-key-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$dir/$tree/bin/"
+    cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/worker-env-helpers.sh" "$dir/$tree/tests/"
+  done
+  # Named after a proven-isolated script so the runner accepts it under --jobs.
+  # Sources no shared helper, so only the runner can have cleaned its environment.
+  # It also asks the real backend detector, whose verdict the leaked TMUX decides.
+  cat > "$dir/runner/tests/fm-test-run.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+for var in FM_TASK_ID FM_TASK_STATUS TMUX TMUX_PANE; do
+  if env | grep -q "^$var="; then
+    printf 'not ok - %s leaked into the suite\n' "$var"
+    exit 1
+  fi
+done
+[ "${FM_TEST_PASSTHROUGH:-}" = kept ] || { echo 'not ok - unrelated variable was scrubbed'; exit 1; }
+. "$FM_TEST_REAL_ROOT/bin/fm-backend.sh"
+fm_backend_detect >/dev/null 2>&1 || true
+[ "$FM_BACKEND_DETECT_SIGNAL" != TMUX ] || { echo 'not ok - backend detection followed a leaked TMUX'; exit 1; }
+echo 'ok - worker environment absent'
+SH
+  cp "$dir/runner/tests/fm-test-run.test.sh" "$dir/primary/tests/"
+  git init -q "$dir/primary"
+
+  plant() {  # <command...>: run with a hostile worker session environment
+    FM_TASK_ID=hostile-task FM_TASK_STATUS="$dir/hostile.status" \
+      TMUX=/nonexistent/tmux-sock,1,0 TMUX_PANE=%99 \
+      FM_TEST_PASSTHROUGH=kept FM_TEST_REAL_ROOT="$ROOT" "$@"
+  }
+
+  # Runner: serial and concurrent, bounded and unbounded.
+  local jobs timeout
+  for jobs in 1 2; do
+    for timeout in 0 30; do
+      plant "$dir/runner/bin/fm-test-run.sh" --jobs "$jobs" --per-script-timeout-secs "$timeout" \
+        tests/fm-test-run.test.sh > "$dir/runner.log" 2>&1 \
+        || fail "runner leaked worker environment (jobs=$jobs, timeout=$timeout): $(cat "$dir/runner.log")"
+      assert_grep 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0' "$dir/runner.log" \
+        "runner did not execute the probe"
+    done
+  done
+  [ ! -e "$dir/hostile.status" ] || fail "runner let a hold write through the hostile status path"
+
+  # Shared helpers reached by direct invocation.
+  for value in "$ROOT/tests/lib.sh" "$ROOT/tests/herdr-test-safety.sh"; do
+    plant bash -eus -- "$value" <<'SH' || fail "$value leaked worker environment"
+. "$1"
+for var in FM_TASK_ID FM_TASK_STATUS TMUX TMUX_PANE; do
+  ! env | grep -q "^$var=" || exit 1
+done
+[ "${FM_TEST_PASSTHROUGH:-}" = kept ]
+SH
+  done
+
+  # The other half: the runner itself still sees FM_TASK_ID, so its refusal to
+  # run in a repository's primary checkout is unchanged.
+  git -C "$dir/primary" -c user.name=test -c user.email=test@example.invalid \
+    commit -q --allow-empty -m initial
+  if plant "$dir/primary/bin/fm-test-run.sh" tests/fm-test-run.test.sh \
+    > "$dir/primary.log" 2>&1; then
+    fail "runner stopped refusing the primary checkout under FM_TASK_ID"
+  fi
+  assert_grep 'refusing to run in the repository primary checkout' "$dir/primary.log" \
+    "primary refusal did not fire: $(cat "$dir/primary.log")"
+
+  pass "runner and shared helpers scrub the task-worker session environment and leave the runner's own reads intact"
 )
 
 test_touch_epoch_preserves_repeated_dst_hour() {
@@ -286,6 +364,7 @@ test_spawn_home_layout() {
 }
 
 test_git_config_isolation || fail "Git fixture config isolation"
+test_worker_env_isolation || fail "worker environment isolation"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers

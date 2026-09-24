@@ -7,6 +7,12 @@ set -u
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
+# The same reasoning applies to the task-worker session environment: a leaked
+# TMUX would steer backend detection away from the isolated lab.
+# shellcheck source=tests/worker-env-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/worker-env-helpers.sh"
+fm_test_scrub_worker_env
+
 # Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
 # tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
 # tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,

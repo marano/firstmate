@@ -47,15 +47,17 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
-# panes. This suite builds git-init fixture repositories whose primary checkout
-# it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
-# under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
-unset FM_TASK_ID
-# Its companion FM_TASK_STATUS names the worker's REAL status file, where
-# bin/fm-build-lock.sh appends ceiling lines; a case crossing a ceiling must never
-# wake firstmate through it, so a case that wants those lines sets its own.
-unset FM_TASK_STATUS
+# Drop the task-worker session environment (FM_TASK_ID, FM_TASK_STATUS, TMUX,
+# TMUX_PANE). The helper's header owns the list and why each name is in it. Two
+# consequences matter here: the suite builds git-init fixture repositories whose
+# primary checkout it runs a copied bin/fm-test-run.sh in, and that runner refuses
+# the primary under FM_TASK_ID; and FM_TASK_STATUS names the worker's REAL status
+# file, where bin/fm-build-lock.sh appends ceiling lines, so a case crossing a
+# ceiling must never wake firstmate through it. A case that verifies either sets
+# the variable itself.
+# shellcheck source=tests/worker-env-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/worker-env-helpers.sh"
+fm_test_scrub_worker_env
 
 # Clear the grouping posture override. An operator shell that exports
 # FM_GROUPING=enforce to run its own fleet that way would otherwise make every
