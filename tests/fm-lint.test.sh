@@ -602,6 +602,69 @@ test_changed_mode_invokes_shellcheck_once_per_root() {
   pass "fm-lint.sh changed mode invokes ShellCheck once per root"
 }
 
+# CI runs one lint shard per job because a full-set ShellCheck process holds
+# several GB, and both shards on one hosted runner ran it out of memory: the
+# runner shut down and killed the job with exit 143 mid-lint. This resolves the
+# lint job's matrix exactly as GitHub would and runs each job's lint command, so
+# it proves what the workflow really does: no job lints the whole set, and the
+# jobs together lint every canonical root exactly once.
+test_ci_lint_matrix_splits_the_canonical_set_across_jobs() {
+  local tmp fakebin commands command job listed linted job_roots root_count
+  command -v ruby >/dev/null 2>&1 || fail "ruby is required to resolve ci.yml's lint matrix"
+  tmp=$(fm_test_tmproot fm-lint-ci-matrix)
+  fakebin=$(fm_fakebin "$tmp")
+  commands=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("lint")
+shards = ((job["strategy"] || {})["matrix"] || {})["shard"] || [nil]
+step = job.fetch("steps").find { |candidate| candidate["id"] == "lint" }
+raise "the lint job has no step with id lint" if step.nil?
+shards.each do |shard|
+  puts step.fetch("run").strip
+    .gsub("\x24{{ matrix.shard }}", shard.to_s)
+    .gsub("\x24{{ strategy.job-total }}", shards.size.to_s)
+end
+' "$ROOT/.github/workflows/ci.yml") || fail "could not resolve the lint job's matrix from ci.yml"
+  [ -n "$commands" ] || fail "ci.yml's lint job resolves to no lint command"
+
+  listed="$tmp/listed"
+  CI=true "$LINT" --list-files | LC_ALL=C sort > "$listed"
+  root_count=$(grep -c . "$listed")
+  linted="$tmp/linted"
+  : > "$linted"
+  job=0
+  while IFS= read -r command; do
+    [ -n "$command" ] || continue
+    job=$((job + 1))
+    fm_lint_stub_shellcheck "$fakebin" "$tmp/job.$job"
+    (cd "$ROOT" && PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true bash -c "$command") \
+      > "$tmp/job.$job.out" 2>&1 \
+      || fail "CI lint job $job failed under the ShellCheck stub: $command"$'\n'"$(cat "$tmp/job.$job.out")"
+    job_roots=$(grep -c . "$tmp/job.$job" || true)
+    [ "$job_roots" -gt 0 ] || fail "CI lint job $job linted no roots: $command"
+    [ "$job_roots" -lt "$root_count" ] \
+      || fail "CI lint job $job lints the whole canonical set on one runner: $command"
+    cat "$tmp/job.$job" >> "$linted"
+  done <<EOF
+$commands
+EOF
+  [ -z "$(LC_ALL=C sort "$linted" | uniq -d)" ] \
+    || fail "CI lint jobs lint a root more than once:"$'\n'"$(LC_ALL=C sort "$linted" | uniq -d)"
+  LC_ALL=C sort "$linted" | cmp -s - "$listed" \
+    || fail "CI lint jobs do not together lint exactly the canonical set"
+  pass "CI's lint matrix splits the canonical set across $job jobs, each root exactly once"
+}
+
+test_shard_refuses_a_total_other_than_the_shard_count() {
+  local spelled out rc
+  for spelled in 1/3 3/2 0/2 1 1/; do
+    rc=0
+    out=$(CI=true "$LINT" --shard "$spelled" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] || fail "--shard $spelled expected exit 2, got $rc"$'\n'"$out"
+    assert_contains "$out" "shard must be <k>/2" "--shard $spelled was not refused by name"
+  done
+  pass "fm-lint.sh refuses a --shard whose total disagrees with its shard count"
+}
+
 # The other half of that bound: with source following on, a whole shard in one
 # process peaks at the sum of its roots, so the shards must not run at once
 # unless the caller asks for it.
@@ -1564,6 +1627,8 @@ test_changed_mode_keeps_the_ci_rule_set
 test_changed_mode_option_list_equals_the_ci_option_list
 test_changed_mode_defaults_to_one_shard_at_a_time
 test_changed_mode_invokes_shellcheck_once_per_root
+test_ci_lint_matrix_splits_the_canonical_set_across_jobs
+test_shard_refuses_a_total_other_than_the_shard_count
 test_ci_keeps_external_sources_without_local_exclusions
 test_main_branch_keeps_external_sources
 test_merge_base_less_keeps_external_sources

@@ -51,11 +51,21 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint
+    name: Lint ${{ matrix.shard }}
     runs-on: ubuntu-latest
     # Hang tripwire only: lint executions measured at 14-16 minutes in the
     # September 12 starvation report, so this leaves deliberate margin.
     timeout-minutes: 25
+    # One lint shard per runner. A full-set ShellCheck process holds several GB,
+    # and running both shards on one hosted runner exhausted its memory: the
+    # runner shut down and killed the job with exit 143 part-way through lint,
+    # three times in a day (e.g. run 35950711794). bin/fm-lint.sh owns the
+    # shard split and refuses a matrix whose job-total disagrees with it.
+    strategy:
+      # Every shard reports so one failure never hides another shard's result.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -73,7 +83,7 @@ jobs:
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
       - id: lint
-        run: bin/fm-lint.sh
+        run: bin/fm-lint.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }}
       # Only when the lint itself failed: this job's log tail is what a
       # CI-repair agent reads, so tell it how to verify a repair cheaply.
       - name: How to verify a Lint repair locally

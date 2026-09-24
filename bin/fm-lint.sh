@@ -38,8 +38,8 @@
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
 #     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, passing a
-#     whole shard to one invocation. This is what CI always runs, so CI
-#     coverage never depends on a local diff.
+#     whole shard to one invocation. This is what CI always runs, one
+#     --shard per job, so CI coverage never depends on a local diff.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -58,6 +58,11 @@
 # Each shard writes separate diagnostics, and the parent replays those outputs in
 # deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
 # runs the same shards serially with byte-identical diagnostics and exit selection.
+# --shard <k>/2 runs only shard k's ShellCheck, so CI can give each shard its
+# own runner: one ShellCheck process of the full set holds several GB, and
+# two at once on one hosted runner exhausted its memory, which shut the runner
+# down and killed the job with SIGTERM part-way through lint. The
+# backend-purity, mutation-marker, and workflow checks still run in full.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -67,6 +72,8 @@
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --shard <k>/2 [path]... run only shard k's ShellCheck; the
+#                                      total must equal the shard count, 2
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -533,8 +540,18 @@ TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
 LIST_FILES=0
+SHARD=
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --shard)
+      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --shard requires <k>/2.\n' >&2; exit 2; }
+      SHARD=$2
+      shift 2
+      ;;
+    --shard=*)
+      SHARD=${1#*=}
+      shift
+      ;;
     --jobs)
       [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --jobs requires 1 or 2.\n' >&2; exit 2; }
       JOBS=$2
@@ -579,6 +596,14 @@ done
 case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
+esac
+# A caller that splits the shards across jobs names the total it expects, so a
+# job matrix that disagrees with the shard count is refused instead of leaving
+# a shard unrun or running one twice.
+case "$SHARD" in
+  '') ;;
+  1/2|2/2) SHARD=${SHARD%/*} ;;
+  *) printf 'fm-lint.sh: shard must be <k>/2 with k 1 or 2, got %s.\n' "$SHARD" >&2; exit 2 ;;
 esac
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
@@ -664,6 +689,10 @@ fi
 ROOT_COUNT=${#ROOTS[@]}
 
 if [ "$LIST_FILES" -eq 1 ]; then
+  [ -z "$SHARD" ] || {
+    printf 'fm-lint.sh: --list-files lists the whole set and does not accept --shard.\n' >&2
+    exit 2
+  }
   [ "$#" -eq 0 ] || {
     printf 'fm-lint.sh: --list-files does not accept explicit paths.\n' >&2
     exit 2
@@ -745,6 +774,13 @@ WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
 SHARD_COUNT=2
+# The shards this run analyses, 0-based and inclusive; --shard narrows to one.
+SHARD_FIRST=0
+SHARD_LAST=$((SHARD_COUNT - 1))
+if [ -n "$SHARD" ]; then
+  SHARD_FIRST=$((SHARD - 1))
+  SHARD_LAST=$SHARD_FIRST
+fi
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   : > "$TMP_ROOT/manifest.$worker"
@@ -866,26 +902,27 @@ fm_lint_wait_workers() {
 }
 
 if [ "$JOBS" -eq 1 ]; then
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+  worker=$SHARD_FIRST
+  while [ "$worker" -le "$SHARD_LAST" ]; do
     fm_lint_start_worker "$worker"
     fm_lint_wait_workers
     worker=$((worker + 1))
   done
 else
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+  worker=$SHARD_FIRST
+  while [ "$worker" -le "$SHARD_LAST" ]; do
     fm_lint_start_worker "$worker"
     worker=$((worker + 1))
   done
   fm_lint_wait_workers
 fi
 
-# Replay both stable shards in deterministic order and select the first nonzero
-# shard status. ShellCheck processes every root in a shard after earlier findings.
+# Replay the analysed stable shards in deterministic order and select the first
+# nonzero shard status. ShellCheck processes every root in a shard after earlier
+# findings.
 overall_rc=0
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+worker=$SHARD_FIRST
+while [ "$worker" -le "$SHARD_LAST" ]; do
   output="$OUTPUT_DIR/shard.$worker"
   [ ! -f "$output.out" ] || cat "$output.out"
   if [ -f "$output.rc" ]; then
