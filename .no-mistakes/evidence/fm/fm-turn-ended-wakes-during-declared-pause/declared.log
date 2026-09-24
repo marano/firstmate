@@ -1,0 +1,22 @@
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 3 slots held; oldest: held by pid 33556 for 16m01s running: env TMPDIR=/private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-3-firstmate/b6ecbf9c-cf89-4a80-8042-97f6d7b6ec15/scratchpad/lt GITHUB_ACTIONS=true bin/fm-lint.sh --telemetry /private/tmp/claude-501/-Users-marano--treehouse-firstmate-7077c2-3-firstmate/b6ecbf9c-cf89-4a80-8042-97f6d7b6ec15/scratchpad/telemetry-perroot-jobs2.tsv [in /Users/marano/.treehouse/firstmate-7077c2/3/firstmate]; 2 more - see mutex --status)
+fm-build-lock: acquired a machine-wide build slot after 20s
+ok - consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold
+ok - a pane becoming active again resets the consecutive wedge-escalation counter
+ok - a task awaiting landing raises no stale alarm, stopped or alive, while the same pane unacknowledged still does
+ok - a task awaiting landing never enters the wedge ladder: its escalation counter stays at zero through both entrances
+ok - status_declared_line folds notes, resolutions, the decisions and keyed waits they closed, and the unkeyed waits a bare resolution ended, and nothing else
+ok - status_declared_identity names the declaration, not the lines logged after it
+ok - a stopped worker's declared wait survives a later resolution, while open work with no standing wait still alarms
+ok - a bare resolution ends an unkeyed wait, while a stated default answer or an answered blocker between them leaves it standing
+ok - a wedged task that is not awaiting landing still alarms and still escalates, near misses included
+ok - a deliberately stopped worker with unlanded work surfaces once and never enters the wedge ladder; an unstopped idle one still escalates
+ok - a validated ahead head on a stopped worker raises no stale wake; an unvouched or behind head still does, with a log line
+ok - a validated rebased head on a stopped worker raises no stale wake; an unvouched one and a real wedge still do
+ok - a validated PR head only the pipeline's gate holds raises no stale wake on a stopped worker; an unvouched one still does
+ok - a declared pause an active no-mistakes run confirms holds the long pause cadence instead of resuming wedge tracking
+ok - a declared pause an active run confirms holds the pause cadence and re-arms past PAUSE_RESURFACE_SECS as a recheck, never a wedge
+ok - a dead agent behind a declared pause still wedge-escalates even while the run record reads working
+ok - a bare turn-end while the latest status is a declared pause is absorbed and its suppressor advanced
+ok - a turn-end whose latest status is no longer the declared pause (resumed, blocked, finished) still surfaces
+ok - a turn-end under a long-held pause surfaces once per recheck cadence and is absorbed between
+ok - a turn-end under a pause whose declared time has passed surfaces once for that declaration
