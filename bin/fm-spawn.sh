@@ -310,6 +310,9 @@
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above.
+#   The launch command itself exports the compact-adviser kill switch
+#   COMPACT_ADVISER_DISABLE=1 first, so it reaches the agent inside the
+#   cleared environment even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4744,6 +4747,15 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
+# spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
+# An export statement rather than a command-prefix assignment, so it carries the
+# value across a whole compound raw launch expression. It is unconditional, with
+# no config file or flag gating it, and sits outside every generated launch
+# prefix so it wins over any ambient value the pane already held. Under the
+# cleared launch environment it is part of the command the wrapping /bin/sh
+# runs, so the agent still receives it although nothing forwards it.
+LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -4779,6 +4791,10 @@ spawn_record_traceparent() {
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_relaunch_clear_input
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Export the compact-adviser kill switch into the pane shell through the same
+# pre-launch channel, so later commands in that shell inherit it too. The launch
+# command independently establishes the value for the agent process itself.
+spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
