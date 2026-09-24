@@ -72,11 +72,11 @@ if [ "\${1:-}" = send-keys ] && [ -s "$LAB/garble" ]; then
   last=\$((\${#args[@]} - 1))
   payload=\${args[\$last]}
   case "\$payload" in
-    ". '"*"/launch.sh'")
+    ". '"*"/launch."*".sh'")
       left=\$(cat "$LAB/garble")
       if [ "\$left" -gt 0 ]; then
         printf '%s\n' "\$((left - 1))" > "$LAB/garble"
-        args[\$last]=\${payload%launch.sh\'}lau
+        args[\$last]=\${payload%/launch.*}/lau
       fi
       ;;
   esac
@@ -171,6 +171,19 @@ garble_next() {  # <count>
   printf '%s\n' "$1" > "$LAB/garble"
 }
 
+# Every launch file a task's spawns staged, one path per line.
+launch_files() {  # <id>
+  local f
+  for f in "/tmp/fm-$1"/launch.*.sh; do
+    [ -f "$f" ] && printf '%s\n' "$f"
+  done
+  return 0
+}
+
+path_mode() {  # <path>
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 window_state() {  # <id>
   fm_backend_agent_state tmux "firstmate:fm-$1"
 }
@@ -254,6 +267,98 @@ test_relaunch_clears_a_poisoned_prompt() {
   pass "a relaunch clears a continuation prompt before typing its launch"
 }
 
+# The pane shell runs whatever the launch file holds, and the file sits under a
+# predictable /tmp path, so a fresh root is created private and the file is
+# readable by this user alone.
+# Named mutant: create the task temp root without umask 077 (it lands 0755).
+test_spawn_stages_its_launch_in_a_private_root() {
+  local id=launch-private-z5 out rc files
+  new_case private "$id"
+  garble_next 0
+  rm -rf "/tmp/fm-$id"
+  out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" --harness claude --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "a spawn into a fresh temp root should start its agent"$'\n'"$out"
+  assert_equals 700 "$(path_mode "/tmp/fm-$id")" \
+    "a fresh task temp root must be created 0700"
+  files=$(launch_files "$id")
+  [ "$(printf '%s\n' "$files" | grep -c .)" = 1 ] \
+    || fail "one spawn must stage exactly one launch file, found: $files"
+  assert_equals 600 "$(path_mode "$files")" "the staged launch file must be 0600"
+  pass "a spawn stages its launch command 0600 in a 0700 task temp root"
+}
+
+# A root that already exists is reused only when nobody else can write it; one
+# this user owns but left open is tightened rather than trusted as found.
+# Named mutants: drop the group/world-writable refusal (the first half then
+# launches from an open root), or drop the chmod 700 on a reused root (the
+# second half then leaves it 0755).
+test_spawn_refuses_a_task_temp_root_others_can_write() {
+  local id=launch-openroot-z6 out rc
+  new_case openroot "$id"
+  garble_next 0
+  rm -rf "/tmp/fm-$id"
+  mkdir "/tmp/fm-$id"
+  chmod 777 "/tmp/fm-$id"
+  out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" --harness claude --mode no-mistakes --yolo off); rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn must refuse a task temp root others can write, but it exited 0"$'\n'"$out"
+  assert_contains "$out" "is not a private directory owned by this user" \
+    "the refusal must name the unsafe temp root"
+  [ -z "$(launch_files "$id")" ] || fail "a refused spawn must not stage a launch file in an open root"
+  if [ -e "$LAB/agent-starts" ] && grep -q "task=$id" "$LAB/agent-starts"; then
+    fail "a refused spawn must not start an agent"
+  fi
+  [ "$(window_state "$id")" = missing ] \
+    || fail "a refused fresh spawn must close the endpoint it created (reads $(window_state "$id"))"
+  rm -rf "/tmp/fm-$id"
+  mkdir "/tmp/fm-$id"
+  chmod 755 "/tmp/fm-$id"
+  new_case openroot-owned "$id"
+  out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" --harness claude --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "a spawn should reuse a temp root this user owns and nobody else can write"$'\n'"$out"
+  assert_equals 700 "$(path_mode "/tmp/fm-$id")" \
+    "a reused task temp root must be tightened to 0700"
+  pass "a spawn refuses a temp root others can write and tightens one it owns"
+}
+
+# A source line typed for one incarnation can still sit buffered in the pane
+# when a relaunch stages the next, so a relaunch writes a new file and never
+# rewrites the one an earlier line names.
+# Named mutant: stage every launch at one fixed file name (the relaunch then
+# overwrites it and a single file remains).
+test_relaunch_never_reuses_a_launch_file() {
+  local id=launch-fresh-z7 out rc first first_sum files f
+  new_case freshfile "$id"
+  garble_next 0
+  rm -rf "/tmp/fm-$id"
+  out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" --harness claude --mode no-mistakes --yolo off); rc=$?
+  expect_code 0 "$rc" "the first spawn should start its agent"$'\n'"$out"
+  first=$(launch_files "$id")
+  [ -n "$first" ] || fail "the first spawn staged no launch file"
+  first_sum=$(cksum < "$first")
+  # End the stand-in agent so the endpoint reads agent-free for the relaunch.
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "firstmate:fm-$id" C-c
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(window_state "$id")" = dead ] && break
+    sleep 0.3
+  done
+  [ "$(window_state "$id")" = dead ] || fail "the stand-in agent did not stop before the relaunch"
+  out=$(run_fm fm-control.sh "$id" relaunch --note "exercise a second incarnation"); rc=$?
+  expect_code 0 "$rc" "the relaunch should start a replacement agent"$'\n'"$out"$'\n'"$(pane_tail "$id")"
+  [ "$(window_state "$id")" = alive ] \
+    || fail "the relaunched agent must be running (reads $(window_state "$id"))"
+  files=$(launch_files "$id")
+  [ "$(printf '%s\n' "$files" | grep -c .)" = 2 ] \
+    || fail "a relaunch must stage its own launch file beside the first, found: $files"
+  [ -f "$first" ] && [ "$(cksum < "$first")" = "$first_sum" ] \
+    || fail "a relaunch must never rewrite an earlier incarnation's launch file"
+  while IFS= read -r f; do
+    assert_equals 600 "$(path_mode "$f")" "every staged launch file must be 0600: $f"
+  done <<EOF
+$files
+EOF
+  pass "a relaunch stages a new launch file and leaves the earlier one untouched"
+}
+
 # The cause, with no shim: every line typed into the pane lands while its shell
 # waits on a slow pre-prompt hook, outside its line editor. The launch must still
 # arrive whole, with every line typed ahead of it in place.
@@ -282,7 +387,7 @@ test_spawn_launch_survives_a_slow_prompt_hook() {
   # case proves only that a launch through a slow hook still starts.
   runs=$(wc -l < "$LAB/hook-runs" | tr -d ' ')
   [ "$runs" -ge 3 ] || fail "the pane shell's prompt hook must run for the typed lines (ran $runs times)"
-  launch_bytes=$(wc -c < "/tmp/fm-$id/launch.sh" | tr -d ' ')
+  launch_bytes=$(wc -c < "$(launch_files "$id")" | tr -d ' ')
   if [ "$(uname -s)" = Darwin ]; then
     [ "${launch_bytes:-0}" -gt 1024 ] \
       || fail "the launch must exceed macOS's 1024-byte canonical-input limit for the case to prove anything (it is ${launch_bytes:-0} bytes)"
@@ -306,7 +411,7 @@ test_spawn_typed_line_keeps_margin_on_the_longest_launch() {
   out=$(run_fm fm-spawn.sh "$id" "$CASE_PROJ" \
     --harness claude --mode no-mistakes --yolo off --effort xhigh); rc=$?
   expect_code 0 "$rc" "the longest launch should start its agent"$'\n'"$out"$'\n'"$(pane_tail "$id")"
-  launch_bytes=$(wc -c < "/tmp/fm-$id/launch.sh" | tr -d ' ')
+  launch_bytes=$(wc -c < "$(launch_files "$id")" | tr -d ' ')
   [ "${launch_bytes:-0}" -gt 1024 ] \
     || fail "the longest launch must exceed 1024 bytes for the margin to mean anything (it is ${launch_bytes:-0} bytes)"
   longest=$(sort -n "$LAB/typed-lengths" | tail -1)
@@ -317,6 +422,9 @@ test_spawn_typed_line_keeps_margin_on_the_longest_launch() {
 }
 
 test_spawn_refuses_to_report_a_launch_that_never_started
+test_spawn_stages_its_launch_in_a_private_root
+test_spawn_refuses_a_task_temp_root_others_can_write
+test_relaunch_never_reuses_a_launch_file
 test_spawn_recovers_a_launch_cut_once
 test_relaunch_clears_a_poisoned_prompt
 test_spawn_launch_survives_a_slow_prompt_hook

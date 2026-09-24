@@ -164,6 +164,41 @@ test_launch_command_carries_the_switch_without_the_pane_export() {
   pass "the launch command sets the switch on its own, whichever allowlist posture is in force"
 }
 
+# The third carrier: under an enabled allowlist the env -i boundary pins the
+# switch itself, so the wrapping /bin/sh and everything it runs already hold it
+# before the launch command's own export. Replaying the emitted launch with the
+# pane exports dropped AND that inner export removed leaves the boundary as the
+# only carrier, against a contrary pane value the floor would otherwise forward.
+# The allowlist-absent replay of the same removal must read the contrary value,
+# which proves the removal really stripped the other carriers.
+# Named mutant: drop the literal COMPACT_ADVISER_DISABLE=1 from the env -i
+# prefix (the floor then forwards the contrary pane value and the probe reads 0).
+test_env_boundary_carries_the_switch_on_its_own() {
+  local setting rec out status seen launch stripped expected
+  for setting in enabled absent; do
+    rec=$(make_case "ship-boundary-$setting" codex "ship-boundary-$setting-a1")
+    read_case "$rec"
+    [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_case_spawn "ship-boundary-$setting-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
+    install_env_probe "$FAKEBIN_DIR" codex
+    launch=$(cat "$LAUNCH_LOG")
+    stripped=${launch//export COMPACT_ADVISER_DISABLE=1; /}
+    assert_not_equals "$launch" "$stripped" \
+      "allowlist=$setting: the emitted launch must carry its own export for this case to remove"
+    seen=$(env -i HOME="$TMP_ROOT/pane-home" PATH="$FAKEBIN_DIR:$PATH" TERM=xterm \
+      TMUX=synthetic-pane COMPACT_ADVISER_DISABLE="$CONTRARY" \
+      /bin/sh -c "$stripped") \
+      || fail "allowlist=$setting: the emitted launch failed to run without its own export"
+    expected=1
+    [ "$setting" = enabled ] || expected=$CONTRARY
+    assert_equals "$expected" "$seen" \
+      "allowlist=$setting: with the pane export and the launch command's export both gone, the env -i boundary alone decides the switch"
+  done
+  pass "the cleared-environment boundary sets the compact-adviser switch on its own"
+}
+
 test_secondmate_launch() {
   local setting rec sm out status seen
   for setting in absent enabled; do
@@ -344,6 +379,7 @@ SH
 test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
+test_env_boundary_carries_the_switch_on_its_own
 test_secondmate_launch
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
