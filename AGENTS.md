@@ -496,10 +496,12 @@ Reach the captain immediately for:
 
 In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
-When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
+Reply exactly `Captain, shipshape.` only to a true no-op, such as an idle re-read, an empty heartbeat, or a consequence-free acknowledgement, without characterizing the visible session's unrelated decisions.
+Whenever requested work finishes or a result needs the captain's word, send a real outcome reply instead.
+Whenever a turn calls for a captain-facing reply, the final response message stands alone with all key information from the whole turn (outcomes, consequences, the decision needed, and relevant URLs), even if already stated mid-turn; reporting a fix and its PR URL mid-turn and then ending with only "Awaiting your merge call." is wrong.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
-Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
+Whenever a PR is mentioned, including in any review or merge ask in the final reply, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
 ## 10. Backlog contract

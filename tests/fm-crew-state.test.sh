@@ -344,6 +344,21 @@ gate: review
 EOF
 }
 
+run_parked_mentions_ask_user() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,warning,ask-user.go,,auto-fix,the ask-user label is misread
+gate: review
+EOF
+}
+
 run_parked_scalar_gate_running() {  # <branch>
   cat <<EOF
 run:
@@ -728,6 +743,26 @@ test_genuine_parked_not_superseded() {
   assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
   pass "genuine parked run is not flagged superseded"
+}
+
+# A finding whose text merely mentions ask-user is not an authority gate, while
+# a real ask-user action still is.
+test_ask_user_text_is_not_authority_gate() {
+  reset_fakes
+  local d; d=$(new_case ask-user-text)
+  make_repo_on_branch "$d/wt" fm/feat-au
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-au.meta" "window=fm:fm-feat-au" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-au.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_mentions_ask_user fm/feat-au)"
+  local out; out=$(run_crew_state "$d" feat-au)
+  assert_contains "$out" "state: parked" "mention-only run is still parked"
+  assert_contains "$out" "1 finding(s)" "mention-only run reports its finding"
+  assert_not_contains "$out" "authority decision" "text mentioning ask-user is not an authority gate"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-au)"
+  out=$(run_crew_state "$d" feat-au)
+  assert_contains "$out" "authority decision" "a real ask-user action is an authority gate"
+  pass "authority gate is read from the action column, not the whole payload"
 }
 
 test_scalar_gate_parked_not_superseded() {
@@ -2900,6 +2935,7 @@ test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
+test_ask_user_text_is_not_authority_gate
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

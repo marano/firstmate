@@ -393,6 +393,35 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# 0 when the findings table carries a row whose `action` column is exactly
+# ask-user, i.e. a genuine authority gate. The column is located by position
+# from the table header, so a description, file, step, or branch that merely
+# mentions ask-user is not misread. A table whose header names a column before
+# `action` that this reader does not know is refused rather than guessed at.
+nm_gate_awaits_human_decision() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    function indent(l) { match(l, /^[ \t]*/); return RLENGTH }
+    function trimf(v) { gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/^"|"$/, "", v); return v }
+    !inrows && match($0, /^[ \t]*findings\[[0-9]+\]\{[^}]*\}:/) {
+      h = $0; sub(/^[^{]*\{/, "", h); sub(/\}:.*$/, "", h)
+      n = split(h, cols, ",")
+      pos = 0
+      for (i = 1; i <= n; i++) {
+        c = trimf(cols[i])
+        if (c == "action") { pos = i; break }
+        if (c != "id" && c != "severity" && c != "file" && c != "line") exit 1
+      }
+      if (!pos) exit 1
+      base = indent($0); inrows = 1; next
+    }
+    inrows {
+      if ($0 ~ /^[ \t]*$/ || indent($0) <= base) { inrows = 0; next }
+      split($0, f, ",")
+      if (trimf(f[pos]) == "ask-user") found = 1
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -812,7 +841,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
+      if nm_gate_awaits_human_decision; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else
