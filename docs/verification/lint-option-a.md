@@ -201,3 +201,37 @@ That memory pressure caused the CI kills is the leading hypothesis, not a proven
 The killed jobs' logs prove only the sender: each ends with `The runner has received a shutdown signal.` just before `Process completed with exit code 143`, and in the last 100 CI runs no job other than Lint carried that line.
 No log shows an out-of-memory message, so a runner shutdown for another reason, such as preemption, is not excluded.
 `bin/fm-lint.sh` now prints the stopping signal and the host's available memory and swap when a signal stops it, so the next such kill records whether memory was exhausted.
+
+## What a repeated source site costs
+
+The 2026-09-24 measurement compared commit `09966ec5d4b2` with the change that gave each late-loaded `bin/fm-pending-reply-lib.sh` dependency one source site and made every `bin/fm-watch.sh` library edge an analysis boundary, using the pinned 0.11.0 Darwin arm64 build on a 16 GB 10-core Apple M-series host.
+Each root was linted alone, and each shard as CI runs it:
+
+```bash
+mutex env GHCRTS=-s /usr/bin/time -l shellcheck --norc --external-sources -- <root>
+mutex env CI=true GHCRTS=-s /usr/bin/time -l bin/fm-lint.sh --shard <k>/2
+```
+
+GHC's `total memory in use` is the peak heap and `bytes allocated in the heap` the stable work proxy.
+The host was swapping throughout, so Darwin RSS under-read the heap and is not quoted.
+
+ShellCheck inlines a separate copy of a sourced file at every source site it follows; its only guard skips a file already on the current include stack.
+`bin/fm-pending-reply-lib.sh` followed `bin/fm-wake-lib.sh`, and through it the classifier, from three lock entry points: that root allocated 62 GiB with a 2,878 MB heap, against 32 GiB and 1,734 MB with one of those sites followed.
+A `# shellcheck source=` directive before a file's first command applies to the whole file, so that file's stray `source=bin/fm-marker-lib.sh` had silently resolved its three directive-less wake-library sites to the marker library.
+The cost is ShellCheck's dataflow analysis over the inlined program rather than any one function: `bin/fm-watch.sh` reached about 46,000 inlined lines from 24,000 unique ones, its sources alone reproduced 119 of its 132 GiB, and with `--extended-analysis=false` as a measurement-only control its maximum residency fell from 2,725 MB to 264 MB.
+
+| Root | Before | After |
+| --- | ---: | ---: |
+| `bin/fm-teardown.sh` | 202 GiB, 9,913 MB | 127 GiB, 7,140 MB |
+| `tests/fm-stat-shadowing.test.sh` | 157 GiB, 9,806 MB | 6 GiB, 373 MB |
+| `bin/fm-watch.sh` | 132 GiB, 7,951 MB | 5 GiB, 621 MB |
+| `bin/fm-pending-reply-lib.sh` | 62 GiB, 2,878 MB | 29 GiB, 1,565 MB |
+
+| Shard | Before | After |
+| --- | ---: | ---: |
+| 1/2 | 1,805 GiB, 9,179 MB, 792 s | 1,546 GiB, 5,109 MB, 600 s |
+| 2/2 | 2,181 GiB, 11,411 MB, 927 s | 1,594 GiB, 7,144 MB, 676 s |
+
+These figures supersede the `bin/fm-watch.sh` and `tests/fm-stat-shadowing.test.sh` rows of the heaviest-roots table above.
+`bin/fm-watch.sh` itself now follows no library, because each is a canonical root analysed with its full graph; the trade is that the watcher's own dataflow no longer sees library definitions.
+`bin/fm-teardown.sh`, `bin/fm-bootstrap.sh`, and `bin/fm-mail.sh` still source `bin/fm-wake-lib.sh` at two sites each, and `bin/fm-teardown.sh` is now the heaviest root measured.
