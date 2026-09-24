@@ -1177,6 +1177,70 @@ test_stale_watch_reclaim_publishes_before_clear() {
   pass "stale watcher reclaim publishes durable recovery evidence before clear"
 }
 
+# A watcher claims its singleton lock and then runs its recovery-marker
+# transitions before its release trap exists. Holding the wake-queue lock parks
+# it inside that window deterministically; the signal then goes to its whole
+# process group, exactly as bin/fm-watch-checkpoint.sh's deadline sends it.
+test_signal_during_startup_releases_watch_lock() {
+  local dir state fakebin out holder watcher i rc
+  dir=$(make_case startup-signal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3/holder-ready"
+    while [ ! -e "$3/holder-release" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$state/.wake-queue.lock" "$dir" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/holder-ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/holder-ready" ] || fail "test could not hold the wake-queue lock"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    perl -e 'setpgrp(0, 0); exec @ARGV or die "exec failed: $!\n"' "$WATCH" > "$out" 2>&1 &
+  watcher=$!
+  i=0
+  while [ "$i" -lt 300 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$watcher" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$watcher" ]; then
+    kill -KILL -- "-$watcher" 2>/dev/null || true
+    : > "$dir/holder-release"
+    wait "$holder" 2>/dev/null || true
+    fail "watcher never claimed its lock while the wake-queue lock was held"
+  fi
+  is_live_non_zombie "$watcher" || fail "watcher exited before reaching the wake-queue lock"
+  [ ! -e "$state/.last-watcher-beat" ] || fail "watcher was already supervising, not parked in startup"
+
+  kill -TERM -- "-$watcher" 2>/dev/null || fail "could not signal the watcher's process group"
+  : > "$dir/holder-release"
+  wait "$holder" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$watcher"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$watcher"; then
+    kill -KILL -- "-$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "watcher kept running after a signal deferred through startup"
+  fi
+  rc=0
+  wait "$watcher" || rc=$?
+  [ "$rc" -ne 0 ] || fail "watcher signalled during startup exited 0"
+  [ ! -e "$state/.last-watcher-beat" ] || fail "watcher entered supervision after a signal during startup"
+  [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
+    || fail "signal during watcher startup left the singleton lock behind ($(cat "$state/.watch.lock/pid" 2>/dev/null || echo no-pid))"
+  pass "a signal during watcher startup is honored after the lock's release trap is armed"
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -1204,6 +1268,7 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
+test_signal_during_startup_releases_watch_lock
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
