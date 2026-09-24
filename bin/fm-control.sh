@@ -474,7 +474,12 @@ retire_busy_incarnation() {
 #
 # Ownership: written only here; removed by bin/fm-spawn.sh whenever an agent is
 # launched for this id (so it can never outlive its incarnation, whoever drives
-# the relaunch) and by bin/fm-teardown.sh with the rest of the task's state. A
+# the relaunch) and by bin/fm-teardown.sh with the rest of the task's state.
+# Its readers are bin/fm-crew-state.sh, bin/fm-awaiting-landing-lib.sh,
+# bin/fm-fleet-snapshot.sh, bin/fm-watch.sh (which surfaces a stopped task with
+# unlanded work once instead of running the wedge ladder), and
+# bin/fm-grouping-lib.sh (which reads its presence alone to tell a worker still
+# holding its context from one firstmate has stopped); each owns its one use. A
 # failure to write is reported but never fails the verb - the agent really did
 # stop, and claiming otherwise would be the worse lie.
 record_agent_stopped() {  # <result>

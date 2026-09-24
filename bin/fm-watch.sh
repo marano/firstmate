@@ -2935,6 +2935,11 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # No state check runs as written: the byte-identified Relay shim dispatches
+  # the trusted bin/fm-x-poll.sh, a PR poll dispatches its validated sidecar
+  # data through the trusted bin/fm-pr-poll.sh, a custom check registered by
+  # bin/fm-check-register.sh runs from a hash-validated private snapshot, and
+  # every other state check is rejected without execution.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     for c in "$STATE"/*.check.sh; do

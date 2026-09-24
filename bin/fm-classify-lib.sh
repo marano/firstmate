@@ -902,6 +902,8 @@ EOF
 # rewrites the cursor from that clean baseline. A same-inode, same-size,
 # in-place byte edit is NOT detected; that is a deliberately accepted gap
 # because no code path in this repo ever does that to a status file.
+# A missing cursor takes the same full re-fold, so deleting one is safe and costs
+# one re-fold; teardown removes it with the task's status file.
 #
 # The other real failure mode is OUR OWN read failing (a stat/wc/tail I/O
 # error), not a malformed writer: every such read here is checked, and on

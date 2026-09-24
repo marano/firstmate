@@ -123,7 +123,23 @@
         "## Stow pass horizon",
         "## Turn-end pane-churn absorb",
         "## Pi Calm preference",
-        "## Pi supervision branch model and effort"
+        "## Pi supervision branch model and effort",
+        "### Home file owners",
+        "`state/.watch-triage.log`"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "bin/fm-wake-lib.sh",
+      "contains": [
+        "epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload"
+      ]
+    },
+    {
+      "source": "docs/configuration.md",
+      "target": "bin/fm-watch.sh",
+      "contains": [
+        "every other state check is rejected without execution"
       ]
     },
     {

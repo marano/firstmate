@@ -18,12 +18,68 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) owns the tracked surfaces, including the `CLAUDE.md` import pointer, the `.claude/skills` symlink, and the installer-hiding skill metadata.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `bin/fm-startup-network.sh`'s header owns the deferred startup stage that keeps every external-network call and the potentially slow inactive-outcome scan off that digest's blocking path, including its state files and the safety argument for running them later.
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+### Home file owners
+
+This index names each home file's purpose and the owner to read before relying on it; the owner, not this table, states formats and lifecycle.
+`<id>` is a task or secondmate id.
+[`AGENTS.md`](../AGENTS.md) section 2 keeps the files an agent must never touch by hand.
+
+| Path | Purpose | Owner |
+| --- | --- | --- |
+| `.env` | Relay pairing token, mail-plane credentials, Linear API key | [Relay](#relay-env), [Mail plane](#mail-plane-env), [Linear board](#linear-board-env) |
+| `config/crew-dispatch.json` | per-task dispatch profile rules, inherited by secondmate homes | [Crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson) |
+| `config/crew-harness`, `config/secondmate-harness` | static crewmate and secondmate launch harness | [Harness support](#harness-support) |
+| `config/backend` | runtime session-provider backend for new tasks | [Runtime backend](#runtime-backend-configbackend--fm_backend) |
+| `config/fleet-capacity` | idle-fleet alarm comparison value, never authority | [Fleet capacity](#fleet-capacity-configfleet-capacity) |
+| `config/startup-memory-budget` | startup prompt-memory allowance | [Startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| `config/wedge-alarm` | away-mode wedge-alarm active-alert channels | [Away-mode wedge alarm channels](#away-mode-wedge-alarm-channels-configwedge-alarm) |
+| `config/x-mode.env` | generated Relay watcher cadence | [Relay](#relay-env) |
+| `data/backlog.md` | task queue, dependencies, history | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend) |
+| `data/captain.md`, `data/captain-shared.md` | captain preferences | [Captain Preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd) |
+| `data/learnings.md` | curated fleet-local operational facts | [Operational learnings](#operational-learnings-datalearningsmd) |
+| `data/projects.md` | project registry and standing delivery posture | [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh), [`project-management`](../.agents/skills/project-management/SKILL.md) |
+| `data/secondmates.md` | local and remote secondmate routing table | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| `data/<id>/brief.md` | crewmate brief or secondmate charter | [`bin/fm-brief.sh`](../bin/fm-brief.sh) |
+| `data/<id>/report.md` | scout deliverable, kept after cleanup | [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) |
+| `state/<id>.status` | appended wake events, not current state | [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh), [`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) |
+| `state/<id>.turn-ended` | touched by turn-end hooks | [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) |
+| `state/<id>.meta` | task metadata | [`bin/fm-meta-keys-lib.sh`](../bin/fm-meta-keys-lib.sh) and each producer's header |
+| `state/<id>.inbox/` | durable steering inbox | [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) |
+| `state/<id>.agent-stopped` | deliberate agent stop while work waits to land | [`bin/fm-control.sh`](../bin/fm-control.sh) |
+| `state/<id>.backlog-close` | backlog transition an interrupted cleanup can finish | [`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh) |
+| `state/<id>.reconcile-nudged` | last inventory-reconcile nudge to a secondmate | [`bin/fm-secondmate-reconcile.sh`](../bin/fm-secondmate-reconcile.sh) |
+| `state/<id>.check.sh`, `state/<id>.check-trust` | watcher slow poll and its custom-check binding | [`bin/fm-watch.sh`](../bin/fm-watch.sh), [`bin/fm-check-register.sh`](../bin/fm-check-register.sh) |
+| `state/<id>.pr-poll`, `.pr-poll-registration`, `.pr-poll-retirement`, `.pr-poll-merge-notified` | PR merge poll data, provenance, retirement receipt, delivered outcome | [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh), [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh) |
+| `state/<id>.merge-authority` | accepted firstmate merge request | [`bin/fm-merge-authority-lib.sh`](../bin/fm-merge-authority-lib.sh) |
+| `state/<id>.validation-receipt` | validated head bound to its no-mistakes run | [`bin/fm-validation-receipt-lib.sh`](../bin/fm-validation-receipt-lib.sh) |
+| `state/branch-orphans` | merged head branches a merge could not delete | [`bin/fm-branch-orphan-lib.sh`](../bin/fm-branch-orphan-lib.sh), [`bin/fm-branch-orphans.sh`](../bin/fm-branch-orphans.sh) |
+| `state/branch-*`, `state/.lease-<task>` | Pi supervision-branch store and per-task leases | [`pi-supervision-branch.md`](pi-supervision-branch.md), [`bin/fm-lease-lib.sh`](../bin/fm-lease-lib.sh) |
+| `state/x-watch.check.sh`, `x-inbox/`, `x-context/`, `x-outbox/`, `x-poll.error`, `x-poll.claim-error` | Relay poll shim, mentions, reply context, dry-run previews, diagnostic markers | [Relay](#relay-env), [`bin/fm-x-lib.sh`](../bin/fm-x-lib.sh), [`bin/fm-x-poll.sh`](../bin/fm-x-poll.sh) |
+| `state/public-followup/` | promised public replies | [`bin/fm-public-followup.sh`](../bin/fm-public-followup.sh) |
+| `state/.mail-*` | mail-plane cursor, journal, retry, and lock | [`bin/fm-mail.sh`](../bin/fm-mail.sh) |
+| `state/pending-replies/` | parent-owned secondmate pending replies | [`bin/fm-pending-reply-lib.sh`](../bin/fm-pending-reply-lib.sh) |
+| `state/procevent/`, `state/procevent-inbox/` | registered sources, whose presence keeps supervision required, and their captured results | [Process-to-event sources](#process-to-event-sources-stateprocevent) |
+| `state/decision-bindings/`, `state/reconcile-requests/` | captured-answer bindings and open reconcile obligations | [`bin/fm-captain-hold.sh`](../bin/fm-captain-hold.sh), [`captain-hold-lifecycle.md`](captain-hold-lifecycle.md) |
+| `state/.ask-presented`, `state/.ask-round` | /ask picker bookkeeping | [`bin/fm-ask.sh`](../bin/fm-ask.sh) |
+| `state/.startup-network.*` | deferred startup stage | [`bin/fm-startup-network.sh`](../bin/fm-startup-network.sh) |
+| `state/.wake-queue`, `state/.wake-queue.lock` | durable queued wakes | [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) |
+| `state/.watcher-down` | watcher-downtime recovery generation | [`watcher-continuity.md`](watcher-continuity.md) |
+| `state/.<id>.open-decisions-cursor`, `state/.status-presentation-cursor`, `state/.status-presentation-lock` | bounded open-decision fold and unread-status presentation | [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) |
+| `state/.afk-contract`, `state/.afk-contract.lock`, `state/afk-contracts/` | away-posture record and archive | [`bin/fm-afk-contract.sh`](../bin/fm-afk-contract.sh) |
+| `state/.watch.lock` and watcher internals such as `.hash-*`, `.stale-*`, `.seen-*` | watcher singleton and bookkeeping | [`bin/fm-watch.sh`](../bin/fm-watch.sh) |
+| `state/.watch-triage.log` | bounded absorbed-wake debug log, safe to delete | [`watcher-continuity.md`](watcher-continuity.md) |
+| `state/.last-watcher-beat` | watcher liveness beacon | [`watcher-continuity.md`](watcher-continuity.md), [`turnend-guard.md`](turnend-guard.md) |
+| `state/.claude-autoarm*`, `.turnend-claude-blocks*`, `.cursor-park-owner*`, `.turnend-cursor-blocks` | per-harness turn-end guard records | [`turnend-guard.md`](turnend-guard.md), [`bin/fm-turnend-guard.sh`](../bin/fm-turnend-guard.sh) |
+| `state/.subsuper-*`, `state/.supervise-daemon.*` | away-mode sub-supervisor | [`bin/fm-supervise-daemon.sh`](../bin/fm-supervise-daemon.sh) |
+| `.no-mistakes/` | local validation state and evidence | no-mistakes |
 
 ## Pi Calm preference (config/calm)
 
