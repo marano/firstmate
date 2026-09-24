@@ -635,6 +635,11 @@ fm_lock_try_create() {
       rm -f "$lockdir" 2>/dev/null || true
     fi
   else
+    # -ef cannot see a link whose owner directory has become unreachable, so a
+    # dangling link of this process's own is still recognised by its target.
+    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
   fi
   fm_lock_discard_owner "$ownerdir"
