@@ -1100,7 +1100,7 @@ tests/fm-afk-return.test.sh 51035
 tests/fm-agy-harness.test.sh 49204
 tests/fm-agy-signals-live-e2e.test.sh 48
 tests/fm-ask-user-authority.test.sh 121
-tests/fm-ask.test.sh 91066
+tests/fm-ask.test.sh 41581
 tests/fm-awaiting-landing.test.sh 5211
 tests/fm-backend-cmux-smoke.test.sh 34
 tests/fm-backend-cmux.test.sh 3761
@@ -1119,7 +1119,7 @@ tests/fm-bearings-snapshot.test.sh 163732
 tests/fm-bootstrap-network-parallel.test.sh 9919
 tests/fm-bootstrap.test.sh 46700
 tests/fm-branch-supervision.test.sh 9288
-tests/fm-build-lock.test.sh 167962
+tests/fm-build-lock.test.sh 51624
 tests/fm-busy-adapter-wiring.test.sh 29153
 tests/fm-busy-state.test.sh 3115
 tests/fm-calm-pi-extension.test.sh 50567
@@ -1141,7 +1141,7 @@ tests/fm-cursor-primary-live-e2e.test.sh 105
 tests/fm-cursor-primary.test.sh 57141
 tests/fm-daemon.test.sh 29509
 tests/fm-documentation-audiences.test.sh 866
-tests/fm-extension-binding.test.sh 43166
+tests/fm-extension-binding.test.sh 9419
 tests/fm-fleet-snapshot-view.test.sh 13608
 tests/fm-fleet-sync.test.sh 37284
 tests/fm-gate-refuse.test.sh 5510
@@ -1223,7 +1223,7 @@ tests/fm-send-agy-confirm.test.sh 3687
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 86
 tests/fm-send-inbox.test.sh 39449
 tests/fm-send-remote-delivery.test.sh 31643
-tests/fm-send-resolve-key.test.sh 29149
+tests/fm-send-resolve-key.test.sh 77465
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 53
 tests/fm-send-secondmate-marker.test.sh 5577
 tests/fm-session-lock-ancestry.test.sh 2832
@@ -1247,7 +1247,7 @@ tests/fm-tangle-guard.test.sh 9792
 tests/fm-task-delivery.test.sh 28627
 tests/fm-task-inbox.test.sh 97051
 tests/fm-tasks-axi.test.sh 5353
-tests/fm-teardown-endpoint-safety.test.sh 34080
+tests/fm-teardown-endpoint-safety.test.sh 86194
 tests/fm-teardown.test.sh 169640
 tests/fm-test-fixture-cleanup.test.sh 1128
 tests/fm-test-fixtures.test.sh 2710
@@ -1262,7 +1262,7 @@ tests/fm-update.test.sh 12177
 tests/fm-vendor-auth-probe.test.sh 43355
 tests/fm-voice-relay.test.sh 28799
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 10440
-tests/fm-wake-drain-open-decisions-cursor.test.sh 56912
+tests/fm-wake-drain-open-decisions-cursor.test.sh 25372
 tests/fm-wake-drain-open-decisions.test.sh 7698
 tests/fm-wake-drain-outcome-backstop.test.sh 67229
 tests/fm-wake-drain-unread-status.test.sh 17276
@@ -1272,7 +1272,7 @@ tests/fm-watch-checkpoint.test.sh 6751
 tests/fm-watch-recovery-loop.test.sh 59548
 tests/fm-watch-triage-absorb.test.sh 154000
 tests/fm-watch-triage-busy.test.sh 146000
-tests/fm-watch-triage-declared.test.sh 211686
+tests/fm-watch-triage-declared.test.sh 114000
 tests/fm-watch-triage-stale.test.sh 296000
 tests/fm-watcher-lock.test.sh 95935
 EOF
