@@ -152,7 +152,7 @@ Every other `cost:` value is a completed run.
 No script produced the `unbound variable` signature, in any of the 210.
 The failures that did appear fall into three groups.
 
-Three tests cannot run in this lane by construction, and are excluded as `incompat:`.
+Three tests could not run in this lane as first written, and were excluded as `incompat:`.
 `tests/fm-cursor-harness.test.sh`, `tests/fm-harness-precedence.test.sh` and `tests/fm-muse-harness.test.sh` fake a process name by copying the interpreter to a file named after a harness.
 When `bash` is the Apple-signed system shell, macOS kills the copy:
 
@@ -177,7 +177,10 @@ muse
 ```
 
 So this is an artifact of the tests' process-faking technique under a system-shell pin, not a defect in `bin/fm-harness.sh`.
-It does mean the ancestry contract those three assert is unreachable in this lane, which is why they are excluded by name rather than left to fail.
+It did make the ancestry contract those three assert unreachable in this lane, which is why they were excluded by name rather than left to fail.
+All three now fake the process name through a symlink, so none is `incompat:` any more.
+`tests/fm-cursor-harness.test.sh` and `tests/fm-harness-precedence.test.sh` rejoined the lane.
+`tests/fm-muse-harness.test.sh` passed in 58,744 ms on 2026-09-24 under `/bin/bash` 3.2.57(1)-release, run as `bash tests/fm-muse-harness.test.sh` with the Bash-only shim above under `mutex`, which is above `STOCK_BASH_MAX_SCRIPT_MS`, so it is now a `cost:` exclusion.
 
 Two tests failed for reasons this host could not attribute at measurement time: `tests/fm-afk-return.test.sh` ("evidence publication failure should retain catch-up") and `tests/fm-extension-binding.test.sh` ("local bind returned no binding retirement identity").
 Neither showed the Bash 3.2 signature and neither copies the interpreter.
