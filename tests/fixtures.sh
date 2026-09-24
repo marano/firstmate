@@ -130,7 +130,12 @@ case "${1:-}" in
     done
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window|kill-window)
+    # FM_FAKE_WINDOW_LOG records each window create/close in call order.
+    [ -z "${FM_FAKE_WINDOW_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_WINDOW_LOG"
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

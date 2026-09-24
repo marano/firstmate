@@ -743,7 +743,27 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+test_refused_refresh_closes_the_endpoint_it_created() {
+  local rec id out status log
+  id='pool-refused-endpoint-r1'
+  rec=$(make_originless_case refused-endpoint "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  log="$CASE_DIR/windows.log"
+  : > "$log"
+  out=$(FM_FAKE_WINDOW_LOG="$log" run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin"
+  assert_contains "$out" "could not fetch origin" "spawn did not refuse on the failed fetch"
+  assert_grep 'new-window' "$log" "the spawn never created an endpoint, so the test proves nothing"
+  assert_grep "kill-window -t =firstmate:=fm-$id" "$log" \
+    "the refused spawn left the endpoint it created open"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a refused base refresh closes the endpoint the spawn created"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_refused_refresh_closes_the_endpoint_it_created
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching

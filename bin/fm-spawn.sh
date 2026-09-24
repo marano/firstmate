@@ -271,9 +271,12 @@
 #   resolves the current remote default branch, and resets to its tip. When none
 #   is detected, spawn skips that remote freshness check and launches from the
 #   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
+#   fetching or resetting its base. Each fetch is retried once before it counts
+#   as unreachable. An unreachable detected origin, unresolved
 #   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   risking a PR based on stale history or discarding local work; that refusal
+#   closes the endpoint the spawn just created, so a retry never meets "window
+#   already exists".
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -3065,6 +3068,16 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# One bounded retry: a fetch that fails once and succeeds seconds later is the
+# common transient, and refusing the spawn on it costs the operator a relaunch.
+spawn_fetch_retry() { # <worktree> <fetch args...>
+  local worktree=$1
+  shift
+  git -C "$worktree" fetch --quiet "$@" && return 0
+  sleep 1
+  git -C "$worktree" fetch --quiet "$@"
+}
+
 freshen_spawn_worktree_base() { # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -3082,7 +3095,7 @@ freshen_spawn_worktree_base() { # <worktree>
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
-  if ! git -C "$worktree" fetch --quiet origin; then
+  if ! spawn_fetch_retry "$worktree" origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3095,7 +3108,7 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   }
   target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  if ! spawn_fetch_retry "$worktree" origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3955,7 +3968,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  # The endpoint was created for this spawn and holds nothing but the idle
+  # shell in the pooled worktree, so a refused refresh closes it; leaving it
+  # makes the retry fail on "window already exists".
+  freshen_spawn_worktree_base "$WT" || {
+    spawn_launch_endpoint_cleanup
+    exit 1
+  }
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
