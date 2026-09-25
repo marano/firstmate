@@ -501,6 +501,197 @@ test_lock_reap_spares_the_owner_a_held_lock_links() {
   pass "reaping spares the owner directory a held lock points at"
 }
 
+# Wait up to 10s for <path> to exist and hold something.
+lock_handoff_wait_file() {  # <path>
+  local i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$1" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$1" ]
+}
+
+# A bounded acquire's helper publishes the lock, hands its owner directory to
+# the waiting caller and exits. An acquirer collecting stray owners beside it
+# read the helper's pid before that handoff and tested it after the helper
+# exited, so it found a dead owner and removed the owner directory the caller's
+# live lock now linked. This parks the helper just before it links the lock, the
+# collector between its pid read and its liveness test, and the caller at its
+# own ownership read, then releases them in the order the concurrent
+# append/drain red needed: the caller found its lock dangling and the bounded
+# acquire refused it ("queue lock could not be acquired safely"). Landing after
+# that read instead, the same collection left the caller holding a lock nothing
+# else could see.
+# Mutant: skip the owner the lock links by a look at the link taken before the scan again.
+test_lock_reap_spares_an_owner_handed_to_a_bounded_caller() {
+  local dir state fakebin lockdir sync real_cat real_ln real_sleep holder caller reaper
+  local i pid helper_pid result caller_rc caller_pid owner leftover
+  dir=$(make_case lock-reap-handoff)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.handoff.lock"
+  sync="$dir/sync"
+  mkdir -p "$sync"
+  real_cat=$(command -v cat) || fail "handoff fixture: cat is unavailable"
+  real_ln=$(command -v ln) || fail "handoff fixture: ln is unavailable"
+  real_sleep=$(command -v sleep) || fail "handoff fixture: sleep is unavailable"
+  cat > "$fakebin/sleep" <<SH
+#!/bin/sh
+printf '%s\n' "\$1" >> "$sync/sleeps"
+exec "$real_sleep" "\$@"
+SH
+  # The first link of the lock itself once ln.armed exists is the helper
+  # publishing it. Matched by target rather than by order, so no other link,
+  # such as a .steal lock's, can take the park.
+  cat > "$fakebin/ln" <<SH
+#!/bin/sh
+for target; do :; done
+if [ "\$target" = "$lockdir" ] && mv "$sync/ln.armed" "$sync/ln.parked" 2>/dev/null; then
+  while [ ! -e "$sync/ln.go" ]; do "$real_sleep" 0.05; done
+fi
+exec "$real_ln" "\$@"
+SH
+  # A collector's pid read returns what it read only once reap.go exists, so
+  # its liveness test runs after everything released in between. The caller's
+  # ownership read is parked before it reads anything.
+  cat > "$fakebin/cat" <<SH
+#!/bin/sh
+case "\$*" in
+  "$lockdir"/pid)
+    if mv "$sync/caller.armed" "$sync/caller.parked" 2>/dev/null; then
+      while [ ! -e "$sync/caller.go" ]; do "$real_sleep" 0.05; done
+    fi
+    ;;
+  "$lockdir".owner.*/pid)
+    if mv "$sync/reap.armed" "$sync/reap.parked" 2>/dev/null; then
+      out=\$("$real_cat" "\$@") || exit
+      printf '%s\n' "\$out" > "$sync/reap.pid.tmp" && mv "$sync/reap.pid.tmp" "$sync/reap.pid"
+      while [ ! -e "$sync/reap.go" ]; do "$real_sleep" 0.05; done
+      printf '%s\n' "\$out"
+      exit 0
+    fi
+    ;;
+esac
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$fakebin/sleep" "$fakebin/ln" "$fakebin/cat"
+  holder=
+  caller=
+  reaper=
+  handoff_abort() {
+    : > "$sync/ln.go"
+    : > "$sync/reap.go"
+    : > "$sync/caller.go"
+    : > "$sync/holder.go"
+    : > "$sync/caller.done"
+    for pid in $holder $caller $reaper; do
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "$1"
+  }
+
+  # Detached from this script's stdout: the runner reads each script through a
+  # pipe, so a fixture still holding it after a failure would stall the lane.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "held\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$sync/holder.ready" "$sync/holder.go" >/dev/null 2>&1 &
+  holder=$!
+  lock_handoff_wait_file "$sync/holder.ready" || handoff_abort "handoff fixture: the holder never took the lock"
+
+  # A dangling link reads as an acquirer that has not recorded its pid yet;
+  # the long grace keeps it that way for the whole case on a slow runner rather
+  # than letting stale recovery quietly repair what the collection broke.
+  PATH="$fakebin:$PATH" FM_LOCK_STALE_AFTER=60 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    rc=0
+    fm_lock_acquire_wait_bounded "$2" 30 || rc=$?
+    fm_current_pid me || exit 11
+    printf "%s %s\n" "$rc" "$me" > "$3.tmp" && mv "$3.tmp" "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    [ "$rc" -ne 0 ] || fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$sync/caller.result" "$sync/caller.done" >/dev/null 2>&1 &
+  caller=$!
+  i=0
+  while [ "$i" -lt 200 ] && ! grep -Fx '0.1' "$sync/sleeps" >/dev/null 2>&1; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Fx '0.1' "$sync/sleeps" >/dev/null 2>&1 \
+    || handoff_abort "handoff fixture: the bounded helper never entered its contended wait"
+
+  : > "$sync/ln.armed"
+  : > "$sync/holder.go"
+  wait "$holder" || handoff_abort "handoff fixture: the holder did not release cleanly"
+  holder=
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$sync/ln.parked" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$sync/ln.parked" ] || handoff_abort "handoff fixture: the helper never reached its link"
+
+  : > "$sync/reap.armed"
+  PATH="$fakebin:$PATH" FM_LOCK_STALE_AFTER=60 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_create "$2"; then
+      fm_lock_release "$2"
+      echo won
+    else
+      echo lost
+    fi
+  ' _ "$LIB" "$lockdir" > "$sync/reaper.out" 2>&1 &
+  reaper=$!
+  lock_handoff_wait_file "$sync/reap.pid" \
+    || handoff_abort "handoff fixture: the collector never read the helper's owner directory"
+  helper_pid=$(cat "$sync/reap.pid")
+  [ "$helper_pid" != "$reaper" ] \
+    || handoff_abort "handoff fixture: the collector read its own owner directory, not the helper's"
+
+  : > "$sync/caller.armed"
+  : > "$sync/ln.go"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$sync/caller.parked" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$sync/caller.parked" ] || handoff_abort "handoff fixture: the caller never came back from its helper"
+  ! kill -0 "$helper_pid" 2>/dev/null \
+    || handoff_abort "handoff fixture: the helper $helper_pid outlived its handoff"
+  [ -L "$lockdir" ] || handoff_abort "handoff fixture: the helper never linked the lock"
+  owner=$(readlink "$lockdir")
+
+  : > "$sync/reap.go"
+  wait "$reaper" || handoff_abort "handoff fixture: the collector's acquire attempt crashed"
+  reaper=
+  [ "$(cat "$sync/reaper.out")" = lost ] \
+    || handoff_abort "an acquirer took a lock the bounded caller held: $(cat "$sync/reaper.out")"
+
+  : > "$sync/caller.go"
+  lock_handoff_wait_file "$sync/caller.result" || handoff_abort "handoff fixture: the caller never reported"
+  result=$(cat "$sync/caller.result")
+  caller_rc=${result%% *}
+  caller_pid=${result#* }
+  [ "$caller_rc" = 0 ] \
+    || handoff_abort "the bounded acquire refused the lock its helper had just handed it (rc=$caller_rc, owner directory $([ -d "$owner" ] && echo kept || echo collected))"
+  [ -d "$owner" ] \
+    || handoff_abort "stray-owner collection removed the owner directory the bounded caller had just been handed, leaving its lock dangling"
+  [ -e "$lockdir" ] && [ "$(cat "$lockdir/pid" 2>/dev/null)" = "$caller_pid" ] \
+    || handoff_abort "the bounded caller does not hold the lock it was handed"
+
+  : > "$sync/caller.done"
+  wait "$caller" || handoff_abort "handoff fixture: the caller did not release cleanly"
+  caller=
+  assert_absent "$lockdir" "the bounded caller's release left its lock behind"
+  leftover=$(find "$state" -maxdepth 1 -name '.handoff.lock.owner.*' 2>/dev/null)
+  [ -z "$leftover" ] || fail "the handoff left owner directories behind: $leftover"
+  pass "stray-owner collection spares the owner directory a bounded acquire hands to its caller"
+}
+
 test_lock_late_claim_loses_after_recreate() {
   local dir state lockdir out
   dir=$(make_case lock-late-claim)
@@ -1836,6 +2027,7 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_without_a_usable_directory_is_refused_promptly
 test_lock_collects_owner_dirs_stranded_by_a_dead_acquirer
 test_lock_reap_spares_the_owner_a_held_lock_links
+test_lock_reap_spares_an_owner_handed_to_a_bounded_caller
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_create_keeps_own_lock_through_group_signal
