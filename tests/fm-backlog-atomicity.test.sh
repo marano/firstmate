@@ -3635,6 +3635,79 @@ test_cleanup_of_an_unstarted_grouped_dispatch_requeues_every_member() {
   pass "cleanup of an unstarted grouped dispatch requeues the unit and every member"
 }
 
+# The GitHub issue mirror's cleanup half: a requeued item's issue follows it
+# back to the queue after the transition landed, and a mirror failure never
+# fails the cleanup (bin/fm-github-issue-lib.sh). The fake stands in for gh
+# through the FM_GITHUB_ISSUE_CMD seam and logs each call.
+make_issue_transport() {  # <case-dir>
+  cat > "$1/fakebin/fm-fake-gh-issue" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_GH_DIR/issue-calls"
+if [ -e "$FM_FAKE_GH_DIR/issue-fail" ]; then
+  echo 'gh: Server Error (HTTP 500)' >&2
+  exit 1
+fi
+printf '{}\n'
+SH
+  chmod +x "$1/fakebin/fm-fake-gh-issue"
+  : > "$1/issue-calls"
+}
+
+record_issue() {  # <case-dir> <id> <owner/repo#N>
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$1")" "$ROOT/bin/fm-tasks-axi.sh" issue "$2" "$3" >/dev/null \
+    || fail "fixture: could not record the GitHub issue of $2"
+}
+
+# Red on: bin/fm-teardown.sh leaves a requeued item's issue labelled in progress,
+# or lets the mirror fail the cleanup.
+test_cleanup_requeue_reopens_each_items_github_issue_and_never_fails_on_it() {
+  local case_dir unit out mode
+  for mode in answers fails; do
+    unit=atomic-issue-requeue-$mode
+    case_dir=$(make_home "issue-requeue-$mode")
+    grouped_unit_in_flight "$case_dir" "$unit" "issue-member-$mode"
+    rm -f "$(home_of "$case_dir")/state/$unit.status"
+    record_issue "$case_dir" "$unit" marano/firstmate#12
+    record_issue "$case_dir" "issue-member-$mode" marano/firstmate#13
+    make_issue_transport "$case_dir"
+    [ "$mode" = answers ] || : > "$case_dir/issue-fail"
+
+    out=$(FM_FAKE_GH_DIR="$case_dir" FM_GITHUB_ISSUE_CMD="$case_dir/fakebin/fm-fake-gh-issue" \
+      run_teardown "$case_dir" "$unit") || fail "a $mode mirror failed the cleanup: $out"
+    [ "$(row_state "$case_dir" "$unit")" = queued ] || fail "the unit was not requeued ($mode)"
+    assert_grep 'api -X PATCH repos/marano/firstmate/issues/12 -f state=open' "$case_dir/issue-calls" \
+      "the requeued unit's issue was not reopened ($mode)"
+    assert_grep 'api -X PATCH repos/marano/firstmate/issues/13 -f state=open' "$case_dir/issue-calls" \
+      "the requeued member's issue was not reopened ($mode)"
+    if [ "$mode" = fails ]; then
+      assert_contains "$out" "actionable: the GitHub issue marano/firstmate#12 recorded on $unit could not be reopened" \
+        "the mirror failure was not reported as actionable"
+    else
+      assert_contains "$out" "marano/firstmate#12 reopened as queued" "the reopen was not reported"
+    fi
+  done
+  pass "cleanup's requeue reopens every requeued item's GitHub issue, and a failure never fails the cleanup"
+}
+
+# Red on: bin/fm-teardown.sh moves the issue on an ordinary close. Merge is the
+# issue's one closer, so a shipped item's cleanup leaves it alone.
+test_cleanup_close_leaves_the_github_issue_to_the_merge() {
+  local case_dir id out
+  id=atomic-issue-close-h9
+  case_dir=$(make_home issue-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-issue-close"
+  record_issue "$case_dir" "$id" marano/firstmate#14
+  make_issue_transport "$case_dir"
+
+  out=$(FM_FAKE_GH_DIR="$case_dir" FM_GITHUB_ISSUE_CMD="$case_dir/fakebin/fm-fake-gh-issue" \
+    run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] || fail "the shipped item was not closed"
+  [ ! -s "$case_dir/issue-calls" ] || fail "an ordinary close moved the issue: $(cat "$case_dir/issue-calls")"
+  pass "cleanup's ordinary close leaves the GitHub issue to the merge that closes it"
+}
+
 test_recovery_replays_an_interrupted_requeue() {
   local case_dir id out
   id=atomic-unstarted-replay-h4
@@ -3772,4 +3845,6 @@ test_single_item_dispatch_and_close_are_unchanged
 test_spawn_refuses_a_harness_whose_command_is_missing
 test_cleanup_of_an_unstarted_task_requeues_it_instead_of_closing
 test_cleanup_of_an_unstarted_grouped_dispatch_requeues_every_member
+test_cleanup_requeue_reopens_each_items_github_issue_and_never_fails_on_it
+test_cleanup_close_leaves_the_github_issue_to_the_merge
 test_recovery_replays_an_interrupted_requeue

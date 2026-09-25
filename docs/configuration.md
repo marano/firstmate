@@ -869,6 +869,39 @@ A card already at or past the phase being applied is left exactly where it is, s
 The completed target is the team's first completed status in its own workflow order, and the chosen status is always named in the output, so a team ordered unusually is visible on its first move.
 A network, API, or configuration failure is reported as an `actionable:` line and never changes whether the worker started or the pull request landed.
 
+## GitHub issue mirror
+
+A chosen backlog item can be mirrored as a public GitHub issue, so its progress is readable without firstmate running and its pull request links to it.
+The mirror is one-way: `data/backlog.md` stays authoritative, and an edit or comment made on the issue is never read back.
+`bin/fm-github-issue-lib.sh` is the single owner of the contract.
+
+Nothing is mirrored unless it is published deliberately, one item at a time:
+
+```sh
+bin/fm-tasks-axi.sh publish <id> marano/firstmate --title "<public title>" --summary-file <public-summary.md>
+```
+
+The issue is created from that public-safe title and summary, never from the item's private body, and its reference is recorded on the item as one `GitHub issue: marano/firstmate#123` line.
+`bin/fm-tasks-axi.sh issue <id> [<owner/repo#123>]` reads or records that line and carries it across a body rewrite, the way `linear` handles a card.
+A second publish of the same item is refused, so a retry never creates a second issue.
+No item is ever matched to an issue by searching GitHub, and nothing reads an issue the item did not record.
+
+Once published, the issue follows the backlog:
+- dispatch labels it `in progress` (`bin/fm-spawn.sh`);
+- a proven merge closes it as completed and drops the label (`bin/fm-pr-merge.sh`);
+- cleanup's requeue, a handback, or `fm-tasks-axi.sh requeue` reopens it and drops the label.
+
+Each move runs after the local transition has landed and never gates it.
+A GitHub failure is reported as an `actionable:` line and never changes whether the worker started, the pull request landed, or the item returned to the queue.
+A transition replayed at session start makes no GitHub call, because the session-start digest never touches the network.
+An item with no issue line is untouched and never mentioned.
+
+Firstmate closes the issue itself, so it has exactly one closer.
+A brief for an item that carries an issue tells the worker to write `Refs <owner/repo#N>` in the pull request body and never a closing keyword; the full reference links correctly even from a pull request in another repository.
+
+Every call is `gh api` against an explicit `repos/<owner>/<repo>/...` path with `gh`'s own authentication, bounded by `FM_GITHUB_ISSUE_TIMEOUT` (default 20 seconds).
+`FM_GITHUB_ISSUE_CMD` replaces `gh` with a command that takes the same arguments and answers as `gh` would; it is the seam the tests drive, because they cannot call GitHub.
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.
@@ -1151,6 +1184,8 @@ FM_LINEAR_API_URL=https://api.linear.app/graphql   # Linear GraphQL endpoint
 FM_LINEAR_TIMEOUT=20    # seconds bounding one Linear call, so a wedged board cannot hold a dispatch or a merge open
 FM_LINEAR_ENV_FILE=     # alternate .env-style file the Linear key is read from
 FM_LINEAR_CMD=          # replaces the HTTP call; receives the request-body file and prints the response JSON. The test seam
+FM_GITHUB_ISSUE_TIMEOUT=20   # seconds bounding one GitHub issue-mirror call. See "GitHub issue mirror"
+FM_GITHUB_ISSUE_CMD=    # replaces gh for the issue mirror, with the same arguments. The test seam
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks; hitting it prints an actionable NETWORK_CHECKS line, and it also sets the deferred worker's lease wait and, with FM_SESSION_START_TIMEOUT, its hard lifetime cap (bin/fm-startup-network.sh)
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced

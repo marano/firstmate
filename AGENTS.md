@@ -418,6 +418,7 @@ When a main-side thread such as a pending captain decision or relay reminder is 
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
 When the work is tracked by a card on the captain's Linear board, record that card on the item at intake with `bin/fm-tasks-axi.sh linear <id> <BLU-1234>`; dispatch and merge then move it themselves, and an item with no card needs nothing (`docs/configuration.md` "Linear board").
+Mirror an item as a public GitHub issue only when the captain chooses it, through `bin/fm-tasks-axi.sh publish` with a public-safe title and summary; its moves are then automatic (`docs/configuration.md` "GitHub issue mirror").
 Re-evaluate queued work after every reported completion, teardown, and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.

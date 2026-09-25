@@ -79,6 +79,11 @@
 # second owner of a contract that must stay current across relaunches.
 # A rendered ship brief for a PR-based mode is refused when it authorizes any
 # `done:` status template carrying no PR URL; bin/fm-dod-lib.sh owns that rule.
+# A PR-based ship brief whose backlog item, or any item it delivers, carries a
+# `GitHub issue:` line gains one line telling the worker to write `Refs` to that
+# issue and never a closing keyword, because firstmate closes the issue itself at
+# merge (bin/fm-github-issue-lib.sh owns the mirror). A home with no backlog, or
+# an item with no issue, adds nothing.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -102,6 +107,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-github-issue-lib.sh
+. "$SCRIPT_DIR/fm-github-issue-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -596,6 +603,39 @@ esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$DELIVERS") || exit 1
 
+# The issue line described in the header. A malformed issue line is reported
+# and left out rather than refusing the brief: the mirror never gates work.
+brief_issue_line() {  # <id>...
+  local id status refs='' count=0
+  for id in "$@"; do
+    status=0
+    fm_github_issue_of_row "$DATA" "$id" || status=$?
+    case "$status" in
+      0)
+        [ -n "$FM_GITHUB_ISSUE_REF" ] || continue
+        refs="${refs:+$refs and }\`Refs $FM_GITHUB_ISSUE_REF\`"
+        count=$((count + 1))
+        ;;
+      1) echo "warning: $FM_GITHUB_ISSUE_ERROR; the brief carries no issue line for it" >&2 ;;
+    esac
+  done
+  [ "$count" -gt 0 ] || return 0
+  if [ "$count" -eq 1 ]; then
+    printf '\n\nThis work is mirrored on a public GitHub issue that firstmate closes itself at merge: write %s in the pull request body, and never a closing keyword such as Closes, Fixes, or Resolves.' "$refs"
+  else
+    printf '\n\nThis work is mirrored on public GitHub issues that firstmate closes itself at merge: write %s in the pull request body, and never a closing keyword such as Closes, Fixes, or Resolves.' "$refs"
+  fi
+}
+ISSUE_LINE=
+if [ "$MODE" != local-only ]; then
+  ISSUE_IDS=("$ID")
+  if [ -n "$DELIVERS" ]; then
+    IFS=, read -r -a ISSUE_MEMBERS <<< "$DELIVERS"
+    ISSUE_IDS+=(${ISSUE_MEMBERS[@]+"${ISSUE_MEMBERS[@]}"})
+  fi
+  ISSUE_LINE=$(brief_issue_line "${ISSUE_IDS[@]}")
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -663,7 +703,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
+$DOD$ISSUE_LINE
 EOF
 fm_dod_assert_done_pr_bound "$MODE" "$BRIEF" "$(cat "$BRIEF")" || { rm -f "$BRIEF"; exit 1; }
 if [ -n "$DELIVERS" ]; then

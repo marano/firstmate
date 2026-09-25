@@ -474,6 +474,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-linear-lib.sh
 . "$SCRIPT_DIR/fm-linear-lib.sh"
+# shellcheck source=bin/fm-github-issue-lib.sh
+. "$SCRIPT_DIR/fm-github-issue-lib.sh"
 # shellcheck source=bin/fm-grouping-lib.sh
 . "$SCRIPT_DIR/fm-grouping-lib.sh"
 
@@ -5063,8 +5065,12 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 # can refuse a dispatch, and the board must never become a second refusal.
 # fm_linear_board_advance always succeeds and is silent in a home with no Linear
 # key (bin/fm-linear-lib.sh). A grouped dispatch moved its members' rows In
-# flight in the same commit, so their cards move with the unit's.
+# flight in the same commit, so their cards move with the unit's. A published
+# item's GitHub issue follows the same rule and is labelled in progress; an item
+# with no issue is untouched (bin/fm-github-issue-lib.sh).
 if [ "$BACKLOG_TRANSITION" = 1 ] && [ "$KIND" = ship ]; then
   fm_linear_board_advance "$FM_HOME" "$DATA" start "$ID" \
+    ${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}
+  fm_github_issue_advance "$DATA" start "$ID" \
     ${SPAWN_MEMBERS[@]+"${SPAWN_MEMBERS[@]}"}
 fi

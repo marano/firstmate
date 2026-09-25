@@ -3261,6 +3261,84 @@ test_a_refused_merge_leaves_the_card_alone() {
   pass "a refused merge leaves its card exactly where the dispatch put it"
 }
 
+# --- GitHub issue mirror, merge half ---------------------------------------
+#
+# A published item's issue is closed by firstmate at a PROVEN merge, since the
+# pull request only refers to it. The mirror is reached only through
+# bin/fm-github-issue-lib.sh's FM_GITHUB_ISSUE_CMD seam; the fake logs each call
+# and fails on demand.
+
+# add_issue_mocks <case_dir> <owner/repo#N>
+add_issue_mocks() {
+  local case_dir=$1 ref=$2
+  fm_tasks_axi_in_case "$case_dir" add task-x1 "Item task-x1" --kind ship --repo app-web \
+    || fail "fixture: could not add the backlog item"
+  fm_tasks_axi_in_case "$case_dir" issue task-x1 "$ref" \
+    || fail "fixture: could not record the GitHub issue"
+  : > "$case_dir/issue-calls"
+  cat > "$case_dir/fakebin/fm-fake-gh-issue" <<'SH'
+#!/usr/bin/env bash
+dir=$FM_FAKE_GH_DIR
+printf '%s\n' "$*" >> "$dir/issue-calls"
+if [ -e "$dir/issue-fail" ]; then
+  echo 'gh: Server Error (HTTP 500)' >&2
+  exit 1
+fi
+printf '{}\n'
+SH
+  chmod +x "$case_dir/fakebin/fm-fake-gh-issue"
+}
+
+# Red on: bin/fm-pr-merge.sh does not close a published item's issue after a
+# proven merge, which would leave the only closer missing because the pull
+# request carries no closing keyword.
+test_a_proven_merge_closes_the_items_github_issue() {
+  local case_dir rc
+  case_dir=$(make_case issue-merge-closes)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_issue_mocks "$case_dir" marano/firstmate#12
+
+  set +e
+  FM_FAKE_GH_DIR="$case_dir" FM_GITHUB_ISSUE_CMD="$case_dir/fakebin/fm-fake-gh-issue" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "issue-merge-closes: the merge should succeed"
+  assert_contains "$(cat "$case_dir/stdout")" "marano/firstmate#12 closed" \
+    "the merge did not report closing the issue"
+  assert_grep 'api -X PATCH repos/marano/firstmate/issues/12 -f state=closed -f state_reason=completed' \
+    "$case_dir/issue-calls" "the merge did not close the issue as completed"
+  pass "a proven merge closes its item's GitHub issue"
+}
+
+# Red on: bin/fm-pr-merge.sh lets a mirror failure change a landed merge's
+# outcome.
+test_a_github_issue_failure_never_fails_a_landed_merge() {
+  local case_dir rc
+  case_dir=$(make_case issue-merge-fails)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_issue_mocks "$case_dir" marano/firstmate#12
+  : > "$case_dir/issue-fail"
+
+  set +e
+  FM_FAKE_GH_DIR="$case_dir" FM_GITHUB_ISSUE_CMD="$case_dir/fakebin/fm-fake-gh-issue" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "a mirror failure must not fail a landed merge"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "the merge's own bookkeeping was lost"
+  assert_grep 'actionable: the GitHub issue marano/firstmate#12 recorded on task-x1 could not be closed' \
+    "$case_dir/stderr" "the mirror failure was not reported where a reader will see it"
+  pass "a GitHub issue failure never fails a landed merge and is reported, not swallowed"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -4691,3 +4769,5 @@ test_a_proven_merge_moves_its_card_to_the_teams_completed_status
 test_a_merge_leaves_an_already_completed_card_alone
 test_a_linear_failure_never_fails_a_landed_merge
 test_a_refused_merge_leaves_the_card_alone
+test_a_proven_merge_closes_the_items_github_issue
+test_a_github_issue_failure_never_fails_a_landed_merge

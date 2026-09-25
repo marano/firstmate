@@ -62,6 +62,22 @@
 #                 resolved by position. Printed as `none` when the item has no
 #                 card, which is the ordinary case. bin/fm-linear-lib.sh owns the
 #                 identifier grammar and both board transitions.
+#   issue <id> [<owner/repo#123>]
+#                 print, or record, the GitHub issue this item is mirrored on,
+#                 in exactly the way `linear` handles a card: one line in the
+#                 item's own body, carried across a body rewrite, two lines
+#                 refused, printed as `none` when the item has none - the
+#                 ordinary case. Recording an issue by hand is the repair when
+#                 `publish` created one it could not record.
+#   publish <id> <owner/repo> --title <title> (--summary <text> | --summary-file <file>)
+#                 create a GitHub issue on <owner/repo> from a public-safe title
+#                 and summary written for it, never from the item's private
+#                 body, and record it on the item. It refuses an item that
+#                 already carries an issue, so a retry never makes a second one.
+#                 An item already In flight has its issue labelled in progress
+#                 at once. bin/fm-github-issue-lib.sh owns the one-way mirror:
+#                 the identifier grammar and the dispatch, merge, and requeue
+#                 moves, which `requeue` and `handback` here also apply.
 #   chunk <unit> "<title>" <member>...
 #                 plan a chunk: create <unit> if it does not exist, record the
 #                 members on it, stamp the shared key, and park each member
@@ -117,12 +133,12 @@
 #     first write would replace the link with a private copy, exactly the fork
 #     this command exists to prevent. Lifecycle transitions refuse the same file;
 #   - a markdown backlog carrying a misplaced entry (above).
-# `body`, `requeue`, `handback`, `group`, `chunk`, `join`, and `plan` exit 1 on a
-# refusal of their own and 3 for a missing task; otherwise the exit status is
-# tasks-axi's own. The grouping verbs read the posture from config/grouping only
-# to decide whether to warn about a chunk's size; recording a key, planning a
-# chunk, and joining a sibling are the same in every posture, because they
-# describe work rather than enforce anything.
+# `body`, `requeue`, `handback`, `group`, `chunk`, `join`, `plan`, `linear`,
+# `issue`, and `publish` exit 1 on a refusal of their own and 3 for a missing
+# task; otherwise the exit status is tasks-axi's own. The grouping verbs read
+# the posture from config/grouping only to decide whether to warn about a
+# chunk's size; recording a key, planning a chunk, and joining a sibling are the
+# same in every posture, because they describe work rather than enforce anything.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,6 +153,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-grouping-lib.sh"
 # shellcheck source=bin/fm-linear-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-linear-lib.sh"
+# shellcheck source=bin/fm-github-issue-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-github-issue-lib.sh"
 
 usage() {
   awk '
@@ -271,6 +289,7 @@ requeue() {  # <id>
       || verb_fail 1 "$id is back in Queued, but its completion links could not be cleared from its title: $(printf '%s\n' "$out" | sed -n 1p)"
   fi
   printf 'ok: requeue %s -> Queued\n' "$id"
+  fm_github_issue_advance "$DATA" requeue "$id"
 }
 
 handback() {  # <unit> <member> <reason>
@@ -325,6 +344,7 @@ handback() {  # <unit> <member> <reason>
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || verb_fail 1 "$member is no longer part of $unit, but it could not be returned to Queued: $FM_BACKLOG_TRANSITION_ERROR"
   printf 'ok: handback %s from %s -> Queued\n' "$member" "$unit"
+  fm_github_issue_advance "$DATA" requeue "$member"
 }
 
 
@@ -418,6 +438,110 @@ linear_verb() {  # <id> [<card>]
     || fail "a Linear card is a team key, a hyphen, and the issue number, as Linear prints one (BLU-3268); '$card' is not"
   linear_set_card "$id" "$card"
   printf 'ok: linear %s -> %s\n' "$id" "$card"
+}
+
+# Record <ref> on <id>, leaving every other byte of the body where it was.
+issue_set_ref() {  # <id> <ref>
+  local id=$1 ref=$2 existing
+  grouping_read_body "$id"
+  existing=$(fm_github_issue_of_body "$GROUPING_BODY") \
+    || verb_fail 1 "$id carries more than one GitHub-issue line; leave exactly one and re-run"
+  [ "$existing" != "$ref" ] || return 0
+  grouping_write_body "$id" "$(fm_grouping_body_with_line "$GROUPING_BODY" "$FM_GITHUB_ISSUE_PREFIX" "$ref")"
+}
+
+issue_verb() {  # <id> [<ref>]
+  local id=$1 ref=${2-} status
+  grouping_id_valid "$id" || fail "usage: fm-tasks-axi.sh issue <id> [<owner/repo#123>]"
+  if [ "$#" -eq 1 ]; then
+    fm_github_issue_of_row "$DATA" "$id"
+    status=$?
+    case "$status" in
+      0) printf '%s\n' "${FM_GITHUB_ISSUE_REF:-none}" ;;
+      3) verb_fail 3 "$FM_GITHUB_ISSUE_ERROR" ;;
+      *) verb_fail 1 "$FM_GITHUB_ISSUE_ERROR" ;;
+    esac
+    return 0
+  fi
+  fm_github_issue_ref_valid "$ref" \
+    || fail "a GitHub issue is the repository and the issue number, as GitHub prints one across repositories (marano/firstmate#123); '$ref' is not"
+  issue_set_ref "$id" "$ref"
+  printf 'ok: issue %s -> %s\n' "$id" "$ref"
+}
+
+PUBLISH_USAGE='usage: fm-tasks-axi.sh publish <id> <owner/repo> --title <title> (--summary <text> | --summary-file <file>)'
+
+publish_verb() {  # <id> <owner/repo> <flag...>
+  local id=${1-} repo=${2-} title='' title_set=0 summary='' summary_file='' summary_set=0
+  local status tmp ref
+  [ "$#" -ge 2 ] || fail "$PUBLISH_USAGE"
+  shift 2
+  grouping_id_valid "$id" || fail "$PUBLISH_USAGE"
+  fm_github_issue_repo_valid "$repo" \
+    || fail "a repository is owner/name, as GitHub prints one (marano/firstmate); '$repo' is not"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --title)
+        [ "$#" -ge 2 ] || fail "$PUBLISH_USAGE"
+        title=$2; title_set=1; shift 2 ;;
+      --summary)
+        [ "$#" -ge 2 ] && [ "$summary_set" = 0 ] || fail "$PUBLISH_USAGE"
+        summary=$2; summary_set=1; shift 2 ;;
+      --summary-file)
+        [ "$#" -ge 2 ] && [ "$summary_set" = 0 ] || fail "$PUBLISH_USAGE"
+        summary_file=$2; summary_set=1; shift 2 ;;
+      *) fail "$PUBLISH_USAGE" ;;
+    esac
+  done
+  [ "$title_set" = 1 ] && [ "$summary_set" = 1 ] || fail "$PUBLISH_USAGE"
+  case "$title" in
+    *[![:space:]]*) ;;
+    *) fail "publish: --title is empty" ;;
+  esac
+  case "$title" in *$'\n'*|*$'\r'*) fail "publish: --title must be one line" ;; esac
+  [ "${#title}" -le 256 ] || fail "publish: --title is longer than GitHub's 256 characters"
+  if [ -n "$summary_file" ]; then
+    [ -f "$summary_file" ] && [ ! -L "$summary_file" ] \
+      || fail "publish: cannot read the summary at $summary_file"
+    summary=$(cat "$summary_file") || fail "publish: cannot read the summary at $summary_file"
+  fi
+  case "$summary" in
+    *[![:space:]]*) ;;
+    *) fail "publish: the summary is empty" ;;
+  esac
+
+  fm_github_issue_of_row "$DATA" "$id"
+  status=$?
+  case "$status" in
+    0) ;;
+    3) verb_fail 3 "$FM_GITHUB_ISSUE_ERROR" ;;
+    *) verb_fail 1 "$FM_GITHUB_ISSUE_ERROR" ;;
+  esac
+  [ -z "$FM_GITHUB_ISSUE_REF" ] \
+    || verb_fail 1 "$id is already published as $FM_GITHUB_ISSUE_REF, so no second issue was created"
+
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-publish-summary.XXXXXX") \
+    || verb_fail 1 "cannot stage the summary of $id"
+  if ! printf '%s\n' "$summary" > "$tmp"; then
+    rm -f -- "$tmp"
+    verb_fail 1 "cannot stage the summary of $id"
+  fi
+  if ! fm_github_issue_create "$repo" "$title" "$tmp"; then
+    rm -f -- "$tmp"
+    verb_fail 1 "no issue was published for $id: $FM_GITHUB_ISSUE_ERROR"
+  fi
+  rm -f -- "$tmp"
+  ref="$repo#$FM_GITHUB_ISSUE_NUMBER"
+  # The issue exists from here on. A record that fails leaves it unrecorded, so
+  # the refusal names the exact repair rather than inviting a second publish.
+  ( issue_set_ref "$id" "$ref" ) \
+    || verb_fail 1 "$ref was created on GitHub but could not be recorded on $id; record it with 'fm-tasks-axi.sh issue $id $ref' rather than publishing again"
+  printf 'ok: publish %s -> %s\n' "$id" "$ref"
+  if fm_backlog_row_probe "$DATA" "$id"; then
+    case "$FM_BACKLOG_ROW_STATE" in
+      in_flight\ *) fm_github_issue_advance "$DATA" start "$id" ;;
+    esac
+  fi
 }
 
 # Every planning read a chunk needs about one row, refusing before any write.
@@ -819,13 +943,25 @@ case "${ARGS[0]:-}" in
     linear_verb "${ARGS[@]:1}"
     exit 0
     ;;
+  issue)
+    if [ "${#ARGS[@]}" -lt 2 ] || [ "${#ARGS[@]}" -gt 3 ]; then
+      fail "usage: fm-tasks-axi.sh issue <id> [<owner/repo#123>]"
+    fi
+    issue_verb "${ARGS[@]:1}"
+    exit 0
+    ;;
+  publish)
+    publish_verb "${ARGS[@]:1}"
+    exit 0
+    ;;
   update)
     # A body rewrite is the sanctioned way to replace a considered note
     # (docs/architecture.md), and firstmate's own machine-read lines live in that
     # same body. Carry each existing one across the rewrite rather than letting a
-    # routine note edit silently ungroup the item or lose the Linear card the
-    # dispatch and merge paths read; a rewrite that states a DIFFERENT value is
-    # refused, because only `group` and `linear` record one.
+    # routine note edit silently ungroup the item or lose the Linear card or
+    # GitHub issue the dispatch and merge paths read; a rewrite that states a
+    # DIFFERENT value is refused, because only `group`, `linear`, and `issue`
+    # record one.
     if body_rewrite_target "${ARGS[@]:1}"; then
       if fm_grouping_key_of_row "$DATA" "$REWRITE_ID"; then
         carry_body_line_through_update "$REWRITE_ID" "$REWRITE_BODY_FILE" \
@@ -836,6 +972,11 @@ case "${ARGS[0]:-}" in
         carry_body_line_through_update "$REWRITE_ID" "$REWRITE_BODY_FILE" \
           "$FM_LINEAR_CARD" "$FM_LINEAR_CARD_PREFIX" fm_linear_card_of_body \
           "Linear card" "fm-tasks-axi.sh linear $REWRITE_ID <BLU-1234>"
+      fi
+      if fm_github_issue_of_row "$DATA" "$REWRITE_ID"; then
+        carry_body_line_through_update "$REWRITE_ID" "$REWRITE_BODY_FILE" \
+          "$FM_GITHUB_ISSUE_REF" "$FM_GITHUB_ISSUE_PREFIX" fm_github_issue_of_body \
+          "GitHub issue" "fm-tasks-axi.sh issue $REWRITE_ID <owner/repo#123>"
       fi
     fi
     ;;
