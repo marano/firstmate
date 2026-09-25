@@ -451,11 +451,21 @@ kill_stale_restart_holder() {  # <pid>
 # watcher to stop. A repeat that lands in an exit already under way can only cut
 # it short, leaving the lock to the successor's stale-lock reclaim, which
 # publishes the same downtime first (docs/watcher-continuity.md).
+# A pid that has exited but is not yet reaped (our own child) is a zombie:
+# kill -0 still succeeds on it, so the wait treats state Z as gone.
+pid_running() {
+  local state
+  fm_pid_alive "$1" || return 1
+  state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+  case "$state" in *Z*) return 1 ;; esac
+  return 0
+}
+
 term_watcher_and_wait() {  # <pid> <ticks> <still-target-command...>
   local pid=$1 ticks=$2 i=0
   shift 2
   kill -TERM "$pid" 2>/dev/null || return 0
-  while [ "$i" -lt "$ticks" ] && fm_pid_alive "$pid"; do
+  while [ "$i" -lt "$ticks" ] && pid_running "$pid"; do
     if [ "$i" -eq "$((ticks / 2))" ] && "$@"; then
       kill -TERM "$pid" 2>/dev/null || true
     fi
@@ -531,9 +541,9 @@ child_out=
 # the whole wait, so tearing this arm down never waits on its child for good.
 # The caller still reaps it, because a caller may need its exit status.
 stop_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    term_watcher_and_wait "$child" "$(restart_stop_ticks)" fm_pid_alive "$child"
-    if fm_pid_alive "$child"; then
+  if [ -n "$child" ] && pid_running "$child"; then
+    term_watcher_and_wait "$child" "$(restart_stop_ticks)" pid_running "$child"
+    if pid_running "$child"; then
       kill -KILL "$child" 2>/dev/null || true
     fi
   fi
