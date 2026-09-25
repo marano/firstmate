@@ -1,0 +1,63 @@
+ok - simultaneous watcher starts leave exactly one live process
+ok - fm_pid_identity real ps fallback is locale-invariant
+ok - fm_pid_identity is locale-invariant across LC_ALL/LC_TIME
+ok - /proc process identity ignores simulated btime changes
+ok - /proc process identity detects pid reuse
+ok - MSYS /proc process identity regression skipped on non-Windows host
+ok - killed watcher stale lock is reclaimed
+tests/fm-watcher-lock.test.sh: line 1944: 98322 Killed: 9               FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_remove_path() {
+      if [ "$1" = "$STATE/.watch.lock" ]; then
+        kill -KILL "${BASHPID:-$$}"
+      fi
+      return 1
+    }
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" > /dev/null 2>&1
+ok - stale watcher reclaim publishes durable recovery evidence before clear
+ok - a signal during watcher startup is honored after the lock's release trap is armed
+ok - pid probe pending-trap case skipped below Bash 5, which miscounts its traps
+ok - a group signal killing the lock-creation read or link never costs the watcher its own fresh lock
+ok - startup lock path pending-trap case skipped below Bash 5, which miscounts its traps
+ok - stray-owner collection pending-trap case skipped below Bash 5, which miscounts its traps
+ok - live watcher lock with stale heartbeat is actionable
+ok - guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh
+ok - concurrent fm_lock_try_acquire yields exactly one winner
+ok - dead-pid stale lock is reclaimed by a single acquirer
+ok - concurrent stale-lock steal yields exactly one winner
+ok - live steal mutex is not reclaimed
+ok - live-held lock is not stolen
+ok - empty mid-acquire lock keeps a minimum grace
+ok - a lock under a removed or unwritable directory is refused promptly instead of recursing into steal locks
+ok - owner directories stranded by a dead acquirer are collected and live ones are not
+ok - reaping spares the owner directory a held lock points at
+ok - stray-owner collection spares the owner directory a bounded acquire hands to its caller
+ok - late original claimant cannot claim a recreated lock
+ok - paused mid-acquire claimant backs off to active stealer
+ok - a stealer outlasts a claim its own steal has doomed
+ok - a group signal killing a child of lock creation never costs the creator its own fresh lock
+ok - watch restart preserves recovery without signaling a reused pid
+ok - watch restart attaches to a verified healthy peer and later surfaces a successor gap
+ok - watch restart waits out a default-poll sleep instead of attaching to the watcher it stopped
+tests/wake-helpers.sh: line 308: 11757 Killed: 9               node -e 'const fs = require("node:fs"); let terms = 0; process.on("SIGTERM", () => { terms += 1; fs.writeFileSync(process.argv[2], "term " + terms + "\n"); if (terms === Number(process.argv[3])) process.exit(0); }); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$ready" "$term" "$exits_on"
+ok - watch restart kills a stale TERM-resistant holder by its pid and converges, while a plain arm leaves it alone
+ok - watch restart re-reads the beacon at kill time and spares a holder that beat during the stop wait
+ok - watch restart re-sends TERM to a fresh holder that lost the first one and replaces it
+ok - one TERM ends the watcher within its marker-lock bound and a successor recovers the retained lock
+ok - arm derives its stale grace from the poll cadence exactly as the watcher does
+ok - watcher self-evicts when the lock pid no longer names it
+ok - arm turns clean self-eviction without a successor into a typed failure
+ok - arm attaches to a live fresh watcher and fails loudly when that cycle has no successor
+ok - attached arm signals record a classified lifecycle entry
+ok - arm starts cleanly and resurfaces recovery after a dead-pid lock
+ok - arm cleans child watcher and temp output on HUP
+ok - arm teardown re-sends TERM, then kills a child that survives it
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 31340.1790351708.zDFnv8
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - arm propagates an immediate watcher wake before confirmation
+ok - arm attaches to a peer watcher after child stands down and surfaces a missing successor
+watcher: lock held by live pid 33795 but heartbeat is stale for 843659721s (>300s); inspect or stop that watcher before re-arming.
+ok - arm reports FAILED and exits non-zero when no fresh watcher can be confirmed
+ok - cycle-exit ledger links a verified successor and remains size-capped
+ok - SIGSTOP distinguishes live PID from stale beacon and termination records the exit class
