@@ -576,6 +576,15 @@ Argv-safe Notification Center command:
 
 Observed output: no stdout, exit 0, and one banner with the supplied body.
 
+The channel now passes its title as a second argv item too (`with title (item 2 of argv)`), so each alert names itself.
+That binding was checked on 2026-09-25 on macOS 26.3 without posting a banner:
+
+```sh
+/usr/bin/osascript -e 'on run argv' -e 'return (item 2 of argv)' -e 'end run' 'summary' 'firstmate: supervision DOWN'
+```
+
+Observed output: `firstmate: supervision DOWN`, exit 0.
+
 Herdr command:
 
 ```sh

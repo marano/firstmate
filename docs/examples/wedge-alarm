@@ -1,5 +1,6 @@
 # config/wedge-alarm - active alert channels for the away-mode injection wedge
-# alarm (bin/fm-supervise-daemon.sh's inject_wedge_alarm). Copy this into a
+# alarm (bin/fm-supervise-daemon.sh's inject_wedge_alarm) and the
+# supervision-dead alert (bin/fm-supervision-alert.sh). Copy this into a
 # local, gitignored config/wedge-alarm and edit. One channel directive per
 # non-empty, non-comment line; every listed non-off channel fires, best-effort.
 #
