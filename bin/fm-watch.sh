@@ -1731,8 +1731,8 @@ handle_paused_stale() {  # <window> <task> <hash>
 # first sight of that pairing surfaces once, promptly, as a gone agent, and every
 # later sight of the same agent takes the ordinary cadence, throttled from this
 # surface. The identity is the busy generation, as in wedge_dead_agent_hold, so a
-# relaunched agent that exits again reports again; the marker is dropped with the
-# window's hash-scoped tracking (clear_stale_hash_tracking).
+# relaunched agent that exits again reports again; the marker is dropped only when the
+# declaration ends (clear_pause_state), so pane churn inside it cannot re-report.
 # Only a worker-declared `paused:` on an ordinary crew qualifies. An exited agent
 # is expected, and stays on the cadence, for a captain-held transfer (the captain
 # owns that wait), a secondmate (whose liveness is never read), and a task whose
