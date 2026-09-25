@@ -40,7 +40,7 @@ This index names each home file's purpose and the owner to read before relying o
 | `config/backend` | runtime session-provider backend for new tasks | [Runtime backend](#runtime-backend-configbackend--fm_backend) |
 | `config/fleet-capacity` | idle-fleet alarm comparison value, never authority | [Fleet capacity](#fleet-capacity-configfleet-capacity) |
 | `config/startup-memory-budget` | startup prompt-memory allowance | [Startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| `config/wedge-alarm` | away-mode wedge-alarm active-alert channels | [Away-mode wedge alarm channels](#away-mode-wedge-alarm-channels-configwedge-alarm) |
+| `config/wedge-alarm` | active-alert channels for the away-mode wedge alarm and the supervision-dead alert | [Away-mode wedge alarm channels](#away-mode-wedge-alarm-channels-configwedge-alarm) |
 | `config/x-mode.env` | generated Relay watcher cadence | [Relay](#relay-env) |
 | `data/backlog.md` | task queue, dependencies, history | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend) |
 | `data/captain.md`, `data/captain-shared.md` | captain preferences | [Captain Preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd) |
@@ -79,6 +79,7 @@ This index names each home file's purpose and the owner to read before relying o
 | `state/.last-watcher-beat` | watcher liveness beacon | [`watcher-continuity.md`](watcher-continuity.md), [`turnend-guard.md`](turnend-guard.md) |
 | `state/.claude-autoarm*`, `.turnend-claude-blocks*`, `.cursor-park-owner*`, `.turnend-cursor-blocks` | per-harness turn-end guard records | [`turnend-guard.md`](turnend-guard.md), [`bin/fm-turnend-guard.sh`](../bin/fm-turnend-guard.sh) |
 | `state/.subsuper-*`, `state/.supervise-daemon.*` | away-mode sub-supervisor | [`bin/fm-supervise-daemon.sh`](../bin/fm-supervise-daemon.sh) |
+| `state/.supervision-alert`, `state/.supervision-alert.log` | supervision-dead alert episode record and log | [`bin/fm-supervision-alert.sh`](../bin/fm-supervision-alert.sh) |
 | `.no-mistakes/` | local validation state and evidence | no-mistakes |
 
 ## Pi Calm preference (config/calm)
@@ -253,6 +254,7 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
 An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
+The same channels carry the supervision-dead alert, an optional launchd agent that tells the captain when this home's watcher beacon has been dead for about 15 minutes; [`wedge-alarm.md`](wedge-alarm.md#supervision-dead-alert) owns its install, removal, and knobs.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
@@ -1319,6 +1321,9 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+# supervision-dead alert (bin/fm-supervision-alert.sh); install pins these into its launchd agent
+FM_SUPERVISION_ALERT_AFTER=900     # seconds the watcher beacon must be dead before the one alert per outage
+FM_SUPERVISION_ALERT_CONFIRM=60    # minimum seconds between the two dead sightings an alert needs
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
