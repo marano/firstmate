@@ -2657,6 +2657,10 @@ fi
 # lock, leaving the evidence of a crash that never happened for the next watcher
 # to recover. A bounded checkpoint's deadline lands there whenever load slows
 # startup, so defer such a signal until the release trap is armed, then honor it.
+# Bash can lose that deferral trap to a $(...) in this shell (5.2) or to a
+# continue or break (any version), so the lock and recovery-marker calls below
+# avoid both ("Startup-path substitutions" in bin/fm-wake-lib.sh); the
+# already-running branch holds no lock and exits anyway.
 WATCHER_SIGNAL_PENDING=0
 trap 'WATCHER_SIGNAL_PENDING=1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes

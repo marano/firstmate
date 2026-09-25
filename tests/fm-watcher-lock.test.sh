@@ -834,10 +834,13 @@ test_watch_restart_attaches_to_healthy_peer() {
 # home's lock naming it with a matching identity, so it passes every restart
 # check a real watcher would. Sets TERM_PEER to its pid.
 TERM_PEER=
-start_identity_matched_term_resistant_peer() {  # <dir> <ready-file> <term-file>
-  local dir=$1 ready=$2 term=$3 state identity i
+# The peer records each TERM it survives in <term-file>. Given <exits-on-term>,
+# it exits on that TERM instead, standing in for a watcher that lost the ones
+# before it; without it, no TERM ends the peer.
+start_identity_matched_term_resistant_peer() {  # <dir> <ready-file> <term-file> [exits-on-term]
+  local dir=$1 ready=$2 term=$3 exits_on=${4:-0} state identity i
   state="$dir/state"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => fs.writeFileSync(process.argv[2], "term\n")); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$ready" "$term" &
+  node -e 'const fs = require("node:fs"); let terms = 0; process.on("SIGTERM", () => { terms += 1; fs.writeFileSync(process.argv[2], "term " + terms + "\n"); if (terms === Number(process.argv[3])) process.exit(0); }); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$ready" "$term" "$exits_on" &
   TERM_PEER=$!
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$ready" ]; do
@@ -968,6 +971,46 @@ test_watch_restart_replaces_a_stale_term_resistant_holder() {
   ! grep -qF 'watcher: FAILED' "$out" || fail "restart reported FAILED after replacing the stale holder: $(cat "$out")"
   grep -qF 'check: rearm-resurface' "$out" || fail "replacement watcher did not surface the downtime: $(cat "$out")"
   pass "watch restart kills a stale TERM-resistant holder by its pid and converges, while a plain arm leaves it alone"
+}
+
+# A watcher can lose one TERM to Bash 5.2 ("Startup-path substitutions" in
+# bin/fm-wake-lib.sh) and keep beating, so its beacon never goes stale and the
+# KILL escalation never applies. The restart re-sends TERM halfway through its
+# stop wait, and a holder that ends on the second one is replaced, not attached
+# to (mutant: a single TERM, which attaches to the holder that lost it).
+test_watch_restart_resends_term_to_a_holder_that_lost_one() {
+  local dir state fakebin out err peer_ready peer_term peer armpid status rc
+  dir=$(make_case restart-resend-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  err="$dir/restart.err"
+  peer_ready="$dir/peer.ready"
+  peer_term="$dir/peer.term"
+  start_identity_matched_term_resistant_peer "$dir" "$peer_ready" "$peer_term" 2
+  peer=$TERM_PEER
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" --restart > "$out" 2> "$err" &
+  armpid=$!
+  wait_for_exit "$armpid" 300
+  status=$?
+  if is_live_non_zombie "$peer"; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    wait_for_exit "$armpid" 100 || true
+    term_and_reap "$armpid"
+    fail "restart left a holder that lost its first TERM running: $(cat "$peer_term" "$out" "$err" 2>/dev/null)"
+  fi
+  rc=0
+  wait "$peer" 2>/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || fail "holder did not end on the re-sent TERM (status $rc)"
+  [ "$(cat "$peer_term" 2>/dev/null)" = "term 2" ] || fail "restart did not re-send TERM exactly once: $(cat "$peer_term" 2>/dev/null)"
+  ! grep -qF "watcher: attached pid=$peer" "$out" || fail "restart attached to the holder that lost its TERM: $(cat "$out")"
+  ! grep -qF 'killed stale holder' "$err" || fail "restart killed a holder whose beacon was fresh: $(cat "$err")"
+  [ "$status" -eq 0 ] || fail "restart did not converge after the re-sent TERM (status $status): $(cat "$out" "$err")"
+  grep -qF 'check: rearm-resurface' "$out" || fail "replacement watcher did not surface the downtime: $(cat "$out")"
+  pass "watch restart re-sends TERM to a fresh holder that lost the first one and replaces it"
 }
 
 # The kill decision is re-read after the stop wait. A TERM-resistant holder
@@ -1380,6 +1423,71 @@ test_arm_hup_cleans_child_and_temp_output() {
   ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
   pass "arm cleans child watcher and temp output on HUP"
+}
+
+# Tearing an arm down stops its own watcher child, which can lose a TERM to Bash
+# 5.2 ("Startup-path substitutions" in bin/fm-wake-lib.sh). A copy of the arm
+# runs a stand-in child that holds the lock and beats like a watcher but records
+# and survives every TERM: the arm re-sends TERM once, then KILLs the child after
+# its stop wait and exits, instead of waiting on it for good (mutant: one TERM
+# and an unbounded wait).
+test_arm_teardown_stops_a_child_that_survives_term() {
+  local dir state bindir armout armpid child status i
+  dir=$(make_case arm-teardown-term-survivor)
+  state="$dir/state"
+  bindir="$dir/bin"
+  armout="$dir/arm.out"
+  mkdir -p "$bindir"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-classify-lib.sh" \
+    "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-build-lock-key-lib.sh" "$bindir/"
+  cat > "$bindir/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$self_dir/fm-wake-lib.sh"
+fm_lock_try_acquire "$STATE/.watch.lock" || exit 1
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$self_dir/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
+fm_current_pid self_pid || exit 1
+fm_pid_identity "$self_pid" > "$STATE/.watch.lock/pid-identity"
+trap 'printf "term\n" >> "$STATE/child.terms"' TERM
+while :; do
+  touch "$STATE/.last-watcher-beat"
+  sleep 0.1
+done
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  FM_HOME="$dir" FM_POLL=1 "$bindir/fm-watch-arm.sh" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout")
+  if [ -z "$child" ]; then
+    term_and_reap "$armpid"
+    fail "arm never confirmed its stand-in child: $(cat "$armout")"
+  fi
+  kill -TERM "$armpid" 2>/dev/null || fail "could not signal the arm"
+  i=0
+  while [ "$i" -lt 300 ] && is_live_non_zombie "$armpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$armpid"; then
+    kill -KILL "$child" "$armpid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "arm teardown kept waiting on a child that survived its TERM: $(cat "$armout")"
+  fi
+  status=0
+  wait "$armpid" || status=$?
+  [ "$status" -eq 143 ] || fail "torn-down arm did not exit with TERM status (got $status): $(cat "$armout")"
+  ! is_live_non_zombie "$child" || { kill -KILL "$child" 2>/dev/null || true; fail "arm teardown left its child running"; }
+  [ "$(grep -c '^term$' "$state/child.terms" 2>/dev/null)" = 2 ] \
+    || fail "arm did not send TERM twice before KILL: $(cat "$state/child.terms" 2>/dev/null)"
+  pass "arm teardown re-sends TERM, then kills a child that survives it"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -1802,6 +1910,70 @@ test_signal_during_startup_releases_watch_lock() {
   pass "a signal during watcher startup is honored after the lock's release trap is armed"
 }
 
+# Signal a spinner shell <count> times, waiting for the count its trap writes to
+# <dir>/ack before sending the next, then stop and reap it. Bash clears a
+# signal's pending flag again as its trap returns, and that return can come late:
+# Bash 5.2 runs another pending trap nested in a trap's tail. A repeat of the
+# signal arriving before then is erased, so signals alternate between USR1 and
+# USR2, and each goes out only once the spinner's main loop, which runs only
+# between traps, has recorded in <dir>/seen a count that includes the previous
+# signal of its kind. A trap that runs late is still acknowledged within the
+# generous wait, so only a trap that never runs stops the count short. Sets
+# SIGNAL_SENT, SIGNAL_ACK, SIGNAL_SEEN, and SPINNER_STATUS.
+signal_spinner_until_acked() {  # <spinner> <dir> <count>
+  local spinner=$1 dir=$2 count=$3 signal i
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$dir/ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/ready" ] || { term_and_reap "$spinner"; fail "spinner never started: $(cat "$dir/spinner.err" 2>/dev/null)"; }
+  SIGNAL_SENT=0
+  SIGNAL_ACK=
+  SIGNAL_SEEN=
+  while [ "$SIGNAL_SENT" -lt "$count" ]; do
+    if [ "$SIGNAL_SENT" -ge 2 ]; then
+      i=0
+      while [ "$i" -lt 3000 ]; do
+        SIGNAL_SEEN=
+        { read -r SIGNAL_SEEN < "$dir/seen"; } 2>/dev/null
+        [ "${SIGNAL_SEEN:-0}" -ge "$((SIGNAL_SENT - 1))" ] && break
+        kill -0 "$spinner" 2>/dev/null || break
+        sleep 0.01
+        i=$((i + 1))
+      done
+      [ "${SIGNAL_SEEN:-0}" -ge "$((SIGNAL_SENT - 1))" ] || break
+    fi
+    SIGNAL_SENT=$((SIGNAL_SENT + 1))
+    signal=USR1
+    [ $((SIGNAL_SENT % 2)) -eq 1 ] || signal=USR2
+    kill -"$signal" "$spinner" 2>/dev/null || break
+    i=0
+    while [ "$i" -lt 3000 ]; do
+      sleep 0.01
+      SIGNAL_ACK=
+      { read -r SIGNAL_ACK < "$dir/ack"; } 2>/dev/null
+      [ "$SIGNAL_ACK" = "$SIGNAL_SENT" ] && break
+      kill -0 "$spinner" 2>/dev/null || break
+      i=$((i + 1))
+    done
+    [ "$SIGNAL_ACK" = "$SIGNAL_SENT" ] || break
+  done
+  : > "$dir/stop"
+  SPINNER_STATUS=0
+  wait "$spinner" || SPINNER_STATUS=$?
+}
+
+# The spinner cases run only where the spinner's bash is 5 or later, because
+# Bash 3.2's trap bookkeeping breaks their count: it clears a trap's pending flag
+# only after the trap returns, yet runs pending traps between the trap's own
+# commands, so a signal sent the moment a trap acknowledges runs that trap a
+# second time. The $(...) loss they guard is Bash 5.2's own, and CI runs them on
+# Linux Bash 5.2.
+spinner_bash_is_5_or_later() {
+  [ "$(bash -c 'printf "%s\n" "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 5 ] 2>/dev/null
+}
+
 # Bash 5.2 drops a trap that is still pending when the shell starts parsing a
 # command substitution (fixed in 5.3). The watcher records a signal deferred
 # through startup in a trap while its lock operations run, and every one of them
@@ -1809,49 +1981,29 @@ test_signal_during_startup_releases_watch_lock() {
 # the calling shell. Each signal waits for its acknowledgement, so one dropped
 # trap fails the case (mutant: the ${BASHPID:-$(...)} probe).
 test_current_pid_probe_keeps_pending_traps() {
-  local dir spinner sent ack i rc
+  local dir
+  if ! spinner_bash_is_5_or_later; then
+    pass "pid probe pending-trap case skipped below Bash 5, which miscounts its traps"
+    return 0
+  fi
   dir=$(make_case current-pid-traps)
   # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
   bash -c '
     . "$1"
     ack_file=$2/ack
     handled=0
-    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1
+    seen=0
+    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
     : > "$2/ready"
     while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
       fm_current_pid pid || exit 3
       [ "$pid" = "${BASHPID:-$pid}" ] || exit 4
     done
   ' _ "$LIB" "$dir" 2> "$dir/spinner.err" &
-  spinner=$!
-  i=0
-  while [ "$i" -lt 300 ] && [ ! -e "$dir/ready" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -e "$dir/ready" ] || { term_and_reap "$spinner"; fail "pid-probe spinner never started"; }
-
-  sent=0
-  ack=
-  while [ "$sent" -lt 100 ]; do
-    sent=$((sent + 1))
-    kill -USR1 "$spinner" 2>/dev/null || break
-    i=0
-    while [ "$i" -lt 300 ]; do
-      ack=
-      { read -r ack < "$dir/ack"; } 2>/dev/null
-      [ "$ack" = "$sent" ] && break
-      is_live_non_zombie "$spinner" || break
-      sleep 0.01
-      i=$((i + 1))
-    done
-    [ "$ack" = "$sent" ] || break
-  done
-  : > "$dir/stop"
-  rc=0
-  wait "$spinner" || rc=$?
-  [ "$ack" = 100 ] && [ "$rc" -eq 0 ] \
-    || fail "pid probe lost a pending trap: signal $sent acknowledged as '${ack:-none}', spinner status $rc: $(cat "$dir/spinner.err" 2>/dev/null)"
+  signal_spinner_until_acked "$!" "$dir" 100
+  [ "$SIGNAL_ACK" = 100 ] && [ "$SPINNER_STATUS" -eq 0 ] \
+    || fail "pid probe lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
   pass "the pid probe every lock operation runs keeps each pending trap"
 }
 
@@ -1986,6 +2138,100 @@ test_signal_during_lock_creation_keeps_own_lock() {
   pass "a group signal killing the lock-creation read or link never costs the watcher its own fresh lock"
 }
 
+# Like the pid probe, everything a starting watcher runs before its release trap
+# is armed must keep a pending trap on Bash 5.2 ("Startup-path substitutions"
+# in bin/fm-wake-lib.sh). A shell spins that path: claiming the singleton lock,
+# alternately from a clean release and from a dead holder it must reclaim, then
+# reopening an announced recovery episode and running the arm check under the
+# wake-queue lock. The marker generation used to run two $(...) in one command,
+# and with that pair restored Bash 5.2 drops a trap within a few hundred
+# signals, where the lost trap can also abort the command it interrupted
+# (mutant: that pair restored). A lone $(...) opens a window far too narrow to
+# sample here, so the library's backquote rule, not this case, keeps each of
+# those out.
+test_startup_lock_path_keeps_pending_traps() {
+  local dir dead_pid
+  if ! spinner_bash_is_5_or_later; then
+    pass "startup lock path pending-trap case skipped below Bash 5, which miscounts its traps"
+    return 0
+  fi
+  dir=$(make_case startup-lock-traps)
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do
+    dead_pid=$((dead_pid + 1))
+  done
+  # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    ack_file=$2/ack
+    dead_pid=$3
+    marker=$STATE/.watcher-down
+    handled=0
+    seen=0
+    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
+    printf "announced:downtime:seed\n" > "$marker"
+    round=0
+    : > "$2/ready"
+    while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
+      round=$((round + 1))
+      fm_lock_try_acquire "$STATE/.watch.lock" || exit 3
+      fm_recovery_marker_reopen_announced "$marker" || exit 4
+      fm_recovery_marker_arm_check "$marker" || exit 5
+      if [ $((round % 2)) -eq 0 ]; then
+        printf "%s\n" "$dead_pid" > "$STATE/.watch.lock/pid" || exit 6
+      else
+        fm_lock_release "$STATE/.watch.lock" || exit 7
+      fi
+    done
+  ' _ "$LIB" "$dir" "$dead_pid" 2> "$dir/spinner.err" &
+  signal_spinner_until_acked "$!" "$dir" 1000
+  [ "$SIGNAL_ACK" = 1000 ] && [ "$SPINNER_STATUS" -eq 0 ] \
+    || fail "startup lock path lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
+  pass "the lock and recovery-marker path a starting watcher runs keeps each pending trap"
+}
+
+# The stray-owner collection runs on every acquire of a free lock, so on the
+# startup path too, and it judges every owner directory beside the lock. It used
+# to skip each one it spared with continue, and Bash skips every command of a
+# trap it runs as a continue or break completes (3.2 through 5.3 alike), so a
+# shell collecting past a live and a half-created owner directory, and past
+# plain files it skips without judging, lost a trap well inside the 3000
+# signals this case sends (mutant: the collection's continue restored).
+test_stray_owner_collection_keeps_pending_traps() {
+  local dir
+  if ! spinner_bash_is_5_or_later; then
+    pass "stray-owner collection pending-trap case skipped below Bash 5, which miscounts its traps"
+    return 0
+  fi
+  dir=$(make_case stray-owner-traps)
+  # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    ack_file=$2/ack
+    lock=$STATE/.collect.lock
+    handled=0
+    seen=0
+    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
+    mkdir "$lock.owner.live" || exit 8
+    printf "%s\n" "$BASHPID" > "$lock.owner.live/pid" || exit 8
+    for name in a b c d e f g h i j k l m n o p q r s t u v w x; do
+      : > "$lock.owner.file$name" || exit 8
+    done
+    : > "$2/ready"
+    while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
+      [ -d "$lock.owner.half" ] || mkdir "$lock.owner.half" || exit 9
+      fm_lock_reap_stray_owners "$lock"
+    done
+    [ -d "$lock.owner.live" ] || exit 10
+  ' _ "$LIB" "$dir" 2> "$dir/spinner.err" &
+  signal_spinner_until_acked "$!" "$dir" 3000
+  [ "$SIGNAL_ACK" = 3000 ] && [ "$SPINNER_STATUS" -eq 0 ] \
+    || fail "stray-owner collection lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
+  pass "the stray-owner collection every free acquire runs keeps each pending trap"
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -2016,6 +2262,8 @@ test_stale_watch_reclaim_publishes_before_clear
 test_signal_during_startup_releases_watch_lock
 test_current_pid_probe_keeps_pending_traps
 test_signal_during_lock_creation_keeps_own_lock
+test_startup_lock_path_keeps_pending_traps
+test_stray_owner_collection_keeps_pending_traps
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
@@ -2036,6 +2284,7 @@ test_watch_restart_attaches_to_healthy_peer
 test_watch_restart_waits_out_a_default_poll_sleep
 test_watch_restart_replaces_a_stale_term_resistant_holder
 test_watch_restart_spares_a_holder_that_beats_during_the_stop_wait
+test_watch_restart_resends_term_to_a_holder_that_lost_one
 test_watcher_exit_bounds_its_recovery_marker_lock_wait
 test_arm_grace_follows_the_poll_cadence
 test_watcher_self_evicts_on_lock_takeover
@@ -2044,6 +2293,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_teardown_stops_a_child_that_survives_term
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

@@ -88,7 +88,55 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+# A watcher can lose the deadline's TERM to Bash 5.2 ("Startup-path
+# substitutions" in bin/fm-wake-lib.sh) and keep running. A copy of the
+# checkpoint runs a stand-in watcher that records and survives every TERM: the
+# checkpoint KILLs it FM_SIGNAL_GRACE seconds after the TERM and returns,
+# instead of waiting on it for good (mutant: timeout without -k).
+test_checkpoint_kills_a_watcher_that_survives_its_deadline() {
+  local home bindir out err ckpt status i stand_in
+  home=$(make_home term-survivor)
+  bindir="$home/bin"
+  out="$home/out.txt"
+  err="$home/err.txt"
+  mkdir -p "$bindir"
+  cp "$CHECKPOINT" "$bindir/"
+  cat > "$bindir/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/stand-in.pid"
+trap 'printf "term\n" >> "$FM_HOME/state/stand-in.terms"' TERM
+while :; do sleep 0.1; done
+SH
+  chmod +x "$bindir/fm-watch.sh"
+  FM_HOME="$home" FM_SIGNAL_GRACE=1 "$bindir/fm-watch-checkpoint.sh" --seconds 1 >"$out" 2>"$err" &
+  ckpt=$!
+  i=0
+  while [ "$i" -lt $((EXIT_GRACE_CEILING * 10)) ] && kill -0 "$ckpt" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  stand_in=$(cat "$home/state/stand-in.pid" 2>/dev/null || true)
+  if kill -0 "$ckpt" 2>/dev/null; then
+    [ -z "$stand_in" ] || kill -KILL "$stand_in" 2>/dev/null || true
+    wait "$ckpt" 2>/dev/null || true
+    fail "checkpoint kept waiting on a watcher that survived its deadline TERM"
+  fi
+  status=0
+  wait "$ckpt" || status=$?
+  [ -s "$home/state/stand-in.terms" ] || fail "stand-in watcher never received the deadline TERM"
+  if [ -z "$stand_in" ] || kill -0 "$stand_in" 2>/dev/null; then
+    fail "checkpoint left the stand-in watcher running"
+  fi
+  case "$status" in
+    124) ;;
+    *) fail "checkpoint that killed its watcher exited $status: $(cat "$out" "$err")" ;;
+  esac
+  grep -q 'no actionable wake within 1s' "$out" || fail "killed watcher not reported as quiet checkpoint: $(cat "$out" "$err")"
+  pass "checkpoint kills a watcher that survives its deadline TERM and returns"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
+test_checkpoint_kills_a_watcher_that_survives_its_deadline
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
