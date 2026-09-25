@@ -1063,7 +1063,7 @@ fm_recovery_marker_reopen_announced() {
 
 # shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current attempt
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -1158,12 +1158,24 @@ fm_lock_try_acquire() {
     return 1
   fi
   fm_lock_remove_path "$lockdir" || true
+  # Any other link on the freed lock is now a claim this steal has doomed: every
+  # claimant checks the steal mutex after linking and backs off while it is held
+  # (fm_lock_claim). Giving up on the first such link left the lock free with no
+  # winner, because the claimant then backed off too. So wait doomed claims out,
+  # for about the two-second grace a pid-less claim gets, which still ends the
+  # wait on a claimant stopped or killed before it unlinked. The loop keeps
+  # continue and break off the startup path ("Startup-path substitutions").
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
-    rc=0
-    # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$cur
-  fi
+  attempt=0
+  while [ "$rc" -ne 0 ] && [ "$attempt" -lt 20 ]; do
+    [ "$attempt" -eq 0 ] || sleep 0.1
+    attempt=$((attempt + 1))
+    if fm_lock_try_create "$lockdir" "$steal_owner"; then
+      rc=0
+      # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
+      FM_LOCK_RECOVERED_PID=$cur
+    fi
+  done
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`

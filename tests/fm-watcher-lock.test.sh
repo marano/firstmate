@@ -753,6 +753,143 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# A stealer removes the stale lock and then creates its own while it still holds
+# the steal mutex, so any acquirer that links the freed lock in between backs
+# off as soon as it sees that mutex. The stealer read such a doomed claim as a
+# holder and gave up, both lost, and the lock was left free with no winner: the
+# concurrent stale-steal case above went red with "got 0". This parks the other
+# acquirer at its pid read before the stealer removes the stale lock, so its
+# last attempt links the freed lock, then parks it after it has backed off and
+# before it unlinks, and releases the stealer into that link.
+# Mutant: give up on the first failed create after the stale lock is removed again.
+test_lock_stealer_outlasts_a_claim_its_steal_dooms() {
+  local dir state fakebin lockdir sync real_cat real_rm real_rmdir real_sleep dead
+  local stealer claimant pid i stealer_result claimant_result leftover
+  dir=$(make_case lock-steal-doomed-claim)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  sync="$dir/sync"
+  mkdir -p "$sync"
+  real_cat=$(command -v cat) || fail "doomed-claim fixture: cat is unavailable"
+  real_rm=$(command -v rm) || fail "doomed-claim fixture: rm is unavailable"
+  real_rmdir=$(command -v rmdir) || fail "doomed-claim fixture: rmdir is unavailable"
+  real_sleep=$(command -v sleep) || fail "doomed-claim fixture: sleep is unavailable"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  # Only the stealer sleeps: the parks below use the real sleep directly.
+  cat > "$fakebin/sleep" <<SH
+#!/bin/sh
+printf '%s\n' "\$1" >> "$sync/sleeps"
+exec "$real_sleep" "\$@"
+SH
+  cat > "$fakebin/cat" <<SH
+#!/bin/sh
+if [ "\$*" = "$lockdir/pid" ] && mv "$sync/cat.armed" "$sync/cat.parked" 2>/dev/null; then
+  while [ ! -e "$sync/cat.go" ]; do "$real_sleep" 0.05; done
+fi
+exec "$real_cat" "\$@"
+SH
+  cat > "$fakebin/rmdir" <<SH
+#!/bin/sh
+"$real_rmdir" "\$@"
+rc=\$?
+if [ "\$*" = "$lockdir" ] && mv "$sync/rmdir.armed" "$sync/rmdir.parked" 2>/dev/null; then
+  while [ ! -e "$sync/rmdir.go" ]; do "$real_sleep" 0.05; done
+fi
+exit "\$rc"
+SH
+  cat > "$fakebin/rm" <<SH
+#!/bin/sh
+if [ "\$*" = "-f $lockdir" ] && mv "$sync/rm.armed" "$sync/rm.parked" 2>/dev/null; then
+  while [ ! -e "$sync/rm.go" ]; do "$real_sleep" 0.05; done
+fi
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$fakebin/sleep" "$fakebin/cat" "$fakebin/rmdir" "$fakebin/rm"
+  stealer=
+  claimant=
+  doomed_claim_abort() {
+    : > "$sync/cat.go"
+    : > "$sync/rmdir.go"
+    : > "$sync/rm.go"
+    for pid in $stealer $claimant; do
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "$1"
+  }
+  doomed_claim_acquirer() {  # <result-file>
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        fm_lock_release "$2"
+        r=won
+      else
+        r=lost
+      fi
+      printf "%s\n" "$r" > "$3.tmp" && mv "$3.tmp" "$3"
+    ' _ "$LIB" "$lockdir" "$1" >/dev/null 2>&1 &
+  }
+
+  : > "$sync/cat.armed"
+  doomed_claim_acquirer "$sync/claimant.result"
+  claimant=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$sync/cat.parked" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$sync/cat.parked" ] || doomed_claim_abort "doomed-claim fixture: the claimant never reached its pid read"
+
+  : > "$sync/rmdir.armed"
+  doomed_claim_acquirer "$sync/stealer.result"
+  stealer=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$sync/rmdir.parked" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$sync/rmdir.parked" ] || doomed_claim_abort "doomed-claim fixture: the stealer never removed the stale lock"
+  [ -L "$lockdir.steal" ] || doomed_claim_abort "doomed-claim fixture: the stealer does not hold the steal mutex"
+
+  : > "$sync/rm.armed"
+  : > "$sync/cat.go"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$sync/rm.parked" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$sync/rm.parked" ] || doomed_claim_abort "doomed-claim fixture: the claimant never backed off from the stealer"
+  [ -L "$lockdir" ] || doomed_claim_abort "doomed-claim fixture: the claimant's backed-off link is not in place"
+
+  # The stealer now meets the doomed link. Wait until it has either given up or
+  # started waiting, then let the claimant unlink.
+  : > "$sync/rmdir.go"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$sync/stealer.result" ] && [ ! -s "$sync/sleeps" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  : > "$sync/rm.go"
+  lock_handoff_wait_file "$sync/stealer.result" || doomed_claim_abort "doomed-claim fixture: the stealer never reported"
+  lock_handoff_wait_file "$sync/claimant.result" || doomed_claim_abort "doomed-claim fixture: the claimant never reported"
+  wait "$stealer" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+  stealer_result=$(cat "$sync/stealer.result")
+  claimant_result=$(cat "$sync/claimant.result")
+  [ "$claimant_result" = lost ] \
+    || fail "an acquirer took the lock while the steal mutex was held (stealer=$stealer_result claimant=$claimant_result)"
+  [ "$stealer_result" = won ] \
+    || fail "the stealer gave up on a claim its own steal had doomed, so nobody took the stale lock (stealer=$stealer_result claimant=$claimant_result)"
+  assert_absent "$lockdir" "the stealer's release left its lock behind"
+  assert_absent "$lockdir.steal" "the stealer left its steal mutex behind"
+  leftover=$(find "$state" -maxdepth 1 -name '.contend.lock*.owner.*' 2>/dev/null)
+  [ -z "$leftover" ] || fail "the doomed claim left owner directories behind: $leftover"
+  pass "a stealer outlasts a claim its own steal has doomed"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -2278,6 +2415,7 @@ test_lock_reap_spares_the_owner_a_held_lock_links
 test_lock_reap_spares_an_owner_handed_to_a_bounded_caller
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_stealer_outlasts_a_claim_its_steal_dooms
 test_lock_create_keeps_own_lock_through_group_signal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
