@@ -51,8 +51,12 @@
 #                          A crew whose own attributed validation run is still
 #                          working with recent activity restarts the timer
 #                          instead of escalating (crew_run_activity_is_recent),
-#                          because a worker blocked on that run is working; a
-#                          quiet, parked, finished or absent run escalates.
+#                          but only while a live `no-mistakes axi run|respond`
+#                          sits in the pane's process tree
+#                          (fm_backend_pane_blocked_on_axi): a worker blocked on
+#                          that run is working, one at a prompt is not. A quiet,
+#                          parked, finished or absent run, or no such process,
+#                          escalates.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1619,13 +1623,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_agent_hold "$win" "$task" "$since_file" "$escalation_file" "$label" "$age"; then
           return 0
         fi
-        if [ -n "$task" ] && crew_run_activity_is_recent "$task"; then
+        if [ -n "$task" ] && fm_backend_pane_blocked_on_axi "$(window_backend "$win")" "$win" \
+          && crew_run_activity_is_recent "$task"; then
           # A worker blocked on its own validation run (a `--wait` drive call)
-          # shows a quiet or long-busy pane while the run does the work. A run
-          # still reporting recent activity is working, not wedged: restart the
-          # window so the next one re-reads it, and drop the escalation streak.
-          # A run gone quiet, parked, finished, or absent gives no such evidence
-          # and escalates below exactly as before.
+          # shows a quiet or long-busy pane while the run does the work. Both
+          # halves are required: a live `axi run`/`axi respond` process in the
+          # pane's tree (the worker is blocked on the run, not at a prompt) and
+          # a run still reporting recent activity. Restart the window so the
+          # next one re-reads it, and drop the escalation streak. Either half
+          # missing gives no such evidence and escalates below as before.
           rm -f "$escalation_file"
           clear_write_tracking "$(window_key "$win")"
           date +%s > "$since_file"

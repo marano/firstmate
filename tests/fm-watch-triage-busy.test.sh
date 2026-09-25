@@ -270,14 +270,22 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
 wedge_own_run_round() {  # <state> <fakebin> <out> <capture> <window> <crew-state-line> <busy-max>
   PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$5" FM_FAKE_TMUX_CAPTURE="$4" \
     FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$2/fm-crew-state.sh" FM_FAKE_CREW_STATE="$6" \
-    FM_BUSY_TURN_MAX_SECS="$7" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_FAKE_TMUX_PANE_PID="${FM_TEST_PANE_PID:-}" FM_BUSY_TURN_MAX_SECS="$7" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$3" &
 }
 
 # Shared assertions for both panes below: fresh run activity absorbs (A), quiet
 # run activity on the same fixture escalates (B).
 assert_wedge_own_run_halves() {  # <label> <state> <fakebin> <out> <capture> <window> <key> <busy-max>
-  local label=$1 state=$2 fakebin=$3 out=$4 capture_file=$5 window=$6 key=$7 busy_max=$8 back pid
+  local label=$1 state=$2 fakebin=$3 out=$4 capture_file=$5 window=$6 key=$7 busy_max=$8 back pid axi_root idle_root
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$fakebin/no-mistakes"
+  chmod +x "$fakebin/no-mistakes"
+  bash -c '"$1" axi run --wait & wait' _ "$fakebin/no-mistakes" & axi_root=$!
+  bash -c 'sleep 30 & wait' & idle_root=$!
+  # shellcheck disable=SC2064
+  trap "kill $axi_root $idle_root 2>/dev/null; pkill -P $axi_root 2>/dev/null; pkill -P $idle_root 2>/dev/null" RETURN
+  sleep 0.5
+  FM_TEST_PANE_PID=$axi_root
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
   printf '2\n' > "$state/.wedge-escalations-$key"
@@ -306,6 +314,20 @@ assert_wedge_own_run_halves() {  # <label> <state> <fakebin> <out> <capture> <wi
   grep -F "possible wedge" "$out" >/dev/null || fail "$label: the quiet-run escalation did not flag a possible wedge"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
     || fail "$label: the quiet-run escalation was not counted from a fresh streak"
+
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the quiet-run stop"
+
+  echo "$back" > "$state/.stale-since-$key"
+  rm -f "$state/.wedge-escalations-$key"
+  : > "$out"
+  FM_TEST_PANE_PID=$idle_root
+  wedge_own_run_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    "state: working · source: run-step · validating (running) · $FM_CREW_STATE_RUN_ACTIVITY_RECENT" "$busy_max"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "$label: a worker with fresh run activity but no axi process in its pane (at a prompt) did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "$label: the no-axi-process escalation did not flag a possible wedge"
+  FM_TEST_PANE_PID=
 }
 
 test_busy_pane_own_run_fresh_activity_is_not_a_wedge() {

@@ -94,6 +94,7 @@ if [ "${1:-}" = "capture-pane" ]; then
 fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
+    *pane_pid*) printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:-}"; exit 0 ;;
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
   esac
 fi
