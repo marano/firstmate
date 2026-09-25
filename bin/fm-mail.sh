@@ -335,6 +335,17 @@ mail_rollback_wake_locked() {
   return 0
 }
 
+# Every function that needs the wake/lock library loads it through this helper
+# so bin/fm-wake-lib.sh has exactly one source site in this file. ShellCheck
+# inlines a separate copy of a sourced file at every source site it follows, so
+# a second site would analyse that library and its classifier again for this
+# root. Callers check that the library exists before loading it.
+mail_load_wake_lib() {
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+}
+
 wake_for() {
   # Publish one `check` wake and its durable records under a single held
   # FM_WAKE_QUEUE_LOCK. The key is generation-aware when the mailbox reports a
@@ -372,9 +383,7 @@ wake_for() {
     echo "fm-mail: $lib missing; cannot wake" >&2
     return 1
   fi
-  # shellcheck source=bin/fm-wake-lib.sh
-  # shellcheck disable=SC1091
-  . "$lib"
+  mail_load_wake_lib
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
     if mail_record_evidence "$generation" "$id" "$tag"; then
@@ -490,9 +499,7 @@ mail_poll() {
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
   fi
-  # shellcheck source=bin/fm-wake-lib.sh
-  # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  mail_load_wake_lib
   fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
   if ! list="$(run_py poll_list)"; then
     # The poll engine already printed its cause on stderr; just release the

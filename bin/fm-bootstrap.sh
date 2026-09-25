@@ -352,9 +352,19 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
-secondmate_sync() {
+# The sweeps that need the wake/lock library load it through this helper so
+# bin/fm-wake-lib.sh has exactly one source site in this file. ShellCheck
+# inlines a separate copy of a sourced file at every source site it follows, so
+# a second site would analyse that library and its classifier again for this
+# root. Loading stays inside each mutating sweep, so the library's source-time
+# state-directory creation never runs under FM_BOOTSTRAP_DETECT_ONLY.
+bootstrap_load_wake_lib() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+}
+
+secondmate_sync() {
+  bootstrap_load_wake_lib
   # Placement-specific secondmate sync: EVERY home, local or remote, follows the
   # primary checkout's current default-branch commit. The local path is purely
   # LOCAL - no fetch, no origin dependency: a linked-worktree home already holds
@@ -1231,8 +1241,7 @@ backlog_record_reconcile() {
   fi
   # Keep the wake/lock library's source-time state-directory creation inside
   # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
-  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  bootstrap_load_wake_lib
 
   # Finish any close an interrupted cleanup recorded but never landed.
   for marker in "$STATE"/*.backlog-close; do
