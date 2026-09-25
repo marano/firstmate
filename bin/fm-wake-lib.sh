@@ -1091,7 +1091,7 @@ fm_lock_try_acquire() {
   # that case to the caller's wait loop instead.
   if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
     fm_lock_try_create "$lockdir" && return 0
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_HELD_PID=`cat "$lockdir/pid" 2>/dev/null || true`
     return 1
   fi
 
