@@ -1,0 +1,3 @@
+fm-mail exit=0 not-ok=0 ok=57
+fm-bootstrap exit=0 not-ok=0 ok=28
+fm-teardown-endpoint-safety exit=0 not-ok=0 ok=26
