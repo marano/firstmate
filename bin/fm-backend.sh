@@ -936,6 +936,32 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_pane_blocked_on_axi: 0 when <target>'s pane process tree holds a
+# live `no-mistakes axi run` or `axi respond` process, the positive evidence
+# that a worker is blocked in its own validation drive call rather than sitting
+# at a prompt. 1 when there is none, or when the backend cannot name the pane's
+# root process (only tmux and herdr can), so every unproven case reads as no
+# evidence.
+fm_backend_pane_blocked_on_axi() {  # <backend> <target>
+  local root
+  fm_backend_source "$1" || return 1
+  case "$1" in
+    tmux) root=$(fm_backend_tmux_pane_root_pid "$2") ;;
+    herdr) root=$(fm_backend_herdr_pane_root_pid "$2") ;;
+    *) return 1 ;;
+  esac
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  LC_ALL=C ps -A -o pid=,ppid=,args= 2>/dev/null | awk -v root="$root" '
+    { pid = $1; ppid[pid] = $2; $1 = ""; $2 = ""; args[pid] = " " substr($0, 3) }
+    END {
+      for (p in args) {
+        if (args[p] !~ /[ \/]no-mistakes axi (run|respond)( |$)/) continue
+        for (q = p; q in ppid && q + 0 > 1; q = ppid[q]) if (q == root) exit 0
+      }
+      exit 1
+    }'
+}
+
 # fm_backend_launch_confirmable: 0 when <backend>'s fm_backend_agent_state can
 # prove a just-launched agent for every verified harness from the pane's own
 # process table, which is what lets bin/fm-spawn.sh require that proof before

@@ -71,7 +71,9 @@
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
-#      (nm_daemon_probe_down).
+#      (nm_daemon_probe_down). A working run whose active step reports recent
+#      activity (nm_run_activity_is_recent) adds the detail segment named by
+#      FM_CREW_STATE_RUN_ACTIVITY_RECENT in fm-classify-lib.sh.
 #   3. Reconcile the status log: if its declared line (log_declared_line below)
 #      says needs-decision/blocked but the run-step shows the run moved on, the
 #      log is deterministically stale and is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -890,6 +892,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # A still-working run whose own active step reports recent activity says so,
+  # so a supervisor can tell a worker blocked on a healthy run from a wedged one
+  # (crew_run_activity_is_recent in fm-classify-lib.sh reads the segment).
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" != coarse ] && nm_run_activity_is_recent; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}$FM_CREW_STATE_RUN_ACTIVITY_RECENT"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

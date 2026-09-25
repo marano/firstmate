@@ -257,6 +257,118 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   pass "repeated busy turn-age escalations reuse the existing escalation counter and demand deep inspection at the threshold"
 }
 
+# --- worker blocked on its own live validation run: working, not wedged -------
+# The 2026-09-25 case: a worker sat in a blocking `no-mistakes axi run --wait`
+# call through its run's test and CI steps, and the busy pane crossed the
+# completed-turn bound, so the watcher raised "possible wedge" every
+# FM_STALE_ESCALATE_SECS up to demand-deep-inspection while the run was healthy
+# and reporting fresh activity. Both halves are asserted on the SAME fixture,
+# because only the run's own activity differs: fresh activity restarts the
+# window and drops the streak, quiet activity escalates on the unchanged ladder.
+# The crew-state lines name the shared segment rather than a copy of its text, so
+# they cannot drift from what bin/fm-crew-state.sh writes.
+wedge_own_run_round() {  # <state> <fakebin> <out> <capture> <window> <crew-state-line> <busy-max>
+  PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$5" FM_FAKE_TMUX_CAPTURE="$4" \
+    FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$2/fm-crew-state.sh" FM_FAKE_CREW_STATE="$6" \
+    FM_FAKE_TMUX_PANE_PID="${FM_TEST_PANE_PID:-}" FM_BUSY_TURN_MAX_SECS="$7" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$3" &
+}
+
+# Shared assertions for both panes below: fresh run activity absorbs (A), quiet
+# run activity on the same fixture escalates (B).
+assert_wedge_own_run_halves() {  # <label> <state> <fakebin> <out> <capture> <window> <key> <busy-max>
+  local label=$1 state=$2 fakebin=$3 out=$4 capture_file=$5 window=$6 key=$7 busy_max=$8 back pid axi_root idle_root
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$fakebin/no-mistakes"
+  chmod +x "$fakebin/no-mistakes"
+  bash -c '"$1" axi run --wait & wait' _ "$fakebin/no-mistakes" & axi_root=$!
+  bash -c 'sleep 30 & wait' & idle_root=$!
+  # shellcheck disable=SC2064
+  trap "kill $axi_root $idle_root 2>/dev/null; pkill -P $axi_root 2>/dev/null; pkill -P $idle_root 2>/dev/null" RETURN
+  sleep 0.5
+  FM_TEST_PANE_PID=$axi_root
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+
+  wedge_own_run_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    "state: working · source: run-step · validating (running) · $FM_CREW_STATE_RUN_ACTIVITY_RECENT" "$busy_max"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "$label: a worker whose own run reports fresh activity was wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "$label: fresh run activity printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$label: fresh run activity enqueued a wake"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "$label: fresh run activity kept the escalation streak"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "$label: fresh run activity did not restart the idle window"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the intentional fresh-activity stop"
+
+  echo "$back" > "$state/.stale-since-$key"
+  : > "$out"
+  wedge_own_run_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    "state: working · source: run-step · validating (running)" "$busy_max"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "$label: a worker whose own run went quiet did not wedge-escalate"
+  grep -F "stale: $window" "$out" >/dev/null || fail "$label: the quiet-run escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "$label: the quiet-run escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
+    || fail "$label: the quiet-run escalation was not counted from a fresh streak"
+
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the quiet-run stop"
+
+  echo "$back" > "$state/.stale-since-$key"
+  rm -f "$state/.wedge-escalations-$key"
+  : > "$out"
+  FM_TEST_PANE_PID=$idle_root
+  wedge_own_run_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    "state: working · source: run-step · validating (running) · $FM_CREW_STATE_RUN_ACTIVITY_RECENT" "$busy_max"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "$label: a worker with fresh run activity but no axi process in its pane (at a prompt) did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "$label: the no-axi-process escalation did not flag a possible wedge"
+  FM_TEST_PANE_PID=
+}
+
+test_busy_pane_own_run_fresh_activity_is_not_a_wedge() {
+  local dir state fakebin out capture_file window key sig
+  dir=$(make_case busy-own-run-activity); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-own-run"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-own-run.meta"
+  record_pi_busy "$state" busy-own-run
+  printf 'working: run 01RUN started\n' > "$state/busy-own-run.status"
+  sig=$(seen_sig "$state/busy-own-run.status"); printf '%s' "$sig" > "$state/.seen-busy-own-run_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "Working...")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The drive call has kept the one turn busy past the completed-turn bound.
+  touch -t 200001010000 "$state/busy-own-run.meta"
+  touch -t 200001010000 "$state/busy-own-run.turn-ended"
+  prime_turnend_seen "$state/busy-own-run.turn-ended"
+  assert_wedge_own_run_halves "busy pane" "$state" "$fakebin" "$out" "$capture_file" "$window" "$key" 1
+  pass "a busy worker past the turn bound whose own run reports fresh activity is not a wedge, while a quiet run still escalates"
+}
+
+test_quiet_pane_own_run_fresh_activity_is_not_a_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig
+  dir=$(make_case quiet-own-run-activity); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-quiet-own-run"
+  printf 'idle waiting on the run' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/quiet-own-run.meta"
+  printf 'working: run 01RUN started\n' > "$state/quiet-own-run.status"
+  sig=$(seen_sig "$state/quiet-own-run.status"); printf '%s' "$sig" > "$state/.seen-quiet-own-run_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle waiting on the run")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Already classified provably working on first sight, so these polls land on
+  # the repeat-path wedge timer.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  assert_wedge_own_run_halves "quiet pane" "$state" "$fakebin" "$out" "$capture_file" "$window" "$key" 999999
+  pass "a quiet worker whose own run reports fresh activity is not a wedge, while a quiet run still escalates"
+}
+
 # --- declared pause + busy pane: the busy-turn bound must honor the declaration
 # A single foreground call can keep a declared external wait semantically busy
 # past the completed-turn bound, bypassing the ordinary stale-pause path.
@@ -1798,6 +1910,8 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_own_run_fresh_activity_is_not_a_wedge
+test_quiet_pane_own_run_fresh_activity_is_not_a_wedge
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once

@@ -2095,6 +2095,39 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# The detail segment bin/fm-crew-state.sh appends to a run-step `working` line
+# when the attributed run's own active step reports recent activity (its
+# nm_run_activity_is_recent owns that verdict). Shared here so the writer and the
+# reader below cannot drift apart.
+FM_CREW_STATE_RUN_ACTIVITY_RECENT='run activity recent'
+
+# 0 when one fm-crew-state.sh line reads a run-step `working` state carrying the
+# segment above: the crew's own validation run is live and still producing
+# activity. A quiet run, a parked or terminal run, a pane-only verdict, or an
+# unreadable line is 1.
+crew_state_line_run_activity_recent() {  # <crew-state-line>
+  local line=$1
+  case "$line" in
+    "state: working · source: run-step · "*) ;;
+    *) return 1 ;;
+  esac
+  case "$line · " in
+    *" · $FM_CREW_STATE_RUN_ACTIVITY_RECENT · "*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when crew <id> is waiting on its own live validation run with recent
+# activity, the positive evidence the wedge ladder needs to tell a worker blocked
+# on a healthy run from a wedged one. NOT a pure read (see crew_absorb_class), so
+# fm-watch.sh asks it only at the moment it would otherwise escalate.
+crew_run_activity_is_recent() {  # <id>
+  local line
+  [ -n "$1" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || return 1
+  crew_state_line_run_activity_recent "$line"
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

@@ -1378,6 +1378,15 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
+# fm_backend_herdr_pane_root_pid: the pane's shell pid, the root of its
+# process tree; empty when process-info is unreadable.
+fm_backend_herdr_pane_root_pid() {  # <target>
+  local info
+  fm_backend_herdr_parse_target "$1" || return 0
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
+  printf '%s' "$info" | jq -er '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null || true
+}
+
 # fm_backend_herdr_pane_idle_shell_pid: print the shell pid of <pane-id> only
 # when the exact pane provably holds one lone idle recognized shell: pane
 # process-info agrees on the pane id, the shell pid is both the foreground
