@@ -68,13 +68,15 @@ make_crewmate_worktree_dir() {
 # Run the hook as a child of the fake harness holding the fixture home's
 # session lock. $1 = fixture dir. Any extra env assignments must be exported
 # before invocation. Captures stdout+stderr; exit code on stdout of the caller.
+# Extra arguments after the dir reach the hook, e.g. --stop-failure.
 run_autoarm() {
   local dir=$1 rc=0
+  shift
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
-      ' 2>&1 || rc=$?
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$@"
+      ' claude "$@" 2>&1 || rc=$?
   printf 'RC=%s\n' "$rc" >&2
   return "$rc"
 }
@@ -213,11 +215,12 @@ epoch_outcome() {
 RUN_AUTOARM_BG_PID=
 run_autoarm_bg() {
   local dir=$1 out=$2
+  shift 2
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
-      ' > "$out" 2>&1 &
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$@"
+      ' claude "$@" > "$out" 2>&1 &
   RUN_AUTOARM_BG_PID=$!
 }
 
@@ -238,6 +241,168 @@ record_watcher_lock() {
 }
 
 # --- registration contract ----------------------------------------------------
+
+# Run the command the tracked settings register for <event>, the way Claude
+# does: a shell child of the lock-owning harness. Extra env must be exported.
+run_tracked_hook() {  # <dir> <event>
+  local dir=$1 event=$2 cmd rc=0
+  cmd=$(jq -r --arg ev "$event" '.hooks[$ev][0].hooks[0].command // empty' "$ROOT/.claude/settings.json")
+  [ -n "$cmd" ] || { printf 'no tracked %s hook command\n' "$event"; return 99; }
+  printf '%s\n' '{"session_id":"sess-autoarm","hook_event_name":"'"$event"'","error":"server_error"}' \
+    | env -u GROK_AGENT -u GROK_HOOK_EVENT FM_HOME="$dir" CLAUDE_PROJECT_DIR="$dir" HOOK_CMD="$cmd" \
+      "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        sh -c "$HOOK_CMD"
+        exit $?
+      ' 2>&1 || rc=$?
+  return "$rc"
+}
+
+# The 2026-09-24 overnight stall: a rewake's handling turn ended in an API
+# error, Claude ran StopFailure hooks instead of Stop, nothing was registered
+# there, and the idle primary stayed blind for nine hours with no watcher.
+# Claude discards a StopFailure hook's exit status unless the hook is
+# asyncRewake, so the registration must be async-rewake and must re-arm.
+test_api_error_turn_end_rearms_through_stop_failure() {
+  local dir sleepbin out status
+  command -v jq >/dev/null 2>&1 || fail "test host must provide jq"
+  [ "$(jq -r '.hooks.StopFailure[0].hooks[0].asyncRewake // false' "$ROOT/.claude/settings.json")" = true ] \
+    || fail "an API-error turn end runs StopFailure hooks, and only an asyncRewake one can wake the idle session"
+  dir=$(make_primary_dir "$TMP_ROOT/stop-failure-rearm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  sleepbin=$(install_recording_sleep "$dir")
+  out=$(unset FM_CLAUDE_STOPFAILURE_BACKOFF FM_CLAUDE_STOPFAILURE_BACKOFF_MAX
+    PATH="$sleepbin:$PATH" run_tracked_hook "$dir" StopFailure); status=$?
+  expect_code 2 "$status" "the tracked StopFailure hook must re-arm and rewake after an API-error turn end: $out"
+  assert_contains "$out" "firstmate watcher wake" "the StopFailure rewake must carry the wake banner"
+  assert_contains "$out" "stale: fixture-win actionable" "the StopFailure rewake must carry the arm's reason"
+  [ -e "$dir/state/arm-ran" ] || fail "the StopFailure hook never armed a watcher"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the StopFailure cycle must record outcome=rewake"
+  [ "$(cat "$dir/state/backoff-sleeps" 2>/dev/null)" = 60 ] \
+    || fail "the tracked StopFailure registration must take the backed-off path, or an API that fails at once loops"
+  pass "auto-arm: an API-error turn end re-arms and rewakes through the tracked StopFailure registration"
+}
+
+# --- API-error turn ends: bounded backoff ---------------------------------------
+
+# A fake sleep on PATH records whole-second waits (only the backoff uses one)
+# and returns at once; fractional lock-poll sleeps still really sleep.
+install_recording_sleep() {  # <dir> -> prints the PATH prefix
+  local bin="$1/fakesleep" real
+  real=$(command -v sleep)
+  mkdir -p "$bin"
+  cat > "$bin/sleep" <<SH
+#!/bin/sh
+case "\$1" in
+  *.*) exec "$real" "\$@" ;;
+esac
+printf '%s\n' "\$1" >> "$1/state/backoff-sleeps"
+SH
+  chmod +x "$bin/sleep"
+  printf '%s\n' "$bin"
+}
+
+test_stop_failure_backoff_doubles_to_its_cap_and_a_completed_turn_resets_it() {
+  local dir sleepbin out status n
+  dir=$(make_primary_dir "$TMP_ROOT/stop-failure-backoff")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  sleepbin=$(install_recording_sleep "$dir")
+  for n in 1 2 3 4 5 6; do
+    out=$(unset FM_CLAUDE_STOPFAILURE_BACKOFF FM_CLAUDE_STOPFAILURE_BACKOFF_MAX
+      PATH="$sleepbin:$PATH" run_autoarm "$dir" --stop-failure 2>/dev/null); status=$?
+    expect_code 2 "$status" "StopFailure firing $n must still re-arm and rewake after its backoff"
+  done
+  [ "$(tr '\n' ' ' < "$dir/state/backoff-sleeps")" = "60 120 240 480 900 900 " ] \
+    || fail "consecutive API-error turn ends must back off 60s doubling to a 900s cap, got: $(tr '\n' ' ' < "$dir/state/backoff-sleeps")"
+  out=$(PATH="$sleepbin:$PATH" run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a Stop firing must rewake exactly as before"
+  assert_absent "$dir/state/.claude-autoarm-stopfailure" "a completed turn's Stop firing must end the API-error streak"
+  out=$(unset FM_CLAUDE_STOPFAILURE_BACKOFF FM_CLAUDE_STOPFAILURE_BACKOFF_MAX
+    PATH="$sleepbin:$PATH" run_autoarm "$dir" --stop-failure 2>/dev/null); status=$?
+  expect_code 2 "$status" "the first API-error turn end after a completed turn must re-arm"
+  [ "$(tail -n 1 "$dir/state/backoff-sleeps")" = 60 ] \
+    || fail "the first API-error turn end after a completed turn must restart at the base backoff, got $(tail -n 1 "$dir/state/backoff-sleeps")"
+  [ "$(wc -l < "$dir/state/backoff-sleeps" | tr -d ' ')" = 7 ] \
+    || fail "a Stop firing must never wait out a backoff: $(tr '\n' ' ' < "$dir/state/backoff-sleeps")"
+  pass "auto-arm: StopFailure re-arms back off 60s doubling to 900s, and a completed turn resets the streak"
+}
+
+# Fire a waiting StopFailure hook, then a second hook (<second-args>, empty for
+# a Stop) once the first is inside its backoff, both from ONE fake harness as a
+# real session's hooks are. Records each firing's exit status and output as
+# <dir>/state/{first,second}.{rc,out}.
+run_two_firings_one_session() {  # <dir> <backoff> [second-args...]
+  local dir=$1 backoff=$2
+  shift 2
+  FM_HOME="$dir" FM_CLAUDE_STOPFAILURE_BACKOFF="$backoff" "$FAKE_CLAUDE" -c '
+    s=$FM_HOME/state
+    printf "%s\n" "$$" > "$s/.lock"
+    printf "{}\n" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" --stop-failure > "$s/first.out" 2>&1 &
+    first=$!
+    i=0
+    while [ ! -e "$s/.claude-autoarm-stopfailure" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    printf "{}\n" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$@" > "$s/second.out" 2>&1 &
+    second=$!
+    rc=0; wait "$first" || rc=$?; printf "%s\n" "$rc" > "$s/first.rc"
+    rc=0; wait "$second" || rc=$?; printf "%s\n" "$rc" > "$s/second.rc"
+    exit 0
+  ' claude "$@"
+}
+
+# A turn that completes while a StopFailure firing waits already has its own
+# Stop-owned hook, so the waiting firing must go silent instead of arming a
+# second cycle over it.
+test_stop_failure_wait_stands_down_when_a_turn_completes() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/stop-failure-turn-completes")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  run_two_firings_one_session "$dir" 3
+  [ "$(cat "$dir/state/second.rc")" = 2 ] || fail "the completed turn's Stop firing must rewake: $(cat "$dir/state/second.out")"
+  [ "$(cat "$dir/state/first.rc")" = 0 ] \
+    || fail "a StopFailure firing whose wait saw a completed turn must stand down, got rc $(cat "$dir/state/first.rc"): $(cat "$dir/state/first.out")"
+  [ ! -s "$dir/state/first.out" ] || fail "the stood-down StopFailure firing produced output: $(cat "$dir/state/first.out")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 1 ] || fail "only the Stop firing may arm: $(cat "$dir/state/arm-ran")"
+  pass "auto-arm: a StopFailure firing stands down when a turn completes during its backoff"
+}
+
+# Only the newest API-error turn end keeps a retry; an older firing still
+# waiting must not arm on top of it.
+test_stop_failure_wait_yields_to_a_newer_failure() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/stop-failure-newer")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  run_two_firings_one_session "$dir" 2 --stop-failure
+  [ "$(cat "$dir/state/first.rc")" = 0 ] \
+    || fail "an older StopFailure firing must yield to a newer one, got rc $(cat "$dir/state/first.rc"): $(cat "$dir/state/first.out")"
+  [ ! -s "$dir/state/first.out" ] || fail "the superseded StopFailure firing produced output: $(cat "$dir/state/first.out")"
+  [ "$(cat "$dir/state/second.rc")" = 2 ] || fail "the newest StopFailure firing must re-arm and rewake: $(cat "$dir/state/second.out")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 1 ] || fail "exactly one StopFailure firing may arm: $(cat "$dir/state/arm-ran")"
+  pass "auto-arm: an older StopFailure wait yields to the newest API-error turn end"
+}
+
+test_stop_failure_inert_homes_keep_no_streak() {
+  local idle_dir afk_dir out status
+  idle_dir=$(make_primary_dir "$TMP_ROOT/stop-failure-idle")
+  write_arm_fixture "$idle_dir" actionable
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF=0 run_autoarm "$idle_dir" --stop-failure 2>/dev/null); status=$?
+  expect_code 0 "$status" "an idle home must stay inert on StopFailure"
+  assert_absent "$idle_dir/state/.claude-autoarm-stopfailure" "an idle home recorded an API-error streak"
+  assert_absent "$idle_dir/state/arm-ran" "an idle home armed on StopFailure"
+
+  afk_dir=$(make_primary_dir "$TMP_ROOT/stop-failure-afk")
+  : > "$afk_dir/state/task.meta"
+  : > "$afk_dir/state/.afk"
+  write_arm_fixture "$afk_dir" actionable
+  out=$(FM_CLAUDE_STOPFAILURE_BACKOFF=0 run_autoarm "$afk_dir" --stop-failure 2>/dev/null); status=$?
+  expect_code 0 "$status" "a daemon-owned home must stay inert on StopFailure"
+  assert_absent "$afk_dir/state/.claude-autoarm-stopfailure" "a daemon-owned home recorded an API-error streak"
+  assert_absent "$afk_dir/state/arm-ran" "a daemon-owned home armed on StopFailure"
+  pass "auto-arm: idle and daemon-owned homes stay inert on StopFailure and keep no streak"
+}
 
 # --- scope and gates ----------------------------------------------------------
 
@@ -1361,6 +1526,11 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+test_api_error_turn_end_rearms_through_stop_failure
+test_stop_failure_backoff_doubles_to_its_cap_and_a_completed_turn_resets_it
+test_stop_failure_wait_stands_down_when_a_turn_completes
+test_stop_failure_wait_yields_to_a_newer_failure
+test_stop_failure_inert_homes_keep_no_streak
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
