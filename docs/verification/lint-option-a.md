@@ -234,4 +234,19 @@ The cost is ShellCheck's dataflow analysis over the inlined program rather than 
 
 These figures supersede the `bin/fm-watch.sh` and `tests/fm-stat-shadowing.test.sh` rows of the heaviest-roots table above.
 `bin/fm-watch.sh` itself now follows no library, because each is a canonical root analysed with its full graph; the trade is that the watcher's own dataflow no longer sees library definitions.
-`bin/fm-teardown.sh` was then the heaviest root measured, and it, `bin/fm-bootstrap.sh`, and `bin/fm-mail.sh` each still sourced `bin/fm-wake-lib.sh` at two sites; each now has exactly one, through `bootstrap_load_wake_lib` and `mail_load_wake_lib` or, in teardown, the top-level site alone. Those roots have not been re-measured, so the table above predates that change.
+`bin/fm-teardown.sh` was then the heaviest root measured, and it, `bin/fm-bootstrap.sh`, and `bin/fm-mail.sh` each sourced `bin/fm-wake-lib.sh` at two sites.
+The 2026-09-25 measurement, with the same build, host, and commands, compared commit `f868eb3b` with the change that gave each of those roots one site, through `bootstrap_load_wake_lib` and `mail_load_wake_lib` or, in teardown, the top-level site alone:
+
+| Root | Before | After |
+| --- | ---: | ---: |
+| `bin/fm-teardown.sh` | 127 GiB, 7,147 MB | 109 GiB, 6,296 MB |
+| `bin/fm-bootstrap.sh` | 53 GiB, 2,663 MB | 38 GiB, 2,089 MB |
+| `bin/fm-mail.sh` | 28 GiB, 1,384 MB | 14 GiB, 722 MB |
+
+| Shard | Before | After |
+| --- | ---: | ---: |
+| 1/2 | 1,510 GiB, 5,130 MB, 561 s | 1,505 GiB, 5,155 MB, 548 s |
+| 2/2 | 1,638 GiB, 7,155 MB, 677 s | 1,597 GiB, 6,288 MB, 609 s |
+
+`bin/fm-teardown.sh` still sets the shard peak.
+The shards balance by the bytes each root reads, so lighter roots move between them and a shard's rows are not the same file set before and after.
