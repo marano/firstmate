@@ -20,6 +20,8 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
+  assert_grep 'a finding in any other run, including a rerun raising the same finding, is a new ask-user gate to escalate as a new needs-decision, never one to answer from an earlier decision' "$ship" \
+    "generated implementation brief lets a worker reuse a decision across validation runs"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
     "generated implementation brief does not prohibit silent ask-user auto-resolution"
