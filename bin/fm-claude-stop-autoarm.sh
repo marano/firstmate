@@ -7,6 +7,20 @@
 # deduplication across firings. It owns routine tokenless watcher continuity
 # for Claude primaries (main home and marked secondmate homes):
 #
+#   - API-error turn ends: Claude runs StopFailure hooks INSTEAD of Stop when an
+#     API error ends a turn, so the same file is also registered on StopFailure
+#     with --stop-failure. Without it, a rewake whose handling turn failed (a
+#     network outage, an overload, a usage limit) left no watcher and no live
+#     hook, and the idle session stayed blind until a human typed. Before it
+#     claims, that mode waits FM_CLAUDE_STOPFAILURE_BACKOFF seconds (default
+#     60), doubling per consecutive API-error turn end up to
+#     FM_CLAUDE_STOPFAILURE_BACKOFF_MAX (default 900), so an API that keeps
+#     failing at once cannot become a tight rewake loop. The streak lives in
+#     state/.claude-autoarm-stopfailure; every Stop firing clears it, and a
+#     waiting firing stands down when a completed turn or a newer failure
+#     rewrote it, because that turn's own hook now owns continuity. Every gate
+#     below runs again after the wait.
+#
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
@@ -91,6 +105,20 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+STOPFAILURE_STREAK="$STATE/.claude-autoarm-stopfailure"
+STOPFAILURE_BACKOFF=${FM_CLAUDE_STOPFAILURE_BACKOFF:-60}
+case "$STOPFAILURE_BACKOFF" in ''|*[!0-9]*) STOPFAILURE_BACKOFF=60 ;; esac
+STOPFAILURE_BACKOFF_MAX=${FM_CLAUDE_STOPFAILURE_BACKOFF_MAX:-900}
+case "$STOPFAILURE_BACKOFF_MAX" in ''|*[!0-9]*) STOPFAILURE_BACKOFF_MAX=900 ;; esac
+
+# Which Claude event fired this invocation (see the header's API-error bullet).
+# Anything unrecognized is uncertainty, so the hook stays inert.
+HOOK_EVENT=stop
+case "${1:-}" in
+  '') : ;;
+  --stop-failure) HOOK_EVENT=stop-failure ;;
+  *) exit 0 ;;
+esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -133,13 +161,22 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
-if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
+identity_gate() {
+  local lock_pid
+  RECOVER_SESSION_LOCK=0
+  fm_session_lock_owned_by_self "$STATE" && return 0
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_harness_pid_alive "$lock_pid" && return 1
   RECOVER_SESSION_LOCK=1
+}
+identity_gate || exit 0
+
+# A Stop firing means a turn completed, so any API-error streak is over.
+if [ "$HOOK_EVENT" = stop ] && [ -e "$STOPFAILURE_STREAK" ]; then
+  rm -f "$STOPFAILURE_STREAK" 2>/dev/null || true
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
@@ -150,6 +187,34 @@ need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
 need_supervision || exit 0
+
+# --- API-error turn end: bounded backoff before re-arming ---------------------
+# Count this failure into the streak, wait out its backoff, and return success
+# only while this firing still owns the newest failure and no turn completed
+# during the wait. Nothing is claimed yet, so a Stop-owned cycle that starts
+# during the wait simply wins, and this firing defers to its open claim.
+stopfailure_backoff() {
+  local count=0 token delay step=1
+  { IFS=' ' read -r count _ < "$STOPFAILURE_STREAK"; } 2>/dev/null || count=0
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  count=$((count + 1))
+  token="$count ${BASHPID:-$$}.$(date +%s)"
+  printf '%s\n' "$token" > "$STOPFAILURE_STREAK" 2>/dev/null || return 1
+  delay=$STOPFAILURE_BACKOFF
+  while [ "$step" -lt "$count" ] && [ "$delay" -lt "$STOPFAILURE_BACKOFF_MAX" ]; do
+    delay=$((delay * 2))
+    step=$((step + 1))
+  done
+  [ "$delay" -le "$STOPFAILURE_BACKOFF_MAX" ] || delay=$STOPFAILURE_BACKOFF_MAX
+  sleep "$delay"
+  [ "$(cat "$STOPFAILURE_STREAK" 2>/dev/null || true)" = "$token" ]
+}
+if [ "$HOOK_EVENT" = stop-failure ]; then
+  stopfailure_backoff || exit 0
+  identity_gate || exit 0
+  [ -e "$STATE/.afk" ] && exit 0
+  need_supervision || exit 0
+fi
 
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics

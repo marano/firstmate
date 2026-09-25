@@ -477,6 +477,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stopfailure-rearm-live-e2e.test.sh` | A rewake whose handling turn ended in an API error was re-armed by the `StopFailure` registration and woke the idle session again (Claude Code 2.1.282, 2026-09-25; see below). |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
@@ -484,6 +485,33 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
+
+### Claude API-error turn end, 2026-09-25
+
+Claude Code 2.1.282 on macOS, in an isolated lab project and home, with the network to `api.anthropic.com` cut by a local proxy for exactly the rewake's handling turn:
+
+```sh
+claude --version
+FM_CLAUDE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-claude-stopfailure-rearm-live-e2e.test.sh
+```
+
+```text
+2.1.282 (Claude Code)
+ok - Claude 2.1.282 (Claude Code) live E2E: a rewake whose handling turn hit an API error was re-armed through StopFailure and woke the idle session again
+```
+
+The same run against the settings before the `StopFailure` registration, with the re-arm wait shortened to 90 seconds, reproduced the unattended stall: the rewake's handling turn ended in an API error and nothing armed again.
+
+```text
+not ok - timed out after 90s waiting for the StopFailure-owned re-arm; arm runs: arm-run=1 streak=none; ...
+```
+
+Observed harness facts behind that guarantee:
+
+- An API-error turn end runs `StopFailure` hooks and no `Stop` hook; the lab payload carried `"hook_event_name":"StopFailure","error":"server_error"`.
+- A `StopFailure` command hook with `asyncRewake: true` that exits 2 wakes an idle session with its stderr, the same way a `Stop` one does; this held both for the streaming-input session and for an interactive TUI session in a private tmux lab, where the pane showed `API Error: Connection dropped (ECONNRESET)`, then `Stop hook feedback`, then the model's reply, and only then a `Stop` firing.
+- A plain `claude -p` run exits right after the API error, about two seconds after its `StopFailure` hook started and without waiting for it, so no rewake can follow; the live test therefore keeps the session open with `--input-format stream-json`.
+- A streaming-input session does not exit when its input ends, so the test stops it explicitly.
 
 Pi same-process session-transition ownership was verified on 2026-09-01 against the tracked extension with provider-free public lifecycle events, retained and fresh extension-module rebinds, and real arm children:
 
