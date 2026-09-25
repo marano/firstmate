@@ -184,6 +184,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-branch-orphan-lib.sh"
 # shellcheck source=bin/fm-linear-lib.sh
 . "$SCRIPT_DIR/fm-linear-lib.sh"
+# shellcheck source=bin/fm-github-issue-lib.sh
+. "$SCRIPT_DIR/fm-github-issue-lib.sh"
 # shellcheck source=bin/fm-merge-hold-lib.sh
 . "$SCRIPT_DIR/fm-merge-hold-lib.sh"
 
@@ -1649,4 +1651,9 @@ esac
 # moves rather than the whole board move being skipped.
 fm_backlog_members_of_meta "$STATE/$ID.meta" "$ID" || FM_BACKLOG_TRANSITION_MEMBERS=()
 fm_linear_board_advance "$FM_HOME" "$DATA" merge "$ID" \
+  ${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}
+# A published item's GitHub issue is closed here, by firstmate, under the same
+# rule: the pull request only refers to it, so this is its one closer
+# (bin/fm-github-issue-lib.sh).
+fm_github_issue_advance "$DATA" merge "$ID" \
   ${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}

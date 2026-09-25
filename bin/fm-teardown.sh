@@ -286,6 +286,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-github-issue-lib.sh
+. "$SCRIPT_DIR/fm-github-issue-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -3729,6 +3731,13 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# A requeued item's GitHub issue follows it back to the queue, outside the lock
+# and after the transition landed, so the mirror can never hold or fail this
+# cleanup; an item with no issue is untouched (bin/fm-github-issue-lib.sh).
+if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = requeue ]; then
+  fm_github_issue_advance "$DATA" requeue "$ID" \
+    ${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
