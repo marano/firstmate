@@ -234,4 +234,4 @@ The cost is ShellCheck's dataflow analysis over the inlined program rather than 
 
 These figures supersede the `bin/fm-watch.sh` and `tests/fm-stat-shadowing.test.sh` rows of the heaviest-roots table above.
 `bin/fm-watch.sh` itself now follows no library, because each is a canonical root analysed with its full graph; the trade is that the watcher's own dataflow no longer sees library definitions.
-`bin/fm-teardown.sh`, `bin/fm-bootstrap.sh`, and `bin/fm-mail.sh` still source `bin/fm-wake-lib.sh` at two sites each, and `bin/fm-teardown.sh` is now the heaviest root measured.
+`bin/fm-teardown.sh` was then the heaviest root measured, and it, `bin/fm-bootstrap.sh`, and `bin/fm-mail.sh` each still sourced `bin/fm-wake-lib.sh` at two sites; each now has exactly one, through `bootstrap_load_wake_lib` and `mail_load_wake_lib` or, in teardown, the top-level site alone. Those roots have not been re-measured, so the table above predates that change.
