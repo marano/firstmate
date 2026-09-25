@@ -19,6 +19,14 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 
+# The record bin/fm-control.sh `exit` writes when firstmate stops a task's agent on
+# purpose. A fixture that needs a paused worker's exited agent on the long recheck
+# cadence writes it, because an agent that exits on its own under a `paused:` wait
+# surfaces once as a gone agent instead (paused_agent_gone_surface).
+record_deliberate_stop() {  # <state> <id>
+  printf 'stopped_at=2026-09-25T00:00:00Z\nverb=exit\nresult=stopped\n' > "$1/$2.agent-stopped"
+}
+
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-cycle-drain.err"

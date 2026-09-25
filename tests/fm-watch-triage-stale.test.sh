@@ -125,6 +125,9 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   # not pre-empt the stale path.
   printf 'paused: holding for the upstream tool release\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  # Firstmate stopped the agent on purpose, so the exited agent is expected and
+  # the wait keeps the bounded cadence under test.
+  record_deliberate_stop "$state" held
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -178,7 +181,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
-# bounded pause handling.
+# bounded pause handling. A worker's own paused: wait whose agent exited surfaces
+# once as a gone agent (paused_agent_gone_surface) and is bounded after that.
 # A still-live agent at an external-decision gate is the disconfirming case: it
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
@@ -227,8 +231,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
   [ "$bare" -eq 0 ] || fail "dead-agent declared pause surfaced as $bare bare stopped-crew wakes"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
-    || fail "dead-agent declared pause did not use the bounded paused recheck"
+  grep -F "agent gone (dead)" "$state/.wake-queue" >/dev/null \
+    || fail "dead-agent declared pause was not reported as a gone agent: $(cat "$state/.wake-queue" 2>/dev/null)"
 
   dir=$(make_case exited-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -645,6 +649,7 @@ test_build_lock_lines_after_a_declared_wait_do_not_restart_its_window() {
   window="test:fm-held"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
   printf 'paused: stock-Bash lane under way in the foreground, pid 4242, ~20 min\n' > "$statusf"
+  record_deliberate_stop "$state" held
   set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1053,6 +1058,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/transition.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/transition.status"
+  record_deliberate_stop "$state" transition
   sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
@@ -1080,6 +1086,8 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional entered-pause watcher stop"
 
+  # Relaunched to resume, which removes the stop record (bin/fm-spawn.sh).
+  rm -f "$state/transition.agent-stopped"
   printf 'working: upstream landed, resuming\n' > "$state/transition.status"
   sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'

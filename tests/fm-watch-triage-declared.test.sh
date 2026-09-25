@@ -1202,6 +1202,128 @@ test_a_gone_agent_reports_once_and_a_live_idle_one_still_escalates() {
   pass "a gone agent reports once and stays quiet, a relaunched one reports again, and a live idle agent still escalates"
 }
 
+# --- a paused worker whose agent exited surfaces once, promptly ---------------
+# 2026-09-24: a worker appended `paused: re-running CI shard heap measurement ...
+# in background` and its agent exited to a shell prompt, taking the background
+# shells with it. The wait could never clear, yet the watcher absorbed the gone
+# agent under the declared pause and surfaced it only on the long recheck, about
+# four hours later. paused_agent_gone_surface now reports that pairing once per
+# agent at first sight, then holds the pane to the ordinary cadence.
+# The fake tmux reads `zsh` as a shell-only pane (dead) and `grok` as a live agent.
+paused_gone_task() {  # <state> <id> <window> <capture> <status-line> [meta key=value ...]
+  local state=$1 id=$2 window=$3 capture=$4 line=$5 key back
+  shift 5
+  key=$(landing_stale_task "$state" "$id" "$window" "$capture" "fm-$id \$" "$line" "harness=grok" "backend=tmux" "$@")
+  # Older than the recheck cadence below, so an unthrottled recheck would fire
+  # on the very next poll and cannot hide behind a fresh declaration.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/$id.status"
+  else touch -m -d "@$back" "$state/$id.status"; fi
+  printf '%s' "$(seen_sig "$state/$id.status")" > "$state/.seen-${id}_status"
+  printf '%s' "$key"
+}
+
+# Mutants that must turn this red:
+#   - drop the paused_agent_gone_surface call: the first leg wakes only as the
+#     ordinary external-wait recheck, never as a gone agent.
+#   - surface without recording the identity marker: the quiet leg wakes again.
+#   - surface without recording the recheck throttle: the quiet leg wakes with
+#     the recheck the 500s-old declaration is already due.
+#   - drop the busy generation from the identity: the relaunched-and-exited-again
+#     leg stays quiet.
+test_paused_worker_with_exited_agent_surfaces_once_promptly() {
+  local dir state fakebin out capture window key pid
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  dir=$(make_case paused-agent-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-paused-gone"
+  key=$(paused_gone_task "$state" paused-gone "$window" "$capture" \
+    'paused: re-running the heap measurement in background; results in task scratchpad')
+  printf 'gen1\n' > "$state/paused-gone.busy-gen"
+
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a paused worker whose agent exited never woke firstmate"; }
+  grep -F "stale: $window (paused " "$out" | grep -F "agent gone (dead)" >/dev/null \
+    || fail "a paused worker whose agent exited did not wake as a gone agent: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the gone agent's one wake"
+
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a paused worker whose gone agent was already reported"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the quiet leg's watcher stop"
+
+  printf 'gen2\n' > "$state/paused-gone.busy-gen"
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a relaunched agent that exited again never woke firstmate"; }
+  grep -F "agent gone (dead)" "$out" >/dev/null || fail "the second gone agent printed the wrong wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second gone agent's wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused worker whose agent exited surfaces once promptly, stays quiet for that agent, and a new agent reports again"
+}
+
+# The exits that are expected keep today's quiet cadence.
+#
+# Mutants that must turn this red:
+#   - gate on status_is_paused_or_captain_held instead of the paused verb: the
+#     captain-held leg wakes.
+#   - drop the stop-record gate: the deliberately stopped leg wakes.
+test_expected_agent_exits_under_a_declared_wait_stay_on_the_cadence() {
+  local dir state fakebin out capture window key pid
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  dir=$(make_case captain-held-agent-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-held-gone"
+  key=$(landing_stale_task "$state" held-gone "$window" "$capture" 'fm-held-gone $' \
+    'captain-held [key=route]: tracked by held-decision-route' "harness=grok" "backend=tmux")
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a captain-held task whose agent exited"
+
+  dir=$(make_case stopped-paused-agent-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-stopped-paused"
+  key=$(landing_stale_task "$state" stopped-paused "$window" "$capture" 'fm-stopped-paused $' \
+    'paused: waiting on the upstream release' "harness=grok" "backend=tmux")
+  landing_stop_agent "$state" stopped-paused
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_FAKE_TMUX_CURRENT_COMMAND=zsh
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a paused task whose agent firstmate stopped on purpose"
+  unset FM_FAKE_CREW_STATE
+  pass "a captain-held task and a deliberately stopped paused task with exited agents stay on the long cadence"
+}
+
+# CONTROL: a paused worker whose agent is live keeps its existing shape - one
+# first-sight surface worded as the declared wait, never as a gone agent, then
+# quiet on the cadence.
+test_paused_worker_with_live_agent_is_unchanged() {
+  local dir state fakebin out capture window key pid
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream release'
+  dir=$(make_case paused-agent-live); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-paused-live"
+  key=$(landing_stale_task "$state" paused-live "$window" "$capture" 'fm-paused-live $' \
+    'paused: waiting on the upstream release' "harness=grok" "backend=tmux")
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_FAKE_TMUX_CURRENT_COMMAND=grok
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a live paused worker's first sight never surfaced"; }
+  grep -F "first seen quiet with its agent not confirmed stopped" "$out" >/dev/null \
+    || fail "a live paused worker's first sight lost its declared-wait wording: $(cat "$out")"
+  grep -F "agent gone" "$out" >/dev/null && fail "a live paused worker was reported as a gone agent: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live paused worker's first sight"
+
+  landing_watch "$state" "$fakebin" "$out" "$window" "$capture" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_FAKE_TMUX_CURRENT_COMMAND=grok
+  pid=$!
+  landing_assert_quiet "$state" "$pid" "$out" "$key" 4 "a live paused worker already surfaced once"
+  [ ! -e "$state/.paused-agent-gone-$key" ] || fail "a live paused worker left a gone-agent record"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused worker with a live agent surfaces once as its declared wait and then stays quiet"
+}
+
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_awaiting_landing_raises_no_stale_alarm
@@ -1213,6 +1335,9 @@ test_a_bare_resolution_ends_an_unkeyed_wait
 test_wedged_task_not_awaiting_landing_still_alarms_and_escalates
 test_stopped_worker_with_unlanded_work_surfaces_once_and_never_as_a_wedge
 test_a_gone_agent_reports_once_and_a_live_idle_one_still_escalates
+test_paused_worker_with_exited_agent_surfaces_once_promptly
+test_expected_agent_exits_under_a_declared_wait_stay_on_the_cadence
+test_paused_worker_with_live_agent_is_unchanged
 test_validated_ahead_pr_head_on_a_stopped_worker_is_quiet_and_others_alarm
 test_validated_rebased_pr_head_on_a_stopped_worker_is_quiet_and_a_wedge_alarms
 test_validated_pr_head_only_the_gate_holds_on_a_stopped_worker_is_quiet

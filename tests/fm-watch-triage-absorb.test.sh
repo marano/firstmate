@@ -2962,6 +2962,7 @@ declared_wait_recheck_reason() {  # <case> <status-line> -> queued reason on std
   printf 'idle bare shell\n' > "$capture"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
   printf '%s\n' "$line" > "$state/held.status"
+  record_deliberate_stop "$state" held
   back=$(( $(date +%s) - 500 ))
   set_mtime "$back" "$state/held.status"
   printf '%s' "$(seen_sig "$state/held.status")" > "$state/.seen-held_status"
