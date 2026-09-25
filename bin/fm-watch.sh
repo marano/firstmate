@@ -88,6 +88,14 @@
 #                          ONCE per agent as "agent gone ... not a wedge" and then
 #                          only absorbs (wedge_dead_agent_hold); an alive or
 #                          unreadable agent keeps the ordinary ladder.
+#   stale: <window> (paused ...s, agent gone (dead|missing) - its declared wait
+#                    cannot clear ...)
+#                          a worker's own paused: wait whose agent has exited,
+#                          surfaced ONCE per agent at first sight rather than at
+#                          the long recheck, then held to that cadence; a
+#                          captain-held transfer, a secondmate, and an agent
+#                          firstmate stopped on purpose stay on the cadence
+#                          (paused_agent_gone_surface)
 #   stale: <window> (the worker's turn ended ...s ago while a run of its own is
 #                    still going - pid N, held Ns, running: ...)
 #                          the pairing a held build slot alone cannot show: the
@@ -432,7 +440,9 @@ case "$UNRECORDED_PR_RESURFACE_SECS" in ''|*[!0-9]*|0) UNRECORDED_PR_RESURFACE_S
 # bounded cadence, while a live or ambiguously read agent surfaces on first sight
 # and is then held to that same cadence; a secondmate earns the cadence on its
 # declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# (pause_state_class owns that split). A worker's own paused: wait whose agent
+# exited first surfaces once as a gone agent (paused_agent_gone_surface owns
+# which exits are expected and stay quiet).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain while the away-posture record
@@ -1695,6 +1705,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
     return 0
   fi
+  paused_agent_gone_surface "$win" "$task" "$last" "$age" "$declaration"
   if until=$(status_paused_until "$last") \
     && [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
     triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
@@ -1709,6 +1720,49 @@ handle_paused_stale() {  # <window> <task> <hash>
   fi
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($DECLARED_WAIT_REASON)" "$declaration" "$min_age"
   triage_log "absorbed stale ($DECLARED_WAIT_DETAIL, age ${age}s): $win"
+}
+
+# A worker's own `paused:` wait whose agent has exited cannot clear: the agent
+# that declared it was the only thing that would ever collect the result or say
+# the wait is over, and a background job it launched usually died with it. The
+# bounded cadence above is right for a wait that is still being waited on, and
+# wrong for this one - on 2026-09-24 a worker declared a background measurement
+# and exited, and the lane sat dead for four hours until the recheck. So the
+# first sight of that pairing surfaces once, promptly, as a gone agent, and every
+# later sight of the same agent takes the ordinary cadence, throttled from this
+# surface. The identity is the busy generation, as in wedge_dead_agent_hold, so a
+# relaunched agent that exits again reports again; the marker is dropped with the
+# window's hash-scoped tracking (clear_stale_hash_tracking).
+# Only a worker-declared `paused:` on an ordinary crew qualifies. An exited agent
+# is expected, and stays on the cadence, for a captain-held transfer (the captain
+# owns that wait), a secondmate (whose liveness is never read), and a task whose
+# agent firstmate stopped on purpose (state/<id>.agent-stopped, which
+# stopped_agent_hold hands to this cadence while a wait is declared).
+# The liveness read happens only when pause_state_class's own dead-agent recheck
+# admitted the window (a timestamp, not its `working` confirmation) and this
+# agent has not been reported yet, so a reported pane, or a live one whose recheck
+# pause_state_class already dropped, costs no extra read.
+# Wakes (and exits the cycle) when it surfaces; otherwise returns.
+paused_agent_gone_surface() {  # <window> <task> <declared-line> <age> <declaration>
+  local win=$1 task=$2 last=$3 age=$4 declaration=$5 key marker recheck identity gen state reason
+  status_is_paused "$last" || return 0
+  [ "$(window_kind "$win")" != secondmate ] || return 0
+  [ -L "$STATE/$task.agent-stopped" ] || [ ! -f "$STATE/$task.agent-stopped" ] || return 0
+  key=$(window_key "$win")
+  recheck="$STATE/.paused-rechecked-$key"
+  [ -f "$recheck" ] && [ "$(cat "$recheck" 2>/dev/null || true)" != working ] || return 0
+  marker="$STATE/.paused-agent-gone-$key"
+  identity=gone
+  if gen=$(fm_busy_current_gen "$STATE" "$task"); then identity="gone:$gen"; fi
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$identity" ] || return 0
+  state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null || true)
+  case "$state" in dead|missing) ;; *) return 0 ;; esac
+  reason="stale: $win (paused ${age}s, agent gone ($state) - its declared wait cannot clear with no agent left to finish it; reported once for this agent, then rechecked on the long pause cadence; relaunch the worker or take over the wait)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$identity" > "$marker"
+  printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+  triage_log_surfaced_stale "$win" "declared pause, agent gone ($state)"
+  wake "$reason"
 }
 
 # Seconds since <status-file> last changed, the age every declared-wait reason
@@ -1919,7 +1973,8 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   clear_task_shell_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key" \
+    "$STATE/.paused-agent-gone-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
