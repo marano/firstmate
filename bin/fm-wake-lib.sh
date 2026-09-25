@@ -438,6 +438,12 @@ fm_watcher_supervision_verdict() {
 # fm_path_age) keep $(...), since that parse happens in the subshell.
 # A $(...) back on this path fails the startup lock path case in
 # tests/fm-watcher-lock.test.sh on Bash 5.2.
+# The path executes no continue or break either. Bash runs a trap that is pending
+# as one of them completes while the loop is still being left, which skips
+# every command of the trap, so the signal is lost (3.2 through 5.3 alike).
+# A loop on this path hands each item to a function that returns instead, as
+# fm_lock_reap_stray_owners does; a continue back in it fails the stray-owner
+# collection case in tests/fm-watcher-lock.test.sh.
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -545,20 +551,29 @@ fm_lock_discard_owner() {
 # caller's live owner directory and left its lock dangling. Only the process
 # that minted an owner directory ever links it, before any handoff, so once that
 # process is gone a link seen now is final.
-# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
+#
+# Each entry is judged by fm_lock_reap_stray_owner, which returns where a loop
+# would continue: this runs on the startup path ("Startup-path substitutions").
 fm_lock_reap_stray_owners() {  # <lockdir>
-  local lockdir=$1 entry pid
+  local lockdir=$1 entry
   for entry in "$lockdir".owner.*; do
-    [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-    pid=`cat "$entry/pid" 2>/dev/null || true`
-    case "$pid" in
-      ''|*[!0-9]*) fm_lock_mid_acquire_is_fresh "$entry" '' && continue ;;
-      *) fm_pid_alive "$pid" && continue ;;
-    esac
-    fm_lock_links_to_owner "$lockdir" "$entry" && continue
-    fm_lock_clean_known_files "$entry"
-    rmdir "$entry" 2>/dev/null || true
+    if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+      fm_lock_reap_stray_owner "$lockdir" "$entry"
+    fi
   done
+}
+
+# shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".
+fm_lock_reap_stray_owner() {  # <lockdir> <owner-dir>
+  local lockdir=$1 entry=$2 pid
+  pid=`cat "$entry/pid" 2>/dev/null || true`
+  case "$pid" in
+    ''|*[!0-9]*) fm_lock_mid_acquire_is_fresh "$entry" '' && return 0 ;;
+    *) fm_pid_alive "$pid" && return 0 ;;
+  esac
+  fm_lock_links_to_owner "$lockdir" "$entry" && return 0
+  fm_lock_clean_known_files "$entry"
+  rmdir "$entry" 2>/dev/null || true
 }
 
 # shellcheck disable=SC2006 # Backquoted on purpose: see "Startup-path substitutions".

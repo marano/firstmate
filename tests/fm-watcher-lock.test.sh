@@ -1964,11 +1964,12 @@ signal_spinner_until_acked() {  # <spinner> <dir> <count>
   wait "$spinner" || SPINNER_STATUS=$?
 }
 
-# The spinner cases guard against Bash 5.2 losing a pending trap, so they run only
-# where the spinner's bash is 5 or later. Bash 3.2 cannot have that defect, and
-# its trap bookkeeping breaks this count: it clears a trap's pending flag only
-# after the trap returns, yet runs pending traps between the trap's own commands,
-# so a signal sent the moment a trap acknowledges runs that trap a second time.
+# The spinner cases run only where the spinner's bash is 5 or later, because
+# Bash 3.2's trap bookkeeping breaks their count: it clears a trap's pending flag
+# only after the trap returns, yet runs pending traps between the trap's own
+# commands, so a signal sent the moment a trap acknowledges runs that trap a
+# second time. The $(...) loss they guard is Bash 5.2's own, and CI runs them on
+# Linux Bash 5.2.
 spinner_bash_is_5_or_later() {
   [ "$(bash -c 'printf "%s\n" "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 5 ] 2>/dev/null
 }
@@ -1982,7 +1983,7 @@ spinner_bash_is_5_or_later() {
 test_current_pid_probe_keeps_pending_traps() {
   local dir
   if ! spinner_bash_is_5_or_later; then
-    pass "pid probe pending-trap case skipped below Bash 5, which it does not guard"
+    pass "pid probe pending-trap case skipped below Bash 5, which miscounts its traps"
     return 0
   fi
   dir=$(make_case current-pid-traps)
@@ -2139,19 +2140,19 @@ test_signal_during_lock_creation_keeps_own_lock() {
 
 # Like the pid probe, everything a starting watcher runs before its release trap
 # is armed must keep a pending trap on Bash 5.2 ("Startup-path substitutions"
-# in bin/fm-wake-lib.sh). A shell spins
-# that path: claiming the singleton lock, alternately from a clean release and
-# from a dead holder it must reclaim, then reopening an announced recovery
-# episode and running the arm check under the wake-queue lock. The marker
-# generation used to run two $(...) in one command, and with that pair restored
-# Bash 5.2 drops a trap within a few hundred signals, where the lost trap can
-# also abort the command it interrupted (mutant: that pair restored). A lone
-# $(...) opens a window far too narrow to sample here, so the library's
-# backquote rule, not this case, keeps each of those out.
+# in bin/fm-wake-lib.sh). A shell spins that path: claiming the singleton lock,
+# alternately from a clean release and from a dead holder it must reclaim, then
+# reopening an announced recovery episode and running the arm check under the
+# wake-queue lock. The marker generation used to run two $(...) in one command,
+# and with that pair restored Bash 5.2 drops a trap within a few hundred
+# signals, where the lost trap can also abort the command it interrupted
+# (mutant: that pair restored). A lone $(...) opens a window far too narrow to
+# sample here, so the library's backquote rule, not this case, keeps each of
+# those out.
 test_startup_lock_path_keeps_pending_traps() {
   local dir dead_pid
   if ! spinner_bash_is_5_or_later; then
-    pass "startup lock path pending-trap case skipped below Bash 5, which it does not guard"
+    pass "startup lock path pending-trap case skipped below Bash 5, which miscounts its traps"
     return 0
   fi
   dir=$(make_case startup-lock-traps)
@@ -2190,6 +2191,47 @@ test_startup_lock_path_keeps_pending_traps() {
   pass "the lock and recovery-marker path a starting watcher runs keeps each pending trap"
 }
 
+# The stray-owner collection runs on every acquire of a free lock, so on the
+# startup path too, and it judges every owner directory beside the lock. It used
+# to skip each one it spared with continue, and Bash skips every command of a
+# trap it runs as a continue or break completes (3.2 through 5.3 alike), so a
+# shell collecting past a live and a half-created owner directory, and past
+# plain files it skips without judging, lost a trap well inside the 3000
+# signals this case sends (mutant: the collection's continue restored).
+test_stray_owner_collection_keeps_pending_traps() {
+  local dir
+  if ! spinner_bash_is_5_or_later; then
+    pass "stray-owner collection pending-trap case skipped below Bash 5, which miscounts its traps"
+    return 0
+  fi
+  dir=$(make_case stray-owner-traps)
+  # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    ack_file=$2/ack
+    lock=$STATE/.collect.lock
+    handled=0
+    seen=0
+    trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
+    mkdir "$lock.owner.live" || exit 8
+    printf "%s\n" "$BASHPID" > "$lock.owner.live/pid" || exit 8
+    for name in a b c d e f g h i j k l m n o p q r s t u v w x; do
+      : > "$lock.owner.file$name" || exit 8
+    done
+    : > "$2/ready"
+    while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
+      [ -d "$lock.owner.half" ] || mkdir "$lock.owner.half" || exit 9
+      fm_lock_reap_stray_owners "$lock"
+    done
+    [ -d "$lock.owner.live" ] || exit 10
+  ' _ "$LIB" "$dir" 2> "$dir/spinner.err" &
+  signal_spinner_until_acked "$!" "$dir" 3000
+  [ "$SIGNAL_ACK" = 3000 ] && [ "$SPINNER_STATUS" -eq 0 ] \
+    || fail "stray-owner collection lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
+  pass "the stray-owner collection every free acquire runs keeps each pending trap"
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -2221,6 +2263,7 @@ test_signal_during_startup_releases_watch_lock
 test_current_pid_probe_keeps_pending_traps
 test_signal_during_lock_creation_keeps_own_lock
 test_startup_lock_path_keeps_pending_traps
+test_stray_owner_collection_keeps_pending_traps
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
