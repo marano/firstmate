@@ -1912,13 +1912,14 @@ test_signal_during_startup_releases_watch_lock() {
 
 # Signal a spinner shell <count> times, waiting for the count its trap writes to
 # <dir>/ack before sending the next, then stop and reap it. Bash clears a
-# signal's pending flag again as its trap returns, erasing that signal if it
-# arrives in the instant between, so signals alternate between USR1 and USR2
-# and each wait pauses before its first read: the signal a trap's return can
-# erase then left at least one pause after that trap acknowledged. A trap that
-# runs late is still acknowledged within the generous wait, so only a trap that
-# never runs stops the count short. Sets SIGNAL_SENT, SIGNAL_ACK, and
-# SPINNER_STATUS.
+# signal's pending flag again as its trap returns, and that return can come late:
+# Bash 5.2 runs another pending trap nested in a trap's tail. A repeat of the
+# signal arriving before then is erased, so signals alternate between USR1 and
+# USR2, and each goes out only once the spinner's main loop, which runs only
+# between traps, has recorded in <dir>/seen a count that includes the previous
+# signal of its kind. A trap that runs late is still acknowledged within the
+# generous wait, so only a trap that never runs stops the count short. Sets
+# SIGNAL_SENT, SIGNAL_ACK, SIGNAL_SEEN, and SPINNER_STATUS.
 signal_spinner_until_acked() {  # <spinner> <dir> <count>
   local spinner=$1 dir=$2 count=$3 signal i
   i=0
@@ -1929,7 +1930,20 @@ signal_spinner_until_acked() {  # <spinner> <dir> <count>
   [ -e "$dir/ready" ] || { term_and_reap "$spinner"; fail "spinner never started: $(cat "$dir/spinner.err" 2>/dev/null)"; }
   SIGNAL_SENT=0
   SIGNAL_ACK=
+  SIGNAL_SEEN=
   while [ "$SIGNAL_SENT" -lt "$count" ]; do
+    if [ "$SIGNAL_SENT" -ge 2 ]; then
+      i=0
+      while [ "$i" -lt 3000 ]; do
+        SIGNAL_SEEN=
+        { read -r SIGNAL_SEEN < "$dir/seen"; } 2>/dev/null
+        [ "${SIGNAL_SEEN:-0}" -ge "$((SIGNAL_SENT - 1))" ] && break
+        kill -0 "$spinner" 2>/dev/null || break
+        sleep 0.01
+        i=$((i + 1))
+      done
+      [ "${SIGNAL_SEEN:-0}" -ge "$((SIGNAL_SENT - 1))" ] || break
+    fi
     SIGNAL_SENT=$((SIGNAL_SENT + 1))
     signal=USR1
     [ $((SIGNAL_SENT % 2)) -eq 1 ] || signal=USR2
@@ -1950,6 +1964,15 @@ signal_spinner_until_acked() {  # <spinner> <dir> <count>
   wait "$spinner" || SPINNER_STATUS=$?
 }
 
+# The spinner cases guard against Bash 5.2 losing a pending trap, so they run only
+# where the spinner's bash is 5 or later. Bash 3.2 cannot have that defect, and
+# its trap bookkeeping breaks this count: it clears a trap's pending flag only
+# after the trap returns, yet runs pending traps between the trap's own commands,
+# so a signal sent the moment a trap acknowledges runs that trap a second time.
+spinner_bash_is_5_or_later() {
+  [ "$(bash -c 'printf "%s\n" "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 5 ] 2>/dev/null
+}
+
 # Bash 5.2 drops a trap that is still pending when the shell starts parsing a
 # command substitution (fixed in 5.3). The watcher records a signal deferred
 # through startup in a trap while its lock operations run, and every one of them
@@ -1958,22 +1981,28 @@ signal_spinner_until_acked() {  # <spinner> <dir> <count>
 # trap fails the case (mutant: the ${BASHPID:-$(...)} probe).
 test_current_pid_probe_keeps_pending_traps() {
   local dir
+  if ! spinner_bash_is_5_or_later; then
+    pass "pid probe pending-trap case skipped below Bash 5, which it does not guard"
+    return 0
+  fi
   dir=$(make_case current-pid-traps)
   # shellcheck disable=SC2016 # Expanded by the spinner shell and its trap.
   bash -c '
     . "$1"
     ack_file=$2/ack
     handled=0
+    seen=0
     trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
     : > "$2/ready"
     while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
       fm_current_pid pid || exit 3
       [ "$pid" = "${BASHPID:-$pid}" ] || exit 4
     done
   ' _ "$LIB" "$dir" 2> "$dir/spinner.err" &
   signal_spinner_until_acked "$!" "$dir" 100
   [ "$SIGNAL_ACK" = 100 ] && [ "$SPINNER_STATUS" -eq 0 ] \
-    || fail "pid probe lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
+    || fail "pid probe lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
   pass "the pid probe every lock operation runs keeps each pending trap"
 }
 
@@ -2121,6 +2150,10 @@ test_signal_during_lock_creation_keeps_own_lock() {
 # backquote rule, not this case, keeps each of those out.
 test_startup_lock_path_keeps_pending_traps() {
   local dir dead_pid
+  if ! spinner_bash_is_5_or_later; then
+    pass "startup lock path pending-trap case skipped below Bash 5, which it does not guard"
+    return 0
+  fi
   dir=$(make_case startup-lock-traps)
   dead_pid=999999
   while kill -0 "$dead_pid" 2>/dev/null; do
@@ -2133,11 +2166,13 @@ test_startup_lock_path_keeps_pending_traps() {
     dead_pid=$3
     marker=$STATE/.watcher-down
     handled=0
+    seen=0
     trap '\''handled=$((handled + 1)); printf "%s\n" "$handled" > "$ack_file"'\'' USR1 USR2
     printf "announced:downtime:seed\n" > "$marker"
     round=0
     : > "$2/ready"
     while [ ! -e "$2/stop" ]; do
+      [ "$handled" = "$seen" ] || { seen=$handled; printf "%s\n" "$seen" > "$2/seen"; }
       round=$((round + 1))
       fm_lock_try_acquire "$STATE/.watch.lock" || exit 3
       fm_recovery_marker_reopen_announced "$marker" || exit 4
@@ -2151,7 +2186,7 @@ test_startup_lock_path_keeps_pending_traps() {
   ' _ "$LIB" "$dir" "$dead_pid" 2> "$dir/spinner.err" &
   signal_spinner_until_acked "$!" "$dir" 1000
   [ "$SIGNAL_ACK" = 1000 ] && [ "$SPINNER_STATUS" -eq 0 ] \
-    || fail "startup lock path lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
+    || fail "startup lock path lost a pending trap: signal $SIGNAL_SENT acknowledged as '${SIGNAL_ACK:-none}', main loop at '${SIGNAL_SEEN:-none}', spinner status $SPINNER_STATUS: $(cat "$dir/spinner.err" 2>/dev/null)"
   pass "the lock and recovery-marker path a starting watcher runs keeps each pending trap"
 }
 
