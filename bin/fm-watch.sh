@@ -1962,7 +1962,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.paused-agent-gone-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -1973,8 +1973,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   clear_task_shell_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key" \
-    "$STATE/.paused-agent-gone-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-dead-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
