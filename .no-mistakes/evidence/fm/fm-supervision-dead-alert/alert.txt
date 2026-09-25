@@ -1,0 +1,16 @@
+ok - a beacon dead past the threshold alerts once, on the confirming check
+ok - a beacon that stays dead does not repeat the alert
+ok - a beacon that comes back sends one recovered notice and closes the episode
+ok - each outage episode alerts once
+ok - a home that needs no supervision never alerts
+ok - a fresh beacon never alerts
+ok - a beacon past grace but under the threshold does not alert
+ok - a single dead sighting followed by a beat never alerts
+ok - live work with no beacon on record alerts once
+ok - a live away daemon suppresses the alert, a dead one does not
+ok - an episode closes silently when the home stops needing supervision
+ok - check writes nothing but its own episode record and log
+ok - config/wedge-alarm off silences the checker's channels too
+ok - sourcing the checker defaults the notifier seam to discard
+ok - install writes and loads a home-scoped launchd agent; uninstall removes it
+ok - install refuses off macOS and names why
