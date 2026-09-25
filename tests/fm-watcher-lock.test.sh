@@ -541,9 +541,8 @@ printf '%s\n' "\$1" >> "$sync/sleeps"
 exec "$real_sleep" "\$@"
 SH
   # The first link of the lock itself once ln.armed exists is the helper
-  # publishing it. Matched by target, because a helper poll that saw the
-  # holder's lock and then found it gone recovers through the .steal lock
-  # first, and that link must pass.
+  # publishing it. Matched by target rather than by order, so no other link,
+  # such as a .steal lock's, can take the park.
   cat > "$fakebin/ln" <<SH
 #!/bin/sh
 for target; do :; done
