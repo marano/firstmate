@@ -48,6 +48,11 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          A crew whose own attributed validation run is still
+#                          working with recent activity restarts the timer
+#                          instead of escalating (crew_run_activity_is_recent),
+#                          because a worker blocked on that run is working; a
+#                          quiet, parked, finished or absent run escalates.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1584,13 +1589,15 @@ wedge_dead_agent_hold() {  # <window> <task> <since-file> <escalation-count-file
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
 # escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# state per poll (the costly check already ran once, at classification time).
+# Shared by every place a window can be timed this way: the plain non-terminal
+# path, the stale_is_terminal-overridden path (a captain-relevant status-log
+# line that an active run/busy pane outranked), and a busy pane past
+# BUSY_TURN_MAX_SECS (busy_turn_bound_check).
+# The worktree write probe and the crew's own-run activity read
+# (crew_run_activity_is_recent) run ONLY here, inside the at-threshold branch
+# that is about to escalate: at most one bounded read of each per window per
+# STALE_ESCALATE_SECS, never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1610,6 +1617,19 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           return 0
         fi
         if wedge_dead_agent_hold "$win" "$task" "$since_file" "$escalation_file" "$label" "$age"; then
+          return 0
+        fi
+        if [ -n "$task" ] && crew_run_activity_is_recent "$task"; then
+          # A worker blocked on its own validation run (a `--wait` drive call)
+          # shows a quiet or long-busy pane while the run does the work. A run
+          # still reporting recent activity is working, not wedged: restart the
+          # window so the next one re-reads it, and drop the escalation streak.
+          # A run gone quiet, parked, finished, or absent gives no such evidence
+          # and escalates below exactly as before.
+          rm -f "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          date +%s > "$since_file"
+          triage_log "absorbed $label (own validation run active with recent activity, ${age}s): $win"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))

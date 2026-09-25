@@ -708,6 +708,36 @@ test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
   pass "broken-pipe blocker over a live run keeps the plain superseded reading"
 }
 
+# A working run names its own recent activity in a segment the watcher's wedge
+# ladder reads through fm-classify-lib.sh, so a worker blocked on a healthy run
+# is not escalated as a possible wedge. Asserted through the classifier's own
+# reader over the REAL helper's line, so writer and reader cannot drift, and on
+# both halves: fresh activity carries it, a run gone quiet does not.
+test_run_activity_recent_segment_reaches_the_wedge_reader() {
+  reset_fakes
+  local d out
+  d=$(new_case run-activity-segment)
+  make_repo_on_branch "$d/wt" fm/feat-ra
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ra.meta" "window=fm:fm-feat-ra" "worktree=$d/wt" "kind=ship"
+  printf 'working: run started\n' > "$d/state/feat-ra.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "live run -> working"
+  crew_state_line_run_activity_recent "$out" \
+    || fail "a run with fresh activity did not read as recent to the wedge reader: $out"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "quiet run record still reads working"
+  crew_state_line_run_activity_recent "$out" \
+    && fail "a run gone quiet read as recent to the wedge reader: $out"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  crew_state_line_run_activity_recent "$out" \
+    && fail "a run with no active-step activity table read as recent: $out"
+  pass "a working run's recent activity reaches the wedge reader, and a quiet or unreported one does not"
+}
+
 # The genuine daemon-down case still reaches the supervisor as blocked: the
 # socket refused connections and no run is executing anywhere.
 test_genuine_daemon_down_reports_blocked() {
@@ -2933,6 +2963,7 @@ test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
+test_run_activity_recent_segment_reaches_the_wedge_reader
 test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
 test_ask_user_text_is_not_authority_gate
