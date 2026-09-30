@@ -31,7 +31,12 @@
 #         line naming the repository, branch, merge commit, pull request, and
 #         each such run's URL, and retires the watch;
 #       - every run concluded green: retires silently;
-#       - no run yet and <appear-by> passed: prints one line saying so, retires;
+#       - no run yet and <appear-by> passed: confirms the absence with a second,
+#         independent read (the commit's check suites, which do not go through
+#         the run list's filters) before printing one line saying so and
+#         retiring; a suite from GitHub Actions means a run exists, and a
+#         confirmation that cannot be read is unconfirmed, so the watch stays
+#         armed and silent until <conclude-by> like any other forge read failure;
 #       - anything still open (runs in progress, or the forge unreadable) when
 #         <conclude-by> passes: prints one line saying so, retires;
 #       - otherwise prints nothing and stays armed.
@@ -132,7 +137,7 @@ main_ci_retire() {
 
 main_ci_poll() {
   local state=$1 id=$2 repo=$3 branch=$4 sha=$5 url=$6 appear_by=$7 conclude_by=$8
-  local runs status conclusion run_url name now reds='' open='' total=0 retired
+  local runs status conclusion run_url name now reds='' open='' total=0 retired suites absent=0
   if ! fm_pr_task_id_valid "$id" || [ "$id" != "main-ci-$sha" ] || ! main_ci_sha_valid "$sha" \
     || ! main_ci_branch_valid "$branch" || ! fm_pr_url_parse "$url" \
     || [ "$repo" != "$FM_PR_OWNER/$FM_PR_REPO" ] \
@@ -164,13 +169,23 @@ main_ci_poll() {
     total=-1
   fi
 
+  if [ "$total" -eq 0 ] && [ "$now" -ge "$appear_by" ] && [ -z "$reds" ]; then
+    # One empty run-list read is not proof: a queued or gated run can be missing
+    # from it. Only a second, independent read that also finds nothing counts.
+    if suites=$(gh api -X GET "repos/$repo/commits/$sha/check-suites" -F per_page=100 \
+      --jq '[.check_suites[] | select(.app.slug == "github-actions")] | length' 2>/dev/null) \
+      && [[ "$suites" =~ ^[0-9]+$ ]] && [ "$suites" -eq 0 ]; then
+      absent=1
+    fi
+  fi
+
   if [ -n "$reds" ]; then
     retired=$(main_ci_retire "$state" "$id")
     printf 'main CI red after merge: %s %s at %s (merged from %s) - %s; %s\n' \
       "$repo" "$branch" "$sha" "$url" "$reds" "$retired"
   elif [ "$total" -gt 0 ] && [ -z "$open" ]; then
     main_ci_retire "$state" "$id" >/dev/null
-  elif [ "$total" -eq 0 ] && [ "$now" -ge "$appear_by" ]; then
+  elif [ "$absent" -eq 1 ]; then
     retired=$(main_ci_retire "$state" "$id")
     printf 'main CI never started after merge: no %s push run of %s at %s (merged from %s) appeared within the watch window; %s\n' \
       "$branch" "$repo" "$sha" "$url" "$retired"
