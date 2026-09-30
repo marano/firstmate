@@ -13,6 +13,10 @@
 #   branch-latest-run      - the poll reads the branch's newest run instead of
 #                            the merge commit's own run
 #   appear-window-ignored  - no run ever appearing never reports or retires
+#   confirmation-skipped   - the never-started report trusts one empty run-list
+#                            read without the check-suites confirmation
+#   never-started-always-silent - a commit with no run anywhere is never reported
+#   failed-confirmation-as-empty - an unreadable confirmation is taken as absent
 #   conclude-window-ignored - a run that never concludes is polled forever
 #   watcher-wait-fixed     - the watcher case waits a fixed few seconds rather
 #                            than the watcher's own bounds on the cycle, so a
@@ -51,6 +55,7 @@ make_ci_case() {
   fakebin="$dir/fakebin"
   printf '{"merged":true,"merge_commit_sha":"%s","base":{"ref":"main"}}\n' "$MERGE_SHA" > "$dir/pull.json"
   printf '[]\n' > "$dir/runs.json"
+  printf '{"check_suites":[]}\n' > "$dir/suites.json"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_CI_DIR/gh.log"
@@ -82,6 +87,10 @@ case "$path" in
       '[.[] | select(($sha == "" or .head_sha == $sha) and ($branch == "" or .head_branch == $branch))]
        | {total_count: length, workflow_runs: .}' "$FM_TEST_CI_DIR/runs.json" \
       | jq -r "$jq_expr"
+    ;;
+  repos/example/repo/commits/*/check-suites)
+    [ ! -e "$FM_TEST_CI_DIR/suites-fail" ] || { echo 'gh: HTTP 502' >&2; exit 1; }
+    jq -r "$jq_expr" "$FM_TEST_CI_DIR/suites.json"
     ;;
   *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
 esac
@@ -246,6 +255,26 @@ test_no_run_within_the_window_wakes_once_and_retires() {
   pass "no run within the window wakes once and retires the watch"
 }
 
+# Mutants: confirmation-skipped, never-started-always-silent,
+# failed-confirmation-as-empty.
+test_empty_run_list_is_confirmed_before_never_started() {
+  local dir out
+  dir=$(make_ci_case confirm-run-exists)
+  arm "$dir" FM_MAIN_CI_APPEAR_SECS=0
+  printf '{"check_suites":[{"app":{"slug":"github-actions"}}]}\n' > "$dir/suites.json"
+  out=$(poll "$dir")
+  assert_equals "" "$out" "an empty run list woke although the commit has a check suite"
+  assert_armed "$dir" "run list empty, suite present"
+
+  dir=$(make_ci_case confirm-unreadable)
+  arm "$dir" FM_MAIN_CI_APPEAR_SECS=0
+  : > "$dir/suites-fail"
+  out=$(poll "$dir")
+  assert_equals "" "$out" "an unreadable confirmation was taken as absence"
+  assert_armed "$dir" "confirmation unreadable"
+  pass "an empty run list stays armed and silent when the confirmation shows a run or cannot be read"
+}
+
 # Mutant: conclude-window-ignored.
 test_unconcluded_run_past_the_window_wakes_once_and_retires() {
   local dir out
@@ -319,6 +348,7 @@ test_green_run_retires_silently
 test_later_push_does_not_mask_the_merge_commit_run
 test_running_run_stays_armed_silently
 test_no_run_within_the_window_wakes_once_and_retires
+test_empty_run_list_is_confirmed_before_never_started
 test_unconcluded_run_past_the_window_wakes_once_and_retires
 test_watcher_delivers_the_red_as_a_check_wake
 test_watcher_delivers_the_red_from_a_slow_check
