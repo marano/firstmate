@@ -110,6 +110,9 @@ EOF
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
+Status lines and reports in the firstmate home are internal; everything you write elsewhere - commit messages, PR titles, bodies and comments, issue and Linear cards and comments, repo docs, Slack or other chat services - must read as ordinary engineering work.
+There, never name firstmate, a supervisor, or a firstmate home or its paths (such as `~/code/firstmate/...` or `data/<task>/report.md`), and never attribute a decision to firstmate ("firstmate approved/decided"); a change to Firstmate itself may name the tooling it changes, never the supervision of your task.
+Cite evidence by its substance - the queries, links, and numbers themselves - never by a local report path, and describe a validation decision by what was checked, with no actor ("the text check passed", not "firstmate approved it on the text check").
 EOF
 }
 
