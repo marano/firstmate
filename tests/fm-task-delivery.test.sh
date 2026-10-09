@@ -1065,6 +1065,12 @@ EOF
       assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
       assert_grep 'Project instructions still govern the work wherever they do not conflict with this worker identity' "$brief" "$project_kind $kind displaced project guidance"
+      # Mutant: drop the outside-artifact rule from fm_brief_worker_role.
+      assert_grep 'everything you write elsewhere - commit messages, PR titles, bodies and comments, issue and Linear cards and comments, repo docs, Slack or other chat services - must read as ordinary engineering work' "$brief" "$project_kind $kind did not keep firstmate out of outside artifacts"
+      assert_grep 'never name firstmate, a supervisor, or a firstmate home or its paths' "$brief" "$project_kind $kind did not forbid naming firstmate or its paths outside"
+      assert_grep 'never attribute a decision to firstmate' "$brief" "$project_kind $kind did not forbid crediting firstmate with a decision"
+      assert_grep 'Cite evidence by its substance - the queries, links, and numbers themselves - never by a local report path' "$brief" "$project_kind $kind did not say to cite evidence by substance"
+      assert_grep 'describe a validation decision by what was checked, with no actor' "$brief" "$project_kind $kind did not say to describe a decision by what was checked"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
