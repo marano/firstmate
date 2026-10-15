@@ -14,7 +14,13 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id>
+# Before the fast-forward, bin/fm-leak-check.sh reads every commit message on
+# the branch and the lines its diff adds, and any hit bin/fm-leak-lib.sh defines
+# refuses the merge, naming each hit; the firstmate repository itself is exempt.
+# An attended --allow-leak <reason> (one line) merges anyway and records the
+# reason as leak_waiver= on the task record first; it is refused while the
+# away-posture record exists.
+# Usage: fm-merge-local.sh <task-id> [--allow-leak <reason>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,11 +31,27 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+# shellcheck source=bin/fm-leak-lib.sh
+. "$SCRIPT_DIR/fm-leak-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
+ALLOW_LEAK=
+if [ "$#" -eq 3 ] && [ "$2" = --allow-leak ]; then
+  fm_leak_waiver_valid "$3" || { echo "error: --allow-leak requires a one-line reason" >&2; exit 2; }
+  ALLOW_LEAK=$3
+elif [ "$#" -ne 1 ]; then
+  echo "error: invalid local merge request" >&2
+  exit 2
+fi
+if ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
 fi
 ID=$1
+if [ -n "$ALLOW_LEAK" ] && fm_afk_contract_present "$STATE"; then
+  echo "error: --allow-leak is attended-only; while the away-posture record exists the leak check is absolute" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -109,6 +131,28 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
+fi
+
+# The leak gate; this script's header owns the contract and
+# bin/fm-leak-lib.sh owns what a leak is.
+leak_rc=0
+FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  "$SCRIPT_DIR/fm-leak-check.sh" local "$PROJ" "$DEFAULT" "$BRANCH" >&2 || leak_rc=$?
+if [ "$leak_rc" -ne 0 ]; then
+  if [ -z "$ALLOW_LEAK" ]; then
+    if [ "$leak_rc" -eq 1 ]; then
+      echo "error: refusing to merge $BRANCH: the lines above would leak supervision text into the project; have the worker remove them and retry" >&2
+    else
+      echo "error: refusing to merge $BRANCH: it could not be checked for supervision text leaking into the project" >&2
+    fi
+    echo "error: pass --allow-leak <reason> only on an explicit captain instruction to merge it anyway; the reason is recorded on the task" >&2
+    exit 1
+  fi
+  fm_leak_waiver_record "$META" "$ALLOW_LEAK" || {
+    echo "error: refusing to merge $BRANCH: the --allow-leak reason could not be recorded on task $ID" >&2
+    exit 1
+  }
+  echo "notice: merging $BRANCH past the leak check on the recorded --allow-leak reason: $ALLOW_LEAK" >&2
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")

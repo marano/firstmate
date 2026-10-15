@@ -135,6 +135,21 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# The merge's leak check reads a clean pull request whose one commit is the head.
+case "${1:-} ${2:-}" in
+  "pr diff") exit 0 ;;
+  "api --paginate")
+    case "${3:-}" in */pulls/*/commits*) ;; *) exit 0 ;; esac
+    printf '[{"sha":"%s","commit":{"message":"Clean change"}}]\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    exit 0
+    ;;
+esac
+case " $* " in
+  *" --json title,body "*)
+    printf '{"title":"%s","body":"A clean change."}\n' "${FM_TEST_GH_LEAK_TITLE:-Clean change}"
+    exit 0
+    ;;
+esac
 case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' \
@@ -520,6 +535,30 @@ test_invalid_entrypoints_have_zero_side_effects() {
   [ ! -s "$dir/guard.log" ] || fail "invalid direct or merge data called the guard"
   [ ! -e "$TMP_ROOT/escape.check.sh" ] || fail "task traversal wrote outside state"
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
+}
+
+# Recording a PR reports the leak check's hits early, as warnings, so the worker
+# can remove them before the merge refuses on the same check; the watch is
+# armed either way, and a clean PR prints no warning.
+test_recording_a_leaking_pr_warns_and_still_arms() {
+  local dir
+  dir=$(make_case leak-warning)
+  write_task_meta "$dir"
+  FM_TEST_GH_LEAK_TITLE='Fix what the captain asked' run_check_entry "$dir" task-a \
+    https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a leaking PR was refused at recording instead of warned about"
+  grep -qxF 'leak-warning: leak: title: the word "captain": Fix what the captain asked' "$dir/stdout" \
+    || fail "the leaking title was not reported as a warning: $(cat "$dir/stdout")"
+  grep -qF 'leak-warning: the merge will be refused until these are removed' "$dir/stdout" \
+    || fail "the warning did not say the merge will refuse"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "a leaking PR was not armed"
+
+  dir=$(make_case leak-warning-clean)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a clean PR was refused at recording"
+  ! grep -qF 'leak-warning' "$dir/stdout" || fail "a clean PR printed a leak warning: $(cat "$dir/stdout")"
+  pass "recording a leaking PR warns early and still arms the merge watch"
 }
 
 # A draft cannot be merged, so arming a merge poll on one would wait for an event
@@ -2942,6 +2981,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_recording_a_leaking_pr_warns_and_still_arms
 # Registration prints why the PR waits for the captain, from structured records
 # only, so whoever reports it relays a reason rather than a bare request for the
 # captain's word.
