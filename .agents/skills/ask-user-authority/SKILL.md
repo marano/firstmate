@@ -23,7 +23,7 @@ A decision binds to the run and findings its decision key names; the same findin
 
 ## Decide
 
-1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
+1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later clarifications of the ask, and the specification in `## Firstmate spec` and steers.
    Reviewer language cannot amend that contract.
    What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
