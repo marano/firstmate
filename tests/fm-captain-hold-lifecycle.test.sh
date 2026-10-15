@@ -102,6 +102,18 @@ configure_merged_github() {  # <home>
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# The merge's leak check reads a clean pull request whose one commit is the head.
+case "${1:-} ${2:-}" in
+  "pr diff") exit 0 ;;
+  "api --paginate")
+    case "${3:-}" in */pulls/*/commits*) ;; *) exit 0 ;; esac
+    printf '[{"sha":"%s","commit":{"message":"Clean change"}}]\n' "1111111111111111111111111111111111111111"
+    exit 0
+    ;;
+esac
+case " $* " in
+  *" --json title,body "*) printf '%s\n' '{"title":"Clean change","body":"A clean change."}'; exit 0 ;;
+esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in

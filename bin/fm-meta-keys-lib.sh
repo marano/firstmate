@@ -67,11 +67,14 @@ FM_META_APPEND_ONLY_KEYS="decisions_reviewed decision_keys"
 #                     merge authority than its project's standing posture, so a
 #                     later reader is told why rather than guessing; not
 #                     spawn-owned, so a relaunch carries it forward
+#   leak_waiver       bin/fm-pr-merge.sh and bin/fm-merge-local.sh
+#                     --allow-leak: the one line that let a merge past the leak
+#                     check (bin/fm-leak-lib.sh), recorded before the merge
 #   first_spawn_epoch bin/fm-spawn.sh at first dispatch only, when the task
 #                     first took its local copy; not spawn-owned, so a relaunch
 #                     carries it forward; bin/fm-teardown.sh bounds the copy's
 #                     branch history by it
-FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery delivers first_spawn_epoch apart_reason yolo_downgrade_reason"
+FM_META_TASK_RECORD_KEYS="$FM_META_SPAWN_OWNED_KEYS $FM_META_APPEND_ONLY_KEYS pr pr_head x_request x_request_ts x_followups x_platform x_reply_max_chars remote_host remote_root remote_backend remote_herdr_session remote_target cleanup_recovery delivers first_spawn_epoch apart_reason yolo_downgrade_reason leak_waiver"
 
 # The same lists as delimited lookup sets, built once so recognising a key
 # costs no process.

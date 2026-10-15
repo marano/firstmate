@@ -150,7 +150,16 @@
 # After a confirmed merge, bin/fm-main-ci.sh arms a watch on the base branch's
 # own CI run for the merge commit; that script's header owns the watch.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--unvalidated] [-- <extra forge merge args>]
+# After the validation gate and before the merge, bin/fm-leak-check.sh reads
+# the pull request at the verified head - title, body, every commit message,
+# and the lines its diff adds - and any hit bin/fm-leak-lib.sh defines refuses
+# the merge, naming each hit; so does a read that cannot complete. The
+# firstmate repository itself is exempt. An attended --allow-leak <reason>
+# (one line, a separate argument) merges anyway and records the reason as
+# leak_waiver= on the task record before the merge; it is refused while the
+# away-posture record exists.
+#
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--unvalidated] [--allow-leak <reason>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -188,6 +197,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-github-issue-lib.sh"
 # shellcheck source=bin/fm-merge-hold-lib.sh
 . "$SCRIPT_DIR/fm-merge-hold-lib.sh"
+# shellcheck source=bin/fm-leak-lib.sh
+. "$SCRIPT_DIR/fm-leak-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -213,6 +224,7 @@ shift 2
 ATTENDED_OVERRIDE=false
 UNVALIDATED=false
 ALLOW_RED=()
+ALLOW_LEAK=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -239,6 +251,16 @@ while [ "$#" -gt 0 ]; do
       ;;
     --unvalidated=*)
       echo "error: --unvalidated takes no value" >&2
+      exit 2
+      ;;
+    --allow-leak)
+      fm_leak_waiver_valid "${2:-}" || { echo "error: --allow-leak requires a one-line reason" >&2; exit 2; }
+      [ -z "$ALLOW_LEAK" ] || { echo "error: --allow-leak may be specified only once" >&2; exit 2; }
+      ALLOW_LEAK=$2
+      shift 2
+      ;;
+    --allow-leak=*)
+      echo "error: --allow-leak requires a separate reason argument" >&2
       exit 2
       ;;
     --) shift; break ;;
@@ -1048,6 +1070,10 @@ require_current_away_authority() {
     echo "error: --unvalidated is attended-only; while the away-posture record exists a merge needs a proven validation run" >&2
     return 2
   fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ -n "$ALLOW_LEAK" ]; then
+    echo "error: --allow-leak is attended-only; while the away-posture record exists the leak check is absolute" >&2
+    return 2
+  fi
 }
 
 persist_accepted_merge_authority() {
@@ -1464,6 +1490,30 @@ CANDIDATES
   return 1
 }
 
+# The leak gate for the verified head; this script's header owns the contract
+# and bin/fm-leak-lib.sh owns what a leak is.
+require_no_leak() {
+  local rc=0
+  FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-leak-check.sh" pr "$URL" --head "$FM_PR_MERGE_HEAD" >&2 || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  if [ -n "$ALLOW_LEAK" ]; then
+    if ! fm_leak_waiver_record "$META" "$ALLOW_LEAK"; then
+      printf 'error: refusing to merge %s: the --allow-leak reason could not be recorded on task %s\n' "$URL" "$ID" >&2
+      return 1
+    fi
+    printf 'notice: merging %s past the leak check on the recorded --allow-leak reason: %s\n' "$URL" "$ALLOW_LEAK" >&2
+    return 0
+  fi
+  if [ "$rc" -eq 1 ]; then
+    printf 'error: refusing to merge %s: the lines above would leak supervision text into the project; have the worker remove them and push again\n' "$URL" >&2
+  else
+    printf 'error: refusing to merge %s: it could not be checked for supervision text leaking into the project\n' "$URL" >&2
+  fi
+  echo "error: pass --allow-leak <reason> only on an explicit captain instruction to merge it anyway; the reason is recorded on the task" >&2
+  return 1
+}
+
 # 0 when the receipt already read into FM_VALIDATION_RECEIPT_* binds exactly the
 # head this merge verified live, on the pull request's own head branch $1.
 # Otherwise FM_PR_RECEIPT_REASON names what it binds instead.
@@ -1504,6 +1554,7 @@ case "$PROVIDER" in
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
     require_validation_run "$FM_PR_GITHUB_HEAD_REF" || exit 1
+    require_no_leak || exit 1
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1
@@ -1556,6 +1607,7 @@ case "$PROVIDER" in
   gitlab)
     gitlab_verify_mergeable || exit 1
     require_validation_run "$FM_PR_GITLAB_SOURCE_BRANCH" || exit 1
+    require_no_leak || exit 1
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;

@@ -32,6 +32,11 @@
 # An unreadable draft state does not refuse, matching the optional head read.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# After arming, a registration also runs bin/fm-leak-check.sh over the PR and
+# prints each hit as a `leak-warning:` line, so the worker can be steered to
+# remove it before bin/fm-pr-merge.sh refuses the merge on the same check. It
+# only warns: the watch stays armed whatever it finds, and a merge's own
+# re-recording (FM_PR_CHECK_MERGE=1) skips it because the merge gate decides.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--replace]
 set -eu
 
@@ -313,5 +318,21 @@ if [ -n "$MERGE_HOLD_REASONS" ]; then
   done
 else
   printf 'merge: no hold is recorded; standing merge authority covers this PR once it is green and validated\n'
+fi
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  LEAK_RC=0
+  LEAK_OUT=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-leak-check.sh" pr "$URL" 2>&1) || LEAK_RC=$?
+  case "$LEAK_RC" in
+    0) ;;
+    1)
+      printf '%s\n' "$LEAK_OUT" | sed 's/^/leak-warning: /'
+      printf 'leak-warning: the merge will be refused until these are removed from %s\n' "$URL"
+      ;;
+    *)
+      printf '%s\n' "$LEAK_OUT" | sed 's/^/leak-warning: /'
+      printf 'leak-warning: %s could not be checked for leaks now; the merge checks again and refuses if it still cannot\n' "$URL"
+      ;;
+  esac
 fi
 printf 'armed: state/%s.check.sh\n' "$ID"

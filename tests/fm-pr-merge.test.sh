@@ -234,9 +234,38 @@ SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# The leak check's reads answer from the case's leak-* files, or as a clean
+# pull request whose one commit is the live head.
+leak_dir=$(dirname "$FM_TEST_GH_LOG")
+case "${1:-} ${2:-}" in
+  "pr diff")
+    [ ! -f "$leak_dir/leak-diff" ] || cat "$leak_dir/leak-diff"
+    exit 0
+    ;;
+  "api --paginate")
+    case "${3:-}" in
+      repos/*/pulls/*/commits*)
+        if [ -f "$leak_dir/leak-commits.json" ]; then
+          cat "$leak_dir/leak-commits.json"
+        else
+          printf '[{"sha":"%s","commit":{"message":"Clean change"}}]\n' "$(cat "$FM_TEST_GH_HEAD")"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
+      *title,body*)
+        if [ -f "$leak_dir/leak-view.json" ]; then
+          cat "$leak_dir/leak-view.json"
+        else
+          printf '{"title":"Clean change","body":"A clean change."}\n'
+        fi
+        exit 0
+        ;;
       *statusCheckRollup*)
         cat "$FM_TEST_GH_VIEW_JSON"
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
@@ -456,6 +485,24 @@ case "${1:-} ${2:-}" in
     ;;
   api\ *)
     case " $* " in
+      # The leak check's reads: a clean merge request whose one commit is
+      # the live head, unless the case supplies its own.
+      *"/merge_requests/"*"/commits "*)
+        if [ -e "$case_dir/leak-mr-commits.json" ]; then
+          cat "$case_dir/leak-mr-commits.json"
+        else
+          jq -c '[{id: .sha, message: "Clean change"}]' "$FM_TEST_GLAB_JSON"
+        fi
+        exit 0
+        ;;
+      *"/merge_requests/"*"/diffs "*)
+        if [ -e "$case_dir/leak-mr-diffs.json" ]; then
+          cat "$case_dir/leak-mr-diffs.json"
+        else
+          printf '[]\n'
+        fi
+        exit 0
+        ;;
       *"/protected_branches/"*)
         if [ -e "$case_dir/glab-branch-protected" ]; then
           printf '{"name":"protected"}\n'
@@ -4771,3 +4818,90 @@ test_a_linear_failure_never_fails_a_landed_merge
 test_a_refused_merge_leaves_the_card_alone
 test_a_proven_merge_closes_the_items_github_issue
 test_a_github_issue_failure_never_fails_a_landed_merge
+
+# The leak gate (bin/fm-leak-check.sh): a hit anywhere the merge reads refuses
+# before gh pr merge runs, and only an attended --allow-leak merges past it,
+# recording its reason on the task first.
+test_a_leak_refuses_the_merge_and_an_attended_waiver_records_its_reason() {
+  local case_dir rc head
+  head=acacacacacacacacacacacacacacacacacacacac
+  case_dir=$(make_case github-leak-commit)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf '[{"sha":"%s","commit":{"message":"Tidy up\\n\\nAs the captain asked."}}]\n' "$head" \
+    > "$case_dir/leak-commits.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-leak-commit: a leaking commit message must refuse"
+  assert_grep "leak: commit ${head:0:12} message line 3: the word \"captain\": As the captain asked." \
+    "$case_dir/stderr" "github-leak-commit: the commit message hit was not named"
+  assert_grep 'would leak supervision text into the project' "$case_dir/stderr" \
+    "github-leak-commit: the refusal was not stated"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "github-leak-commit: gh pr merge ran on a leaking PR"
+
+  case_dir=$(make_case github-leak-diff)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf '%s\n' '--- a/README.md' '+++ b/README.md' '@@ -1 +1,2 @@' ' # App' \
+    '+Request of 2026-10-15: "add the button"' > "$case_dir/leak-diff"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-leak-diff: a leaking added line must refuse"
+  assert_grep 'leak: README.md:2: a dated quotation of a request' "$case_dir/stderr" \
+    "github-leak-diff: the added line hit was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "github-leak-diff: gh pr merge ran on a leaking PR"
+
+  case_dir=$(make_case github-leak-waiver-away)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  cp "$TMP_ROOT/github-leak-diff/leak-diff" "$case_dir/leak-diff"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    --allow-leak 'the README quotes a customer request on purpose' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-leak-waiver-away: --allow-leak must be refused while away"
+  assert_grep '--allow-leak is attended-only' "$case_dir/stderr" \
+    "github-leak-waiver-away: the refusal did not name attended-only"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "github-leak-waiver-away: gh pr merge ran while away"
+
+  case_dir=$(make_case github-leak-waiver)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  cp "$TMP_ROOT/github-leak-diff/leak-diff" "$case_dir/leak-diff"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    --allow-leak 'the README quotes a customer request on purpose' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-leak-waiver: an attended waiver should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 93 example/repo --squash
+  assert_grep 'leak_waiver=the README quotes a customer request on purpose' "$case_dir/state/task-x1.meta" \
+    "github-leak-waiver: the reason was not recorded on the task"
+  pass "fm-pr-merge refuses a leaking PR and merges past it only on a recorded attended --allow-leak"
+}
+
+test_a_gitlab_leak_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-leak)
+  printf '[{"new_path":"a.md","deleted_file":false,"diff":"@@ -1 +1,2 @@\\n keep\\n+Notes from firstmate\\n"}]\n' \
+    > "$case_dir/leak-mr-diffs.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-leak: a leaking merge request must refuse"
+  assert_grep 'leak: a.md:2: "firstmate": Notes from firstmate' "$case_dir/stderr" \
+    "gitlab-leak: the added line hit was not named"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] || fail "gitlab-leak: glab mr merge ran on a leaking merge request"
+  pass "fm-pr-merge refuses a leaking GitLab merge request"
+}
+
+test_a_leak_refuses_the_merge_and_an_attended_waiver_records_its_reason
+test_a_gitlab_leak_refuses_the_merge
