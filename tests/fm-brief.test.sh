@@ -376,8 +376,10 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must render literal backticks around help"
   assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
     "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
-    "no-mistakes DOD must allow later captain words in --intent"
+  assert_grep "plus any later clarification of the ask that firstmate relays" "$brief" \
+    "no-mistakes DOD must allow later clarifications of the ask in --intent"
+  assert_grep "never add the captain's own words to it, quoted or verbatim, from \`## Private context - never publish\` or anywhere else" "$brief" \
+    "no-mistakes DOD must keep the captain's own words out of the published --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
     "no-mistakes DOD must keep Firstmate spec out of --intent"
   assert_grep "or your own decisions and tradeoffs" "$brief" \

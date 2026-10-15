@@ -4,16 +4,19 @@
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Ship and scout `# Task` sections have two subsections Firstmate
 # fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
-# own ask plus the context needed to read it, including the substance of any
-# report, decision, or PR the ask refers to, without added speaker labels or
-# direct address) and `{FIRSTMATE_SPEC}`
+# ask stated faithfully in Firstmate's own neutral words, with every boundary
+# the captain set and no quotation, attribution, speaker label, or direct
+# address, plus the context needed to read it, including the substance of any
+# report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
+# intent). The captain's exact words, when they matter as context, go only in
+# an optional `## Private context - never publish` subsection Firstmate adds.
+# bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
-# `## Captain's intent` line opening with a Captain label or address. Secondmate
-# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
-# sections when the task genuinely deviates (e.g. working an existing external
-# PR instead of shipping a new one).
+# `## Captain's intent` line that addresses, quotes, or attributes the captain.
+# Secondmate charters still use a single `{TASK}` charter fill. Firstmate may
+# adjust other sections when the task genuinely deviates (e.g. working an
+# existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
@@ -384,7 +387,7 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # A job delivering several items carries one intent slot per item instead of a
 # single one. The reviewer treats "## Captain's intent" as acceptance criteria,
 # so merging several tickets into one unattributed paragraph either widens an
-# ask or loses it; a slot per item keeps each ticket's own words its own.
+# ask or loses it; a slot per item keeps each ticket's ask its own.
 # bin/fm-spawn.sh refuses a brief with a slot still unfilled, the same way it
 # refuses the single placeholder.
 if [ -n "$DELIVERS" ]; then
