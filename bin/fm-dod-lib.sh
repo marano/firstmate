@@ -64,6 +64,10 @@
 # declared wait is absorbed and only re-surfaces on FM_PAUSE_RESURFACE_SECS
 # (4h by default), which would delay every no-mistakes handoff by up to that long.
 
+# The dated-quotation shape fm_brief_intent_address_line refuses has one owner.
+# shellcheck source=bin/fm-leak-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-leak-lib.sh"
+
 # Report 0 for a delivery mode whose every `done:` line must carry a PR URL.
 fm_dod_pr_bound_mode() {  # <mode>
   case "$1" in
@@ -332,16 +336,14 @@ fm_brief_task_content_valid() {  # <file>
 # Refused: a line opening with an operator address spelling; a line opening
 # with "Request of", "Requests of" or "Later request of", then a date, then a
 # double-quoted span, the shape that published the captain's words as a PR's
-# intent; and the attribution phrases "captain's ask", "captain's decision" and
-# "his words" anywhere. A quoted UI label or app text alone is never refused.
+# intent (bin/fm-leak-lib.sh's FM_LEAK_QUOTE_SHAPE_ERE, the copy the merge
+# gates also refuse); and the attribution phrases "captain's ask", "captain's
+# decision" and "his words" anywhere. A quoted UI label or app text alone is never refused.
 fm_brief_intent_address_line() {  # <file>
   # shellcheck disable=SC1112  # the typographic apostrophe is a literal the guard matches
-  fm_brief_task_heading_body "$1" "## Captain's intent" | awk '
-    BEGIN {
-      month = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[.]?"
-      date = "([0-9][0-9][0-9][0-9]-[0-9]|[0-9]+/[0-9]|" month " [0-9]|[0-9] " month ")"
-      dated_quote = "^[[:space:]]*([-*][[:space:]]+)?(later request|requests?) of [^\"]*" date "[^\"]*\"[^\"]*[^\"[:space:]]"
-    }
+  fm_brief_task_heading_body "$1" "## Captain's intent" \
+    | FM_LEAK_QUOTE_ERE=$FM_LEAK_QUOTE_SHAPE_ERE awk '
+    BEGIN { dated_quote = ENVIRON["FM_LEAK_QUOTE_ERE"] }
     {
       lower = tolower($0)
       if ($0 ~ /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ ||
