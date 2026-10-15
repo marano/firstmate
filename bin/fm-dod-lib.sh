@@ -15,22 +15,30 @@
 # a paused wait instead. bin/fm-pr-check.sh refuses to arm merge monitoring on a
 # draft through the reading bin/fm-pr-lib.sh owns.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
-# Author the subsection body and later relays as the actual words, without
-# adding speaker labels or direct address: the heading supplies provenance and
-# is not part of --intent. A legacy mixed Task instead marks each captain line
-# with `[captain] `; the selector returns its words, not that metadata prefix.
+# brief's `## Captain's intent` subsection plus later clarifications of the ask
+# that firstmate relays, never `## Firstmate spec` and never the worker's own
+# tradeoffs. The pipeline publishes `--intent` in the pull request, so the
+# subsection and every later relay state the ask in neutral words of
+# firstmate's own: faithful in substance, including every boundary the captain
+# set, because the reviewer treats it as acceptance criteria, but never quoting
+# the captain, attributing words to the captain, or adding speaker labels or
+# direct address. The heading supplies provenance and is not part of --intent.
+# Literal content the ask is about, such as a UI label or app text, stays exact.
+# When the captain's exact words matter as context, they go only in a separate
+# `## Private context - never publish` subsection of `# Task`, never inside
+# `## Captain's intent`; fm_brief_worker_role forbids copying that subsection,
+# or any of the captain's words, into anything published.
+# A legacy mixed Task instead marks each captain line with `[captain] `; the
+# selector returns its text, not that metadata prefix.
 # Previously stored speaker labels remain readable for compatibility only.
-# Never scrub literal examples or other content the captain actually supplied.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
 # roughly the same specification - so a report, decision, or PR the intent
 # refers to is written into it as substance, never left as a pointer.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
-# and a `## Captain's intent` line opening with a Captain label or address
-# through the helpers below. Other mentions of `--intent` point here rather than
-# restating the rule.
+# and, through fm_brief_intent_address_line, a `## Captain's intent` line that
+# addresses, quotes, or attributes the captain. Other mentions of `--intent`
+# point here rather than restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
@@ -113,6 +121,7 @@ Project instructions still govern the work wherever they do not conflict with th
 Status lines and reports in the firstmate home are internal; everything you write elsewhere - commit messages, PR titles, bodies and comments, issue and Linear cards and comments, repo docs, Slack or other chat services - must read as ordinary engineering work.
 There, never name firstmate, a supervisor, or a firstmate home or its paths (such as `~/code/firstmate/...` or `data/<task>/report.md`), and never attribute a decision to firstmate ("firstmate approved/decided"); a change to Firstmate itself may name the tooling it changes, never the supervision of your task.
 Cite evidence by its substance - the queries, links, and numbers themselves - never by a local report path, and describe a validation decision by what was checked, with no actor ("the text check passed", not "firstmate approved it on the text check").
+Never put the captain's words, quoted or verbatim, into `--intent`, a commit, a PR title or body, or any comment: describe the ask in neutral words of your own with no attribution, and never copy a brief's `## Private context - never publish` subsection anywhere published.
 EOF
 }
 
@@ -288,10 +297,10 @@ fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
-Preserve those words without adding speaker labels or direct address.
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications of the ask that firstmate relays.
+Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later clarification of the ask that firstmate relays, as `--intent`; never include Firstmate specification or other mixed Task content.
+That text already states the ask in neutral words: pass it as written, and never add the captain's own words, quoted or verbatim, nor speaker labels or direct address.
+Firstmate build constraints, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
 
 ## Captain intent authorized for --intent
@@ -318,11 +327,32 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# Print the first `## Captain's intent` body line that opens with an operator
-# address spelling; fail when there is none. The body is never rewritten.
+# Print the first `## Captain's intent` body line that addresses, quotes, or
+# attributes the captain; fail when there is none. The body is never rewritten.
+# Refused: a line opening with an operator address spelling; a line opening
+# with "Request of", "Requests of" or "Later request of", then a date, then a
+# double-quoted span, the shape that published the captain's words as a PR's
+# intent; and the attribution phrases "captain's ask", "captain's decision" and
+# "his words" anywhere. A quoted UI label or app text alone is never refused.
 fm_brief_intent_address_line() {  # <file>
+  # shellcheck disable=SC1112  # the typographic apostrophe is a literal the guard matches
   fm_brief_task_heading_body "$1" "## Captain's intent" | awk '
-    /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ { print; found = 1; exit }
+    BEGIN {
+      month = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[.]?"
+      date = "([0-9][0-9][0-9][0-9]-[0-9]|[0-9]+/[0-9]|" month " [0-9]|[0-9] " month ")"
+      dated_quote = "^[[:space:]]*([-*][[:space:]]+)?(later request|requests?) of [^\"]*" date "[^\"]*\"[^\"]*[^\"[:space:]]"
+    }
+    {
+      lower = tolower($0)
+      if ($0 ~ /^[[:space:]]*(Captain('\''s (words|ask|intent))?:|Captain,)/ ||
+          lower ~ dated_quote ||
+          lower ~ /captain('\''|’)s (ask|decision)/ ||
+          lower ~ /(^|[^[:alnum:]_])his words([^[:alnum:]_]|$)/) {
+        print
+        found = 1
+        exit
+      }
+    }
     END { exit !found }
   '
 }
@@ -339,8 +369,8 @@ EOF
 # The fixed line a chunk brief records its membership on, beside the delivery
 # contract, and the rules a worker delivering several items needs. It sits in
 # the Definition of done rather than under "## Captain's intent", because that
-# subsection is the captain's own words and the no-mistakes intent overlay
-# copies it verbatim.
+# subsection states only the asks and the no-mistakes intent overlay copies it
+# verbatim into the published intent.
 fm_dod_delivers_block() {  # <delivers-csv>
   local members=${1-}
   [ -n "$members" ] || return 0
@@ -401,13 +431,13 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
-Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later clarification of the ask that firstmate relays.
+That subsection already states the ask in neutral words; the pipeline publishes \`--intent\` in the PR, so never add the captain's own words to it, quoted or verbatim, from \`## Private context - never publish\` or anywhere else, nor speaker labels or direct address.
 For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
 If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
 Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
+When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in neutral words, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 Do not announce the pipeline and stop: the \`working:\` line saying the run started is written after your first \`no-mistakes axi run --wait\` call returns, and names the run id it returned.

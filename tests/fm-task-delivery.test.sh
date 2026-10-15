@@ -708,7 +708,7 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus any later clarification of the ask that firstmate relays" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy launch contract excluded later captain clarifications"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
@@ -742,7 +742,7 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus any later clarification of the ask that firstmate relays" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
   assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
@@ -972,13 +972,13 @@ EOF
   [ "$authorized" = "$words" ] || fail "authorized --intent must contain exactly the request, without headings, address, or contract prose: $authorized"
 
   # The request itself may discuss an address spelling. It is data, not an
-  # invitation to scrub the user's words or synthesize a different request.
+  # invitation to scrub the ask or synthesize a different request.
   words=$(printf '%s\n' "Keep the literal example \`Captain, hello\` in the documentation." \
-    "Stop composing Captain:, Captain's words:, Captain's ask:, and Captain's intent: into PR bodies.")
+    "Stop composing Captain:, Captain's words:, and Captain's intent: into PR bodies.")
   write_brief "$home" intent-literal no-mistakes
   printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/intent-literal/brief.md"
   out=$(run_spawn "$home" "$fakebin" intent-literal "$proj" claude --mode no-mistakes --yolo off)
-  assert_not_contains "$out" "operator-address line" "labels mentioned mid-line were refused as address"
+  assert_not_contains "$out" "addresses, quotes, or attributes the captain" "labels mentioned mid-line were refused as address"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/intent-literal/launch-brief.md")
   [ "$authorized" = "$words" ] || fail "literal words in the request were scrubbed"
 
@@ -992,9 +992,9 @@ EOF
     out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
     status=$?
     [ "$status" -ne 0 ] || fail "$marker: addressed intent should be refused"
-    assert_contains "$out" "operator-address line:   $marker preserve its provenance." \
+    assert_contains "$out" "attributes the captain:   $marker preserve its provenance." \
       "$marker: refusal did not name the offending line"
-    assert_contains "$out" "write the captain's actual words without a Captain label or address" \
+    assert_contains "$out" "state the ask in neutral words, with no Captain label, address, quotation, or attribution" \
       "$marker: refusal did not say what to write instead"
     assert_absent "$home/data/$id/launch-brief.md" "$marker: addressed intent was serialized"
     assert_absent "$home/state/$id.meta" "$marker: addressed intent spawn wrote task metadata"
@@ -1008,7 +1008,7 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion of addressed intent should be refused"
-  assert_contains "$out" "operator-address line: Captain: investigate the refusal." \
+  assert_contains "$out" "attributes the captain: Captain: investigate the refusal." \
     "promotion refusal did not name the offending line"
   assert_absent "$home/data/$id/ship-instructions.md" "promotion published addressed intent"
   assert_grep 'kind=scout' "$home/state/$id.meta" "refused promotion changed the task record"
@@ -1028,6 +1028,53 @@ EOF
     [ "$authorized" = "$words" ] || fail "$marker: legacy intent changed words or included provenance/build prose"
   done
   pass "fm-spawn/fm-promote: authorized intent preserves exact words and refuses operator-address lines"
+}
+
+# The pipeline publishes the authorized intent as the PR's intent, so the
+# shapes that once carried the captain's own words there are refused at spawn,
+# while an ask that quotes UI labels or app text still launches with its words
+# exact, and the captain's words kept as private context never reach --intent.
+test_intent_refuses_quoted_or_attributed_captain_words() {
+  local rec home proj fakebin id line out status words authorized n=0
+  rec=$(make_home intent-quoted)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  # Mutant: drop any one alternative from fm_brief_intent_address_line and its
+  # leaked shape below launches.
+  for line in \
+    'Request of 2026-10-15: "never publish what the user typed"' \
+    'Requests of 2026-10-14 and 2026-10-15: "first ask" and "second ask"' \
+    'Later request of 2026-10-15: "also cover the docs"' \
+    'The captain'"'"'s decision, 2026-10-15: "ship it as one PR"' \
+    'Keep the old flow, per the captain'"'"'s ask.' \
+    'Use the shorter label, in his words.'; do
+    n=$((n + 1))
+    id="intent-quoted-$n"
+    write_brief "$home" "$id" no-mistakes
+    printf '# Task\n## Captain'"'"'s intent\nKeep the request in the PR.\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+      "$line" > "$home/data/$id/brief.md"
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$line: quoted or attributed intent should be refused"
+    assert_contains "$out" "attributes the captain: $line" "$line: refusal did not name the offending line"
+    assert_absent "$home/data/$id/launch-brief.md" "$line: quoted intent was serialized"
+    assert_absent "$home/state/$id.meta" "$line: quoted intent spawn wrote task metadata"
+  done
+
+  id='intent-ui-labels'
+  words=$(printf '%s\n' 'Rename the "Edit analysis" button to "Edit".' \
+    'When a delete fails, the dialog shows "Could not delete this analysis. Try again." instead of a blank box.' \
+    'Request a review of the "Save" flow before release.')
+  write_brief "$home" "$id" no-mistakes
+  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Private context - never publish\nOriginal message: "make the edit button say Edit"\n\n## Firstmate spec\nKeep the label change narrow.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+    "$words" > "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "attributes the captain" "quoted UI labels and app text were refused as captain words"
+  assert_present "$home/data/$id/launch-brief.md" "an ask quoting UI labels was not serialized"
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+  [ "$authorized" = "$words" ] || fail "quoted UI labels were not kept exact, or private context reached --intent: $authorized"
+  pass "fm-spawn: intent refuses quoted or attributed captain words and keeps quoted UI labels"
 }
 
 test_spawn_refreshes_legacy_worker_roles() {
@@ -1071,6 +1118,9 @@ EOF
       assert_grep 'never attribute a decision to firstmate' "$brief" "$project_kind $kind did not forbid crediting firstmate with a decision"
       assert_grep 'Cite evidence by its substance - the queries, links, and numbers themselves - never by a local report path' "$brief" "$project_kind $kind did not say to cite evidence by substance"
       assert_grep 'describe a validation decision by what was checked, with no actor' "$brief" "$project_kind $kind did not say to describe a decision by what was checked"
+      # Mutant: drop the captain's-words rule from fm_brief_worker_role.
+      assert_grep "Never put the captain's words, quoted or verbatim, into \`--intent\`, a commit, a PR title or body, or any comment" "$brief" "$project_kind $kind did not forbid publishing the captain's words"
+      assert_grep "never copy a brief's \`## Private context - never publish\` subsection anywhere published" "$brief" "$project_kind $kind did not keep private context out of published text"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
@@ -1087,6 +1137,7 @@ EOF
 }
 
 test_authorized_intent_keeps_words_without_composed_address
+test_intent_refuses_quoted_or_attributed_captain_words
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
