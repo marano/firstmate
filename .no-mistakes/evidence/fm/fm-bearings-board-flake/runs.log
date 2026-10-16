@@ -1,0 +1,9 @@
+ok - build refuses to arm a poll on a session that stays ended
+ok - a rebuild starts a listener when an already-armed board has none
+ok - build drops decision cards whose subject already landed and keeps open ones
+ok - build keeps remote decisions absent from the main backlog
+ok - build fails when reconcile cannot prove a live listener
+ok - every decision card carries exactly one reconcile choice
+ok - build refuses a payload that occupies the reserved reconcile value
+ok - build reserves reconcile across non-decision cards
+rc=0

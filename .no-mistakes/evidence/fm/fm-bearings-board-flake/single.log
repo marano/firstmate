@@ -1,0 +1,12 @@
+== run 1
+ok - build fails when reconcile cannot prove a live listener
+== run 2
+served: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.jfaV9Z/no-listener/.lavish/bearings-board.html
+bound: lavish-833fb5656db9b64d
+already-armed: lavish-833fb5656db9b64d
+fm-bearings-board: source lavish-833fb5656db9b64d is not listening after reconcile (observed owner: none)
+== run 3
+ok - build fails when reconcile cannot prove a live listener
+== run 4
+ok - build fails when reconcile cannot prove a live listener
+== run 5

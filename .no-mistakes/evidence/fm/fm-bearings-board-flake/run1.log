@@ -1,0 +1,40 @@
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - charted kind is optional and accepts queued and warning
+ok - a merge card carries its recorded hold reason, and only a merge card may
+ok - build injects the payload, binds any-origin, then arms the source
+not-autohandled: lavish-a3b2a3b9de29f37a (left for the handler; still unacknowledged)
+ok - registration can consume answers only after any-origin binding exists
+ok - build establishes the Lavish session before binding and arming
+ok - rebuild refreshes the board in place without double-arming
+ok - build refuses a template without exactly one data slot
+ok - a board build reopens a session the captain ended instead of arming a dead one
+ok - build reopens a session that ends between establish and listing
+ok - a default build lets lavish-axi open the browser for the captain
+ok - FM_BEARINGS_LAVISH_NO_OPEN=1 adds --no-open to the initial open and to the reopen
+ok - build refuses to arm a poll on a session that stays ended
+ok - a rebuild starts a listener when an already-armed board has none
+ok - build drops decision cards whose subject already landed and keeps open ones
+ok - build keeps remote decisions absent from the main backlog
+not ok - the refusal did not name the observed owner: board: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+session:
+  file: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+  url: "http://127.0.0.1:4387/session/deadbeef"
+  status: opened
+session: live
+served: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+bound: lavish-c90df5c8930e16fe
+already-armed: lavish-c90df5c8930e16fe
+fm-bearings-board: source lavish-c90df5c8930e16fe is not listening after reconcile (observed owner: none) (missing: 'observed owner: uncertain')
+--- output ---
+board: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+session:
+  file: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+  url: "http://127.0.0.1:4387/session/deadbeef"
+  status: opened
+session: live
+served: /private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-bearings-board.NklV7G/no-listener/.lavish/bearings-board.html
+bound: lavish-c90df5c8930e16fe
+already-armed: lavish-c90df5c8930e16fe
+fm-bearings-board: source lavish-c90df5c8930e16fe is not listening after reconcile (observed owner: none)
+rc=1
