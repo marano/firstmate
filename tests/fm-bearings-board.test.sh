@@ -763,16 +763,21 @@ test_build_fails_when_reconcile_cannot_establish_a_listener() {
   write_valid_payload "$data"
   run_board "$home" build "$data" >/dev/null || fail "could not establish the listener fixture"
   sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
-  cat > "$home/fakebin/ps" <<'SH'
+  # Blind only the rebuild. The first build returns once the listener claims the
+  # source, while its owner guard may still be starting and running ps from
+  # fakebin; a failing ps there kills that listener, and the rebuild then
+  # truthfully sees no owner rather than an unverifiable one.
+  mkdir -p "$home/blind-bin"
+  cat > "$home/blind-bin/ps" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-  chmod +x "$home/fakebin/ps"
+  chmod +x "$home/blind-bin/ps"
   set +e
-  out=$(FM_PROC_ROOT_OVERRIDE="$home/no-proc" run_board "$home" build "$data" 2>&1)
+  out=$(PATH="$home/blind-bin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/no-proc" \
+    run_board "$home" build "$data" 2>&1)
   rc=$?
   set -e
-  rm -f "$home/fakebin/ps"
   [ "$rc" -ne 0 ] || fail "a build with an uncertain listener reported success: $out"
   assert_contains "$out" "source $sid is not listening after reconcile" \
     "the refusal did not name the source: $out"
