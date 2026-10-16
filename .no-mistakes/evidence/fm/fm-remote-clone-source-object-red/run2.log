@@ -1,0 +1,20 @@
+== fm-spawn-compact-adviser-disable-remote
+rc=0
+ok - the remote route keeps the compact-adviser switch through the cleared allowlisted environment
+ALL TESTS PASSED
+== fm-remote-job
+rc=0
+ok - barely healthy worker failures remain bounded by the restart guard
+ALL TESTS PASSED
+== fm-remote-backlog-handoff
+rc=0
+ok - unconfigured bootstrap has no remote handoff behavior
+ALL TESTS PASSED
+== fm-remote-job-orphan-reap
+rc=0
+ok - the reaper stops an abandoned worker's whole tree
+ok - the reaper is idempotent
+== fm-remote-transport-lanes
+rc=0
+ok - abandoned stage litter is reaped by age while live staging survives
+ALL TESTS PASSED

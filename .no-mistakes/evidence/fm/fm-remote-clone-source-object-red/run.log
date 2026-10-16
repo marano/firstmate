@@ -1,0 +1,31 @@
+== fm-test-fixtures
+ok - fake gh authenticates and fake gh-axi reports the shared version
+ok - spawn fakebin answers pane path, logs -l payloads, and installs extra tools
+ok - send stubs log typed text and fake ssh records argv with a controllable exit
+ok - spawn-home layout writes harness pin, beat, and brief
+rc=0
+== fm-remote-secondmate-trace-context
+ok - boundary: each remote-routed second mate roots its own trace and never adopts the spawning environment's carrier
+ok - allowlist: the remote receiver accepts exactly the declared inherited-material set, including the enablement flag
+ok - delivery: a parent-supplied carrier is accepted only for a secondmate launch and only as a strict W3C value
+ALL TESTS PASSED
+rc=0
+== fm-remote-secondmate-parent-binding
+ok - a remote secondmate's finished worker cleans up with no relay signal anywhere
+ok - a remote secondmate's own committed relay token still refuses cleanup
+ok - remote secondmate publication refuses targets outside its home
+ALL TESTS PASSED
+rc=0
+== fm-remote-secondmate-lifecycle-e2e
+ok - unreachable no-ledger remote state remains explicit with no local respawn or failover
+cannot retire terminal source; it remains registered: remote-reply-ios
+ok - remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives
+ALL TESTS PASSED
+rc=0
+== fm-spawn-compact-adviser-disable-remote
+fm-build-lock: waiting for a machine-wide build slot - this process is WAITING, not wedged (all 3 slots held; oldest: held by pid 9212 for 0s running: pnpm test [in /Users/marano/.treehouse/bluejam-app-web-86303c/1/bluejam-app-web]; 2 more - see mutex --status)
+fm-build-lock: still waiting 1m00s for a machine-wide build slot - all 3 slots held; oldest: held by pid 9212 for 1m01s running: pnpm test [in /Users/marano/.treehouse/bluejam-app-web-86303c/1/bluejam-app-web]; 2 more - see mutex --status
+fm-build-lock: still waiting 2m00s for a machine-wide build slot - all 3 slots held; oldest: held by pid 9212 for 2m00s running: pnpm test [in /Users/marano/.treehouse/bluejam-app-web-86303c/1/bluejam-app-web]; 2 more - see mutex --status
+fm-build-lock: still waiting 3m00s for a machine-wide build slot - all 3 slots held; oldest: held by pid 9212 for 3m00s running: pnpm test [in /Users/marano/.treehouse/bluejam-app-web-86303c/1/bluejam-app-web]; 2 more - see mutex --status
+rc=143
+== fm-remote-job
