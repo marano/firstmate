@@ -85,7 +85,7 @@ exit 127
 SH
 chmod +x "$RUNTIME_BIN/perl"
 
-git -C "$REMOTE_ROOT" init -q -b main
+fm_git_init "$REMOTE_ROOT"
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add AGENTS.md bin

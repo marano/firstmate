@@ -364,7 +364,24 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+test_git_fixture_maintenance_off() {
+  local dir="$TMP_ROOT/git-maintenance" repo
+  mkdir -p "$dir"
+  fm_git_init "$dir/init"
+  fm_git_init_commit "$dir/init-commit"
+  git init -q --bare "$dir/bare.git"
+  fm_git_quiesce "$dir/bare.git"
+  for repo in init init-commit bare.git; do
+    [ "$(git -C "$dir/$repo" config --get --type=bool maintenance.auto)" = false ] \
+      || fail "fixture $repo reads maintenance.auto other than false"
+    [ "$(git -C "$dir/$repo" config --get gc.auto)" = 0 ] \
+      || fail "fixture $repo reads gc.auto other than 0"
+  done
+  pass "git fixture helpers leave automatic maintenance off"
+}
+
 test_git_config_isolation || fail "Git fixture config isolation"
+test_git_fixture_maintenance_off
 test_worker_env_isolation || fail "worker environment isolation"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant

@@ -519,6 +519,26 @@ fm_git_identity() {
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 }
 
+# fm_git_quiesce <repo>: switch off automatic Git maintenance in a fixture
+# repository (a work tree or a bare repo). From Git 2.55 every commit starts a
+# detached `git maintenance run --auto` whose geometric repack packs the loose
+# objects and deletes them, racing any local clone of the fixture that is still
+# copying them one by one: "fatal: failed to copy file to '.../.git/objects/..':
+# No such file or directory". Every fixture repository that is later cloned,
+# fetched from, or given a worktree must go through this, or through
+# fm_git_init / fm_git_init_commit, which call it.
+fm_git_quiesce() {
+  git -C "$1" config maintenance.auto false
+  git -C "$1" config gc.auto 0
+}
+
+# fm_git_init <dir>: git init <dir> on main with automatic maintenance off.
+fm_git_init() {
+  mkdir -p "$1"
+  git -C "$1" init -q -b main
+  fm_git_quiesce "$1"
+}
+
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
 # called. The initial branch is pinned rather than inherited from
@@ -526,8 +546,7 @@ fm_git_identity() {
 # developer machine and on a runner that still defaults to master.
 fm_git_init_commit() {
   local dir=$1
-  mkdir -p "$dir"
-  git -C "$dir" init -q -b main
+  fm_git_init "$dir"
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
