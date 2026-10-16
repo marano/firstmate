@@ -757,27 +757,24 @@ EOF
 # --- part 3: every decision card offers reconcile ---------------------------
 
 test_build_fails_when_reconcile_cannot_establish_a_listener() {
-  local home data out rc sid
+  local home data out rc sid claim
   home=$(make_home no-listener)
   data="$home/payload.json"
   write_valid_payload "$data"
   run_board "$home" build "$data" >/dev/null || fail "could not establish the listener fixture"
   sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
-  # Blind only the rebuild. The first build returns once the listener claims the
-  # source, while its owner guard may still be starting and running ps from
-  # fakebin; a failing ps there kills that listener, and the rebuild then
-  # truthfully sees no owner rather than an unverifiable one.
-  mkdir -p "$home/blind-bin"
-  cat > "$home/blind-bin/ps" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$home/blind-bin/ps"
+  # An unreadable claim is the owner state nobody can prove either way. Making
+  # it so directly keeps the state independent of how the listener behaves: a
+  # failing ps starves the listener's own startup and exit paths, so a listener
+  # that dies or releases its claim first reads as no owner instead.
+  claim="$home/procevent-claims/$sid.claim"
+  cp "$claim" "$home/claim.saved" || fail "no claim to make unreadable"
+  printf 'not a claim\n' > "$claim"
   set +e
-  out=$(PATH="$home/blind-bin:$PATH" FM_PROC_ROOT_OVERRIDE="$home/no-proc" \
-    run_board "$home" build "$data" 2>&1)
+  out=$(run_board "$home" build "$data" 2>&1)
   rc=$?
   set -e
+  cp "$home/claim.saved" "$claim"
   [ "$rc" -ne 0 ] || fail "a build with an uncertain listener reported success: $out"
   assert_contains "$out" "source $sid is not listening after reconcile" \
     "the refusal did not name the source: $out"
