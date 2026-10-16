@@ -480,6 +480,7 @@ fm_git_init_commit "$TMP_ROOT/seed-parent/projects/resident"
 # Left to init.defaultBranch, its HEAD names a branch the push never creates on
 # a host that still defaults to master, and cloning it checks out nothing.
 git init -q --bare -b main "$TMP_ROOT/beta.git"
+fm_git_quiesce "$TMP_ROOT/beta.git"
 fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
