@@ -105,13 +105,14 @@ chmod +x "$REMOTE_ROOT/bin/tmux"
 fm_fake_harness_clis "$REMOTE_ROOT/bin"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
-git -C "$REMOTE_ROOT" init -q -b main
+fm_git_init "$REMOTE_ROOT"
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
 git init -q --bare "$REMOTE_ORIGIN"
+fm_git_quiesce "$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" remote add origin "file://$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" push -q -u origin main
 git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
@@ -119,6 +120,7 @@ git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
 # One remote-backed direct-PR project. The remote home clones its origin, never
 # the primary working tree.
 git init -q --bare "$TMP_ROOT/alpha.git"
+fm_git_quiesce "$TMP_ROOT/alpha.git"
 git -C "$PARENT/projects" init -q -b main alpha
 git -C "$PARENT/projects/alpha" config user.email test@example.com
 git -C "$PARENT/projects/alpha" config user.name Test
@@ -478,6 +480,7 @@ fm_git_init_commit "$TMP_ROOT/seed-parent/projects/resident"
 # Left to init.defaultBranch, its HEAD names a branch the push never creates on
 # a host that still defaults to master, and cloning it checks out nothing.
 git init -q --bare -b main "$TMP_ROOT/beta.git"
+fm_git_quiesce "$TMP_ROOT/beta.git"
 fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
