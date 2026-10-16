@@ -63,6 +63,14 @@ install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
+# No automatic maintenance in the fixture root. From Git 2.55 (CI's runner
+# image) the commit below starts a detached `git maintenance run --auto` whose
+# geometric repack packs the commit's several hundred loose objects and then
+# deletes them, while the seed is already cloning this root with a local clone
+# that copies those loose objects one by one: "fatal: failed to copy file to
+# '.../remote-home/.git/objects/..': No such file or directory".
+git -C "$REMOTE_ROOT" config maintenance.auto false
+git -C "$REMOTE_ROOT" config gc.auto 0
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 
