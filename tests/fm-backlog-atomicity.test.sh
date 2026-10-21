@@ -3068,6 +3068,16 @@ SH
   chmod +x "$case_dir/fakebin/tmux"
 }
 
+# A grouped dispatch needs its brief's PR plan (bin/fm-spawn.sh header), so this
+# gives a seeded brief one inside # Task, ahead of its Definition of done.
+plan_brief() {  # <case-dir> <id> <plan-line>...
+  local brief
+  brief="$(home_of "$1")/data/$2/brief.md"
+  shift 2
+  FM_TEST_PR_PLAN=$(printf '%s\n' "$@") perl -0pi -e \
+    's/^# Definition of done$/## PR plan\n$ENV{FM_TEST_PR_PLAN}\n\n# Definition of done/m' "$brief"
+}
+
 test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   local case_dir unit out meta
   unit=atomic-group-unit-g1
@@ -3078,6 +3088,7 @@ test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   add_item "$case_dir" unrelated-g1
   # The usual parking of a grouped card behind the job that will deliver it.
   tasks-axi block group-b-g1 --by "$unit" --file "$(backlog_of "$case_dir")" >/dev/null
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
   [ "$(idle_fleet_ready_count "$case_dir")" = 3 ] \
     || fail "fixture: expected the unit, one member and the unrelated item ready before dispatch"
 
@@ -3086,6 +3097,8 @@ test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   meta="$(home_of "$case_dir")/state/$unit.meta"
   assert_exact_line "$meta" "delivers=group-a-g1,group-b-g1" \
     "the grouped dispatch did not record its membership in the unit's record"
+  assert_exact_line "$meta" "pr_plan=1" \
+    "the grouped dispatch did not record its PR plan beside its membership"
   for id in "$unit" group-a-g1 group-b-g1; do
     [ "$(row_state "$case_dir" "$id")" = in_flight ] \
       || fail "grouped dispatch left $id $(row_state "$case_dir" "$id")"
@@ -3138,6 +3151,7 @@ test_a_chunk_dispatches_and_closes_through_delivers() {
     chunk "$unit" "web children" chunk-a-g8 chunk-b-g8) || fail "could not plan the chunk: $out"
   [ "$(idle_fleet_ready_count "$case_dir")" = 1 ] \
     || fail "a planned chunk is not one ready item: $(idle_fleet_ready_count "$case_dir")"
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
 
   out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
     --delivers chunk-a-g8,chunk-b-g8) || fail "the planned chunk could not be dispatched: $out"
@@ -3201,6 +3215,7 @@ test_enforce_refuses_a_lone_dispatch_beside_a_ready_sibling() {
   case_dir=$(grouping_home guard-lone-resolved "$id")
   keyed_item "$case_dir" "$id" app-web blu-3156
   keyed_item "$case_dir" guard-sibling-h1 app-web blu-3156
+  plan_brief "$case_dir" "$id" 'PRs: 1'
   rc=0
   out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
     --delivers guard-sibling-h1) || rc=$?
@@ -3290,6 +3305,7 @@ test_a_unit_cannot_launch_without_its_planned_members() {
   FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" \
     chunk "$unit" "web children" plan-a-h4 plan-b-h4 >/dev/null \
     || fail "fixture: could not plan the chunk"
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
 
   out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
     --delivers plan-a-h4) || rc=$?
@@ -3381,6 +3397,7 @@ test_spawn_refuses_a_brief_whose_members_differ_from_the_dispatch() {
   [ "$rc" -ne 0 ] || fail "a half-filled chunk brief launched"
   perl -0pi -e 's/\{TASK:brief-b-h8\}/the second card asks for this/' "$brief"
   perl -0pi -e 's/\{FIRSTMATE_SPEC\}/build both/' "$brief"
+  perl -0pi -e 's/\{PR_PLAN\}/PRs: 1/' "$brief"
 
   # Filled, but dispatched with a different membership than it records.
   rc=0
@@ -3399,6 +3416,96 @@ test_spawn_refuses_a_brief_whose_members_differ_from_the_dispatch() {
   pass "a chunk brief must carry a filled slot per member and the membership the dispatch names"
 }
 
+# How many pull requests a grouped job ships is decided when its brief is
+# written, so the dispatch refuses a plan that is missing, unfilled, or does not
+# parse (grammar: bin/fm-spawn.sh header) before anything exists, and records
+# the accepted count beside the membership.
+pr_plan_home() {  # <name> <unit> -> case dir with a filled chunk brief for <unit>
+  local case_dir brief
+  case_dir=$(make_home "$1")
+  add_item "$case_dir" "$2"
+  add_item "$case_dir" plan-a-p1
+  add_item "$case_dir" plan-b-p1
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-brief.sh" "$2" firstmate \
+    --mode no-mistakes --delivers plan-a-p1,plan-b-p1 >/dev/null \
+    || fail "fixture: could not scaffold the chunk brief"
+  brief="$(home_of "$case_dir")/data/$2/brief.md"
+  perl -0pi -e 's/\{TASK:plan-a-p1\}/the first card asks for this/; s/\{TASK:plan-b-p1\}/the second card asks for this/; s/\{FIRSTMATE_SPEC\}/build both/' "$brief"
+  printf '%s\n' "$case_dir"
+}
+
+set_pr_plan() {  # <brief> <plan-text>; empty text removes the section
+  if [ -z "$2" ]; then
+    perl -0pi -e 's/^## PR plan\n.*?(?=^# )//ms' "$1"
+  else
+    FM_TEST_PR_PLAN=$2 perl -0pi -e 's/^(## PR plan\n).*?(?=^# )/$1$ENV{FM_TEST_PR_PLAN}\n\n/ms' "$1"
+  fi
+}
+
+test_a_grouped_brief_must_carry_a_pr_plan() {
+  local case_dir unit brief out rc plan expect meta
+  unit='plan-unit-p1'
+  case_dir=$(pr_plan_home pr-plan-refused "$unit")
+  brief="$(home_of "$case_dir")/data/$unit/brief.md"
+  record_endpoint_creation "$case_dir"
+
+  # Each refusal is pinned by the mutant that removes its check from
+  # fm_brief_pr_plan_check in bin/fm-dod-lib.sh: without it the case launches.
+  while IFS='|' read -r plan expect; do
+    if [ "$plan" = '<as scaffolded>' ]; then
+      :  # Mutant: drop the {PR_PLAN} check.
+    else
+      set_pr_plan "$brief" "$(printf '%b' "$plan")"
+    fi
+    rc=0
+    out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+      --delivers plan-a-p1,plan-b-p1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "a grouped dispatch launched with PR plan '$plan'"
+    assert_contains "$out" "$expect" "the refusal of PR plan '$plan' did not name its rule"
+    assert_absent "$(home_of "$case_dir")/state/$unit.meta" "the refusal of PR plan '$plan' published a task record"
+    assert_absent "$case_dir/task-endpoint-created" "the refusal of PR plan '$plan' created an endpoint"
+    assert_absent "$case_dir/local-copy-requested" "the refusal of PR plan '$plan' requested a local copy"
+    [ "$(row_state "$case_dir" "$unit")" = queued ] \
+      || fail "the refusal of PR plan '$plan' moved the unit to $(row_state "$case_dir" "$unit")"
+  done <<'EOF'
+<as scaffolded>|still holds {PR_PLAN}
+PRs: 2|says PRs: 2 but has 0 Split line(s)
+PRs: 2\nSplit: outsider-p1 - it outgrows one reviewer|outsider-p1, which is not on this job's Delivers line
+PRs: 0|n a positive integer
+PRs: two|n a positive integer
+PRs: 2\nSplit: plan-b-p1 - |splits off plan-b-p1 with no reason
+PRs: 3\nSplit: plan-b-p1 - one reason\nSplit: plan-b-p1 - another|puts plan-b-p1 in more than one additional pull request
+PRs: 1\nThis job ships in one pull request.|a line the plan grammar does not know
+|has no ## PR plan
+EOF
+  # Mutants above, by line: drop the {PR_PLAN} check; drop the Split-count
+  # check; drop the Delivers-membership check; drop the positive-integer check
+  # (twice); drop the empty-reason check; drop the duplicate-member check; drop
+  # the unknown-line check; drop the section-present check (last, because an
+  # empty plan removes the section the earlier lines rewrite).
+
+  # PRs: 1 is the whole default plan, and it launches.
+  case_dir=$(pr_plan_home pr-plan-one "$unit")
+  brief="$(home_of "$case_dir")/data/$unit/brief.md"
+  set_pr_plan "$brief" 'PRs: 1'
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers plan-a-p1,plan-b-p1) || fail "a grouped dispatch with PRs: 1 was refused: $out"
+  meta="$(home_of "$case_dir")/state/$unit.meta"
+  assert_exact_line "$meta" "delivers=plan-a-p1,plan-b-p1" "the accepted dispatch lost its membership"
+  assert_exact_line "$meta" "pr_plan=1" "the accepted dispatch did not record its PR plan"
+
+  # A split with its reason launches too, and records the count.
+  case_dir=$(pr_plan_home pr-plan-two "$unit")
+  brief="$(home_of "$case_dir")/data/$unit/brief.md"
+  set_pr_plan "$brief" "$(printf '%s\n' '> the scaffold guidance line is ignored' 'PRs: 2' \
+    'Split: plan-b-p1 - it could need reverting without the rest')"
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers plan-a-p1,plan-b-p1) || fail "a grouped dispatch with one reasoned split was refused: $out"
+  assert_exact_line "$(home_of "$case_dir")/state/$unit.meta" "pr_plan=2" \
+    "the accepted split dispatch did not record its PR plan"
+  pass "a grouped dispatch needs a filled, parseable PR plan and records the count it accepted"
+}
+
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
   local case_dir unit out rc=0
   unit=atomic-group-unit-g2
@@ -3408,6 +3515,7 @@ test_grouped_dispatch_refuses_a_member_it_cannot_deliver() {
   add_item "$case_dir" group-blocked-g2
   add_item "$case_dir" other-dep-g2
   tasks-axi block group-blocked-g2 --by other-dep-g2 --file "$(backlog_of "$case_dir")" >/dev/null
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
   record_endpoint_creation "$case_dir"
 
   out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
@@ -3545,6 +3653,8 @@ test_single_item_dispatch_and_close_are_unchanged() {
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
   assert_no_grep '^delivers=' "$(home_of "$case_dir")/state/$id.meta" \
     "an ordinary dispatch recorded a membership"
+  assert_no_grep 'pr_plan=' "$(home_of "$case_dir")/state/$id.meta" \
+    "an ordinary dispatch without a PR plan recorded one"
   # Complete it the way a shipped worker leaves it, against an absent local
   # copy so the case stays about the backlog rather than landed-work checks.
   write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-single-g7" \
@@ -3836,6 +3946,7 @@ test_warn_reports_and_proceeds
 test_grouping_is_inert_when_the_posture_is_absent
 test_a_malformed_grouping_posture_refuses_a_dispatch
 test_spawn_refuses_a_brief_whose_members_differ_from_the_dispatch
+test_a_grouped_brief_must_carry_a_pr_plan
 test_grouped_dispatch_refuses_a_member_it_cannot_deliver
 test_grouped_close_closes_every_delivered_member
 test_grouped_close_keeps_a_handed_back_member_queued_with_its_reason

@@ -389,7 +389,10 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # so merging several tickets into one unattributed paragraph either widens an
 # ask or loses it; a slot per item keeps each ticket's ask its own.
 # bin/fm-spawn.sh refuses a brief with a slot still unfilled, the same way it
-# refuses the single placeholder.
+# refuses the single placeholder. Such a job also carries a required `## PR plan`
+# holding {PR_PLAN}: how many pull requests it ships is decided here, when the
+# brief is written, rather than by the worker; bin/fm-spawn.sh owns its grammar
+# and refuses a dispatch whose plan is missing, unfilled, or unparseable.
 if [ -n "$DELIVERS" ]; then
   DELIVERS_SLOTS=""
   IFS=, read -r -a DELIVERS_IDS <<< "$DELIVERS"
@@ -410,6 +413,10 @@ $DELIVERS_SLOTS
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
+
+## PR plan
+> Count the contracts, not the tickets: the default is \`PRs: 1\` for the whole job, and each additional pull request is one \`Split: <member-id>[,<member-id>...] - <reason>\` line naming its members and why it ships apart (grammar: bin/fm-spawn.sh --help).
+{PR_PLAN}
 EOF
   TASK_SECTION=${TASK_SECTION%$'\n'}
 fi
@@ -710,7 +717,7 @@ $DOD$ISSUE_LINE
 EOF
 fm_dod_assert_done_pr_bound "$MODE" "$BRIEF" "$(cat "$BRIEF")" || { rm -f "$BRIEF"; exit 1; }
 if [ -n "$DELIVERS" ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE, delivers=$DELIVERS; replace one {TASK:<id>} slot per delivered item and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE, delivers=$DELIVERS; replace one {TASK:<id>} slot per delivered item, {FIRSTMATE_SPEC}, and {PR_PLAN})"
 else
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi

@@ -1365,6 +1365,36 @@ test_ship_and_scout_teach_the_build_mutex() {
   pass "fm-brief.sh: every ship mode and the scout scaffold teach the machine-wide build mutex"
 }
 
+# A grouped job's pull-request count is decided when its brief is written, so
+# only a --delivers scaffold carries the PR plan slot, inside # Task after the
+# spec, and only its worker is told to ship exactly that plan. bin/fm-spawn.sh
+# refuses the slot unfilled (tests/fm-backlog-atomicity.test.sh).
+test_grouped_brief_carries_a_pr_plan_slot() {
+  local home brief task
+  home="$TMP_ROOT/pr-plan-home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plan-unit some-proj --mode no-mistakes \
+    --delivers plan-a,plan-b >/dev/null || fail "grouped scaffold failed"
+  brief="$home/data/plan-unit/brief.md"
+  task=$(awk '/^# Task$/ { on = 1; next } on && /^# / { exit } on' "$brief")
+  # Mutant: drop the PR plan section from the grouped TASK_SECTION.
+  assert_contains "$(printf '%s\n' "$task" | sed -n '/^## Firstmate spec$/,$p')" "## PR plan" \
+    "the grouped brief has no ## PR plan after ## Firstmate spec inside # Task"
+  assert_contains "$task" "{PR_PLAN}" "the grouped brief's PR plan holds no {PR_PLAN} placeholder"
+  assert_contains "$task" "the default is \`PRs: 1\` for the whole job" \
+    "the grouped brief's PR plan lost its guidance line"
+  assert_grep "Ship exactly the pull requests the \`## PR plan\` above names" "$brief" \
+    "the grouped worker is not told to ship exactly the PR plan"
+  assert_grep "Do not split further on your own" "$brief" \
+    "the grouped worker is not told to raise a decision instead of splitting"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plan-single some-proj --mode no-mistakes >/dev/null \
+    || fail "single-item scaffold failed"
+  brief="$home/data/plan-single/brief.md"
+  assert_no_grep "## PR plan" "$brief" "a single-item brief gained a PR plan"
+  assert_no_grep "{PR_PLAN}" "$brief" "a single-item brief gained a PR plan placeholder"
+  pass "fm-brief.sh: only a grouped brief carries the PR plan slot and its worker rule"
+}
+
 test_worker_role_scope
 test_script_parses
 test_ship_and_scout_teach_the_build_mutex
@@ -1399,3 +1429,4 @@ test_ship_and_scout_name_the_repository_on_github_calls
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
+test_grouped_brief_carries_a_pr_plan_slot
