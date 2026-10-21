@@ -413,6 +413,8 @@ test_a_grouped_dispatch_moves_its_members_cards_too() {
   read_case "$rec"
   fm "$HOME_DIR" linear task-lin7 BLU-3268 >/dev/null || fail "could not record the unit's card"
   fm "$HOME_DIR" linear task-lin8 BLU-3270 >/dev/null || fail "could not record the member's card"
+  # A grouped dispatch needs its brief's PR plan (bin/fm-spawn.sh header).
+  printf '\n## PR plan\nPRs: 1\n' >> "$HOME_DIR/data/task-lin7/brief.md"
 
   set +e
   out=$(run_dispatch task-lin7 "$PROJ_DIR" --delivers task-lin8 2>&1)

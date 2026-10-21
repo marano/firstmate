@@ -46,6 +46,19 @@
 #   --relaunch (which carries the record forward), batch dispatch, and a home
 #   without automatic backlog transitions. bin/fm-backlog-transition-lib.sh
 #   MEMBERSHIP owns the contract, including handing a member back.
+#   A --delivers dispatch also needs the brief's `## PR plan` subsection, the
+#   recorded decision of how many pull requests the job ships, and this header
+#   owns its grammar. Blank lines and lines opening with `>` (the scaffold's
+#   guidance) are ignored. The first remaining line is `PRs: <n>`, n a positive
+#   integer, which is the whole plan when n is 1. When n is greater than 1,
+#   exactly n-1 lines `Split: <member-id>[,<member-id>...] - <reason>` follow,
+#   one per additional pull request: each names the members it carries, every
+#   one on this job's Delivers line and on no other Split line, and a non-empty
+#   reason it ships apart (it outgrows one reviewer, or it could need reverting
+#   without the rest). The first pull request carries the unit's own item and
+#   every member no Split line names. A plan that is missing, still holds
+#   {PR_PLAN}, or does not parse refuses before an endpoint or local copy
+#   exists; an accepted one is recorded as pr_plan=<n> beside delivers=.
 #   Where config/grouping is on, a ship dispatch is also guarded against
 #   starting work beside RELATED work: another ready item under the same
 #   repository and group key, a live worker already on that group, planned
@@ -2874,6 +2887,13 @@ if [ "$KIND" = ship ]; then
         exit 1
       fi
     fi
+    # How many pull requests a grouped job ships is decided when its brief is
+    # written, never re-derived by the worker, so the plan must be there and
+    # parse before anything exists (grammar: this file's header).
+    if [ -n "$DELIVERS_ARG" ] && ! fm_brief_pr_plan_check "$BRIEF" "$DELIVERS_ARG"; then
+      echo "error: ${SOURCE_BRIEF:-$BRIEF} delivers several items, but $FM_BRIEF_PR_PLAN_ERROR" >&2
+      exit 1
+    fi
   fi
 
   # The registry holds the captain's standing posture, so dropping below it is
@@ -4541,6 +4561,10 @@ preserve_relaunch_meta() {
   # Not spawn-owned: a relaunch carries the unit's membership forward through
   # preserve_relaunch_meta, and bin/fm-tasks-axi.sh handback rewrites it.
   [ "${#SPAWN_MEMBERS[@]}" -eq 0 ] || echo "delivers=$DELIVERS_ARG"
+  # Written beside it at first dispatch and carried forward the same way: the
+  # pull-request count the brief's ## PR plan committed this job to.
+  [ "${#SPAWN_MEMBERS[@]}" -eq 0 ] || [ -z "${FM_BRIEF_PR_PLAN_COUNT:-}" ] ||
+    echo "pr_plan=$FM_BRIEF_PR_PLAN_COUNT"
   # Not spawn-owned either, and written at first dispatch only: when this task
   # first took its local copy. A relaunch carries it forward, and
   # bin/fm-teardown.sh reads the copy's branch history from it on.

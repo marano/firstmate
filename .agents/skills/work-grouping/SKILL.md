@@ -56,6 +56,11 @@ Judgement stays yours: shared code can see that two items share a key, never
 that they share a contract.
 Two items with one key that would need reverting separately are two chunks.
 
+Decide how many pull requests the chunk ships in the same step, and write it into the brief's `## PR plan` when you scaffold it.
+Count contracts, not tickets: tickets that apply one shared change across many surfaces are one contract, so the default is one pull request for the whole job.
+Each pull request beyond the first needs its reason recorded there - the job outgrows one reviewer, or one part could need reverting without the rest.
+`bin/fm-spawn.sh --help` owns the plan's grammar.
+
 Order chunks that must land in sequence with an ordinary dependency edge between
 their unit rows.
 A blocker only resolves when the blocking work is Done, so when the earlier
@@ -97,9 +102,11 @@ brief scaffolded with the same `--delivers`, so each delivered item's own words
 sit in its own slot: the reviewer treats that subsection as acceptance criteria,
 and a merged paragraph either widens an ask or loses it.
 The dispatch refuses a brief whose recorded membership differs from the
-dispatch's own, and one with a slot still unfilled.
+dispatch's own, one with a slot still unfilled, and one whose `## PR plan` is
+missing, unfilled, or unparseable; the accepted count is recorded on the task.
 
-A worker delivering several items ships one pull request per coherent contract,
-one at a time, and names any item it could not deliver on its own status line;
+A worker delivering several items ships exactly the pull requests its PR plan
+names, one at a time, raises a decision instead of splitting further on its own,
+and names any item it could not deliver on its own status line;
 hand that item back with `bin/fm-tasks-axi.sh handback` before the job's cleanup,
 which otherwise closes it with the job's pull request.

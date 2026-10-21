@@ -203,6 +203,102 @@ fm_brief_delivers_line() {  # <file>
   sed -n 's/^Delivers: \(.*\)$/\1/p' "$1" | head -n 1
 }
 
+# Check a chunk brief's `## PR plan` against the membership it delivers. The
+# grammar is owned by bin/fm-spawn.sh's header, its one caller. On success it
+# sets FM_BRIEF_PR_PLAN_COUNT and returns 0; on a refusal it sets
+# FM_BRIEF_PR_PLAN_ERROR to the rule broken and its fix, and returns 1.
+# shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+fm_brief_pr_plan_check() {  # <file> <delivers-csv>
+  local file=$1 delivers=$2 plan line count='' splits=0 members reason member seen=','
+  local split_members=()
+  # shellcheck disable=SC2016  # the backticks are literal text in the message
+  local fix='write `PRs: 1` for one pull request, or `PRs: <n>` followed by one `Split: <member-id>[,<member-id>...] - <reason>` line per additional pull request'
+  FM_BRIEF_PR_PLAN_COUNT=
+  FM_BRIEF_PR_PLAN_ERROR=
+  if ! fm_brief_task_heading_present "$file" "## PR plan"; then
+    FM_BRIEF_PR_PLAN_ERROR="it has no ## PR plan, and a grouped job's pull-request count is decided before the worker starts; add one under # Task and $fix"
+    return 1
+  fi
+  plan=$(fm_brief_task_heading_body "$file" "## PR plan")
+  case "$plan" in
+    *'{PR_PLAN}'*)
+      FM_BRIEF_PR_PLAN_ERROR="its ## PR plan still holds {PR_PLAN}; count the contracts, not the tickets, and $fix"
+      return 1
+      ;;
+  esac
+  while IFS= read -r line; do
+    # Blank lines and the scaffold's quoted guidance line are not the plan.
+    case "$line" in
+      ''|'>'*) continue ;;
+    esac
+    if [ -z "$count" ]; then
+      case "$line" in
+        'PRs: '*) count=${line#PRs: } ;;
+        *)
+          FM_BRIEF_PR_PLAN_ERROR="its ## PR plan must open with \`PRs: <n>\` but reads '$line'; $fix"
+          return 1
+          ;;
+      esac
+      case "$count" in
+        ''|*[!0-9]*|0*)
+          FM_BRIEF_PR_PLAN_ERROR="its ## PR plan must open with \`PRs: <n>\`, n a positive integer, but reads '$line'; $fix"
+          return 1
+          ;;
+      esac
+      continue
+    fi
+    case "$line" in
+      'Split: '*' - '*) ;;
+      *)
+        FM_BRIEF_PR_PLAN_ERROR="its ## PR plan has a line the plan grammar does not know: '$line'; after \`PRs: <n>\` each line is \`Split: <member-id>[,<member-id>...] - <reason>\`"
+        return 1
+        ;;
+    esac
+    members=${line#Split: }
+    reason=${members#* - }
+    members=${members%% - *}
+    if [ -z "$(printf '%s' "$reason" | tr -d '[:space:]')" ]; then
+      FM_BRIEF_PR_PLAN_ERROR="its ## PR plan splits off $members with no reason; every additional pull request states why it ships apart (it outgrows one reviewer, or it could need reverting without the rest)"
+      return 1
+    fi
+    case "$members" in
+      ''|,*|*,|*,,*|*[!A-Za-z0-9._,-]*)
+        FM_BRIEF_PR_PLAN_ERROR="its ## PR plan has a Split line whose members are not a comma-separated id list: '$line'"
+        return 1
+        ;;
+    esac
+    IFS=, read -r -a split_members <<< "$members"
+    for member in "${split_members[@]}"; do
+      case ",$delivers," in
+        *",$member,"*) ;;
+        *)
+          FM_BRIEF_PR_PLAN_ERROR="its ## PR plan splits off $member, which is not on this job's Delivers line ($delivers); a Split names only delivered members, and the job's own item ships in the first pull request"
+          return 1
+          ;;
+      esac
+      case "$seen" in
+        *",$member,"*)
+          FM_BRIEF_PR_PLAN_ERROR="its ## PR plan puts $member in more than one additional pull request; name each member on one Split line at most"
+          return 1
+          ;;
+      esac
+      seen="$seen$member,"
+    done
+    splits=$((splits + 1))
+  done <<EOF
+$plan
+EOF
+  if [ -z "$count" ]; then
+    FM_BRIEF_PR_PLAN_ERROR="its ## PR plan is empty; $fix"
+    return 1
+  fi
+  if [ "$splits" -ne $((count - 1)) ]; then
+    FM_BRIEF_PR_PLAN_ERROR="its ## PR plan says PRs: $count but has $splits Split line(s); every pull request after the first needs exactly one Split line naming its members and its reason, so write $((count - 1)) or change the count"
+    return 1
+  fi
+  FM_BRIEF_PR_PLAN_COUNT=$count
+}
+
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
 # the next unfenced heading at the same or a higher level; present mode reports
 # whether the heading exists.
@@ -369,17 +465,19 @@ EOF
 }
 
 # The fixed line a chunk brief records its membership on, beside the delivery
-# contract, and the rules a worker delivering several items needs. It sits in
-# the Definition of done rather than under "## Captain's intent", because that
-# subsection states only the asks and the no-mistakes intent overlay copies it
-# verbatim into the published intent.
+# contract, and the rules a worker delivering several items needs, including
+# shipping exactly the brief's `## PR plan` (grammar: bin/fm-spawn.sh header).
+# It sits in the Definition of done rather than under "## Captain's intent",
+# because that subsection states only the asks and the no-mistakes intent
+# overlay copies it verbatim into the published intent.
 fm_dod_delivers_block() {  # <delivers-csv>
   local members=${1-}
   [ -n "$members" ] || return 0
   cat <<EOF
 Delivers: $members
 This job delivers several backlog items as one piece of work, and each item's own ask is a slot under \`## Captain's intent\` above.
-Ship one pull request per coherent contract, not one per item and not one for everything: split when one part could need reverting without the rest, and keep together what one reviewer has to read as a whole.
+Ship exactly the pull requests the \`## PR plan\` above names: the first carries this job's own item and every member no \`Split:\` line names, and each \`Split:\` line is one more pull request holding exactly its members.
+Do not split further on your own: if the work will not fit that plan, append \`needs-decision: {the split you need and why}\` and stop before opening another pull request.
 Ship those pull requests ONE AT A TIME: take a contract to green, report it, and wait for firstmate before starting the next on a branch freshly taken from the updated default branch.
 If you cannot deliver one of the items, do not silently drop it: append one status line naming it, \`working: undelivered=<id> <why>\`, and carry on with the rest. Firstmate returns it to the queue.
 
