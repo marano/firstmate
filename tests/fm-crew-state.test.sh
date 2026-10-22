@@ -1059,6 +1059,22 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+# (d2) A run that finished with outcome passed-with-override (an approved ci
+# step) is done exactly like passed; unknown would keep its lane occupied.
+test_terminal_passed_with_override() {
+  reset_fakes
+  local d; d=$(new_case passed-override)
+  make_repo_on_branch "$d/wt" fm/feat-d2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d2.meta" "window=fm:fm-feat-d2" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d2 | sed 's/^outcome: passed$/outcome: passed-with-override/')"
+  local out; out=$(run_crew_state "$d" feat-d2)
+  assert_contains "$out" "state: done" "passed-with-override run -> done"
+  assert_contains "$out" "source: run-step" "passed-with-override -> run-step source"
+  assert_not_contains "$out" "state: unknown" "passed-with-override must not read as unknown"
+  pass "terminal passed-with-override run is done"
+}
+
 # (d3) A passed run claims its PR merged or closed only on the ci step log's
 # own terminal marker. The 2026-09-18 fm-main-green incident: the NEWEST run
 # passed with its ci step skipped, the PR open and seven checks pending, and
@@ -2982,6 +2998,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_with_override
 test_passed_with_skipped_ci_is_not_reported_merged
 test_passed_ci_ended_without_merge_marker_is_not_reported_merged
 test_passed_with_merge_marker_reports_merged
