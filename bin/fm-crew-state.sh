@@ -53,7 +53,7 @@
 #      the ledger has been asked whether a live sibling run exists.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. A passed run
+#      passed/passed-with-override/checks-passed -> done, failed/cancelled -> failed. A passed run
 #      claims its PR merged or closed only on the ci step log's own terminal
 #      marker (nm_ci_pr_final_state): passed alone also covers a skipped ci
 #      step or one that ended without observing the PR's fate, with the PR
@@ -822,7 +822,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL=$(nm_passed_run_detail) ;;
+        passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(nm_passed_run_detail) ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
