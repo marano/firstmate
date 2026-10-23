@@ -124,6 +124,9 @@ After its one failure notice, each later auto-arm failure continues only while t
 Both participants create the alarm marker exclusively under the auto-arm owner lock, so the alarm is delivered once per episode.
 After it, the Stop auto-arm suppresses further exit-2 continuations and later unhealthy stops are allowed without re-blocking until positive watcher recovery.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+Positive recovery has two proofs: a Stop boundary that finds an identity-matched live watcher with a fresh beacon, or a Stop auto-arm cycle whose own arm reported the watcher it started or attached to verified with a fresh beacon and whose watcher then closed with an actionable reason.
+The second proof resets the episode before translation, so that close is delivered as an ordinary rewake; without it an active fleet's watcher closes on the next event before any Stop boundary sees it alive, and an alarmed episode suppressed every later wake (2026-10-23).
+A verified start followed by a non-actionable close is not recovery, because a watcher that starts and ends empty-handed would otherwise reopen the unbounded continuation loop the budget exists to stop.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 Neither Claude Stop hook ever exits 2 with an empty message, because a continuation with nothing to act on only loops: every continuation names its reason, and a stop that finds a healthy watcher is allowed even when the episode reset cannot take its lock, leaving the reset for the next verified-healthy boundary.
 

@@ -71,7 +71,9 @@
 #     naming why it continues, until the episode's re-block budget
 #     (fm_turnend_block_budget in bin/fm-wake-lib.sh) is spent. The firing that
 #     finds it spent carries the episode's one attended alarm instead, and every
-#     later firing stays silent until positive watcher recovery.
+#     later firing stays silent until positive watcher recovery - which includes
+#     an actionable close of a watcher this cycle's arm verified started or
+#     attached, so the wake it carries is delivered instead of suppressed.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -431,6 +433,35 @@ if [ "$HEALTHY" -eq 1 ]; then
   autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
+fi
+
+# Positive recovery proved by this cycle itself: the arm prints a started or
+# attached line only after it verified a live identity-matched watcher with a
+# fresh beacon, and that watcher then closed with a real wake. In an active
+# fleet the watcher closes on the next event before any Stop boundary can see
+# it alive, so without this reset an alarmed episode would suppress every later
+# wake. A verified start followed by a non-actionable close proves nothing: a
+# watcher that starts and dies empty-handed would otherwise reopen an unbounded
+# continuation loop. The reset retries briefly against the micro-mutex and the
+# budget lock; one that still cannot run leaves the episode, and the alarm
+# check below, for the next verified-healthy boundary.
+arm_verified_watcher() {
+  [ -n "$OUT" ] && grep -Eq '^watcher: (started|attached) pid=[0-9]+ ' "$OUT" 2>/dev/null
+}
+failure_episode_open() {
+  [ -e "$FAILURE_NOTICE" ] || [ -e "$FAILURE_ALARM" ] || [ -e "$STATE/.turnend-claude-blocks" ]
+}
+if [ "$ACTIONABLE" -eq 1 ] && failure_episode_open && arm_verified_watcher; then
+  reset_try=0
+  until fm_autoarm_reset_owned "$STATE" "$MY_GEN"; do
+    if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+      exit 0
+    fi
+    [ "$reset_try" -lt 20 ] || break
+    sleep 0.02
+    reset_try=$((reset_try + 1))
+  done
 fi
 
 # After the synchronous guard has consumed the episode's attended fail-open,
