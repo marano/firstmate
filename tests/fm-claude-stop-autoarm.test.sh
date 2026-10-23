@@ -96,6 +96,15 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    actionable-unverified)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+      ;;
     failed)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -748,14 +757,58 @@ test_post_alarm_actionable_close_is_suppressed() {
   : > "$dir/state/task.meta"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_arm_fixture "$dir" actionable-unverified
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an actionable result with no verified watcher after attended fail-open must not continue"
+  [ -z "$out" ] || fail "post-alarm unverified actionable result produced continuation output: $out"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm unverified actionable result cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm unverified actionable result cleared the attended alarm"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm unverified actionable result must record failed-suppressed"
+  pass "auto-arm: post-alarm actionable outcomes with no verified watcher cannot continue or reset failure state"
+}
+
+# An alarmed episode ends when this hook's own arm verifies a watcher healthy:
+# in an active fleet that watcher closes on the next event before any Stop
+# boundary sees it alive, so the actionable close must itself count as positive
+# recovery and deliver its wake. A watcher that never becomes healthy stays
+# suppressed, and a verified start that closes with nothing proves nothing.
+test_post_alarm_verified_watcher_actionable_close_recovers() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/post-alarm-verified-recovery")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  printf 'session=sess-autoarm\ncount=4\nepoch=10\n' > "$dir/state/.turnend-claude-blocks"
+
+  write_arm_fixture "$dir" failed
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a watcher that never becomes healthy must stay suppressed after the alarm"
+  [ -z "$out" ] || fail "a never-healthy watcher after the alarm produced output: $out"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "a never-healthy watcher cleared the attended alarm"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "a never-healthy watcher after the alarm must record failed-suppressed"
+
+  write_arm_fixture "$dir" benign-live
+  rm -f "$dir/state/.last-watcher-beat"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a cycle with no verified watcher and no wake must stay suppressed after the alarm"
+  [ -z "$out" ] || fail "an empty unverified cycle after the alarm produced output: $out"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "an empty unverified cycle cleared the attended alarm"
+
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "an actionable result after attended fail-open must not continue"
-  [ -z "$out" ] || fail "post-alarm actionable result produced continuation output: $out"
-  assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm actionable result cleared the failure notice"
-  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm actionable result cleared the attended alarm"
-  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm actionable result must record failed-suppressed"
-  pass "auto-arm: post-alarm actionable outcomes cannot continue or reset failure state"
+  expect_code 2 "$status" "an actionable close of a watcher the arm verified healthy must rewake after the alarm"
+  assert_contains "$out" "firstmate watcher wake" "the recovered rewake did not carry the wake banner"
+  assert_contains "$out" "stale: fixture-win actionable" "the recovered rewake did not deliver the wake reason"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "verified recovery left the attended alarm in place"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "verified recovery left the failure notice in place"
+  assert_absent "$dir/state/.turnend-claude-blocks" "verified recovery left the episode's block budget in place"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "verified recovery must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  write_arm_fixture "$dir" failed
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failure after verified recovery must open a fresh episode"
+  assert_contains "$out" "automatic supervision mechanism is broken" "a failure after verified recovery did not deliver a fresh notice"
+  pass "auto-arm: a verified healthy watcher's actionable close ends an alarmed episode and delivers its wake"
 }
 
 test_benign_cycle_end_with_live_watcher_is_silent() {
@@ -1548,6 +1601,7 @@ test_alarm_commit_refuses_an_alarm_already_raised
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
+test_post_alarm_verified_watcher_actionable_close_recovers
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
