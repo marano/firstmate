@@ -76,7 +76,8 @@
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# fm-ensure-agents-md.sh's contract, including which file its result names as
+# the place to record knowledge.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -708,10 +709,11 @@ $INBOX_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Record project knowledge in the file the helper's result names: \`AGENTS.md\` normally, or \`CLAUDE.md\` when it reports that \`AGENTS.md\` is a short pointer deferring to \`CLAUDE.md\`, leaving that pointer as it is.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+Keep it proportionate: skip project-memory edits for trivial tasks that produced no durable project knowledge.
 
 $DOD$ISSUE_LINE
 EOF
