@@ -706,6 +706,8 @@ test_ship_project_memory_wording() {
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "follow \`$ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract" "$brief" \
     "project-memory contract no longer defers to the ensure helper"
+  assert_grep "or \`CLAUDE.md\` when it reports that \`AGENTS.md\` is a short pointer deferring to \`CLAUDE.md\`, leaving that pointer as it is." "$brief" \
+    "project-memory contract lost the reverse-layout record-in-CLAUDE.md instruction"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 

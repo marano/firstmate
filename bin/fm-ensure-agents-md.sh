@@ -23,6 +23,22 @@
 # filesystem (issue #389). The real-file pointer also eliminates the old
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
+# Recognizes one project-chosen reverse layout and leaves it alone: CLAUDE.md
+# is the real rules file and AGENTS.md is a short pointer that defers to it.
+# The test is structural and deterministic, with no prose interpretation; all
+# four must hold, otherwise two real files stay a manual-reconciliation conflict:
+#   1. AGENTS.md is at most REVERSE_POINTER_MAX_BYTES (1024) bytes, because a
+#      pointer is a few sentences (the measured real case is 504 bytes) while a
+#      file that carries its own rules rarely fits;
+#   2. AGENTS.md names the file CLAUDE.md literally, so it points somewhere;
+#   3. CLAUDE.md is strictly larger than AGENTS.md, so the pointer direction is
+#      toward the bigger file rather than between two peers;
+#   4. CLAUDE.md does not import @AGENTS.md, which would make it the deferring
+#      file instead.
+# In that layout the helper edits neither file, injects no self-governance
+# section into the pointer, and reports a non-conflict result naming CLAUDE.md
+# as the file to record project knowledge in. A misread can only redirect where
+# a worker records knowledge, never change a file, because nothing is written.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
@@ -37,6 +53,10 @@ canonical section, use this exact first line of AGENTS.md (LF or CRLF):
 <!-- firstmate:maintained-by-project -->
 The mark declares retained guidance, not permission to remove governance.
 Without the first-line mark or exact canonical heading, the helper adds the section.
+
+A short AGENTS.md pointer that defers to a larger CLAUDE.md rules file is left
+unchanged, and the result names CLAUDE.md as the file to record knowledge in;
+the script header states the exact structural test.
 EOF
 }
 
@@ -55,6 +75,7 @@ cd "$DIR"
 
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md
+REVERSE_POINTER_MAX_BYTES=1024
 
 write_maintenance_section() {
   cat <<'EOF'
@@ -144,6 +165,24 @@ install_claude_pointer() {
   claude_pointer_content > "$CLAUDE"
 }
 
+file_bytes() {
+  local n
+  n=$(wc -c < "$1")
+  printf '%s' "${n//[[:space:]]/}"
+}
+
+# The header owns this criterion and why each clause is there.
+is_reverse_claude_source_layout() {
+  [ -f "$AGENTS" ] && [ ! -L "$AGENTS" ] && [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
+  local agents_bytes claude_bytes
+  agents_bytes=$(file_bytes "$AGENTS")
+  claude_bytes=$(file_bytes "$CLAUDE")
+  [ "$agents_bytes" -le "$REVERSE_POINTER_MAX_BYTES" ] || return 1
+  grep -Fq "$CLAUDE" "$AGENTS" || return 1
+  [ "$claude_bytes" -gt "$agents_bytes" ] || return 1
+  ! grep -Fq "@$AGENTS" "$CLAUDE"
+}
+
 is_correct_claude_symlink() {
   [ -L "$CLAUDE" ] || return 1
   target=$(readlink "$CLAUDE")
@@ -225,6 +264,10 @@ if [ -e "$AGENTS" ]; then
       else
         echo "unchanged: AGENTS.md with CLAUDE.md @AGENTS.md pointer in $DIR"
       fi
+      exit 0
+    fi
+    if is_reverse_claude_source_layout; then
+      echo "unchanged: AGENTS.md is a short pointer deferring to CLAUDE.md in $DIR; record project knowledge in CLAUDE.md and leave AGENTS.md as it is"
       exit 0
     fi
     echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
