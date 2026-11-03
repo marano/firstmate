@@ -1,0 +1,132 @@
+ok - backend resolution preserves unreadable configuration errors for every caller
+ok - backend resolution preserves environment, project, user, and default precedence
+ok - backlog readers and mutations refuse unresolved backends without touching either backlog
+ok - captain hold refuses backend errors and preserves relocated addressing for valid configuration
+ok - dispatch publishes the record and moves the backlog item In flight in one run
+ok - dispatch omits the markdown file when probing a Beads backlog
+ok - a leftover markdown symlink does not brick a Beads home's dispatch
+ok - completion applies and closes a Beads backlog without any markdown file
+ok - dispatch refuses to supersede a pending authoritative close
+ok - dispatch refuses held rows before creating resources
+ok - dispatch refuses dependency-blocked rows before creating resources
+ok - dispatch refuses held In-flight rows before relaunch
+ok - dispatch reads backlog rows from the backlog addressing root
+ok - recovery uses the parent of a trailing-slash data record
+ok - completion targets nested relative data from the caller directory
+ok - an immediate-child absolute data path keeps one paired backlog
+ok - bare relative data addresses one backlog through dispatch and completion
+ok - dispatch refuses symlinked backlogs without crossing homes
+ok - automatic homes refuse lifecycle mutation without compatible tasks-axi
+ok - dispatch refuses an unresolvable backlog data directory
+ok - completion refuses before mutation when backlog data is unresolvable
+ok - dispatch refuses, before creating anything, when the home has no item for the id
+ok - dispatch distinguishes backlog read failures from missing items
+ok - dispatch refuses a closed item instead of silently reopening it
+ok - dispatch cannot commit without a verified task-record publication
+ok - a failed backlog transition fails the dispatch loudly and leaves no record
+ok - dispatch reports when failed-transition rollback cannot remove its record
+ok - dispatch verifies both task and busy records during rollback
+ok - dispatch commits neither record nor backlog state before launch delivery succeeds
+ok - dispatch retries interrupted transitions before honoring termination
+ok - a signal-deferred spawn verifies its preserved state and repairs a row that did not move
+ok - a signal-deferred spawn reports attempted preservation as attempted when it cannot be verified
+ok - a signal-deferred spawn bounds its verification so an unresponsive tasks-axi cannot hold the meta lock forever
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: dirname: command not found
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: {run-worktree}/fm-timeout-lib.sh: No such file or directory
+ok - fm_tasks_axi bounds the call through its perl watchdog when no timeout binary exists
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: dirname: command not found
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: {run-worktree}/fm-timeout-lib.sh: No such file or directory
+ok - fm_tasks_axi's perl watchdog passes the child status and output through unchanged
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: dirname: command not found
+{run-worktree}/bin/fm-backlog-transition-lib.sh: line 87: {run-worktree}/fm-timeout-lib.sh: No such file or directory
+ok - fm_tasks_axi fails closed rather than running unbounded when no bounding mechanism exists
+ok - fm_tasks_axi's GNU timeout forces termination (skipped: no timeout binary on this host)
+ok - Kimi readiness interruptions fail before backlog commit
+ok - dispatch does not resurrect a row closed after preflight
+ok - dispatch fails when its backlog row vanishes after preflight
+ok - completion closes a local-only ship, with its landing note, before reporting success
+ok - completion closes a scout item against its report
+ok - completion leaves legacy records open when no incarnation can be recorded
+ok - completion refuses ambiguous task incarnations
+ok - completion records relocated scout reports relative to the backlog root
+ok - space-containing scout report paths round-trip through recovery
+ok - control-byte data paths fail closed before paired transitions
+ok - unreplayable data paths are refused before destructive cleanup
+ok - completion preserves recovery state when task-record removal fails
+ok - completion refuses to report success while its item is still open, and records what it owes
+ok - restart recovers closes recorded before destructive cleanup
+ok - completion refuses directory-symlink close targets
+ok - completion reports failure until its durable close marker is removed
+ok - session start retries a close whose marker could not be removed
+ok - session start reports owned backlog rows it cannot read
+ok - Orca cleanup recovery is excluded from backlog lifecycle transitions
+ok - session start marks an item In flight when this home already owns a worker for it
+ok - session start rejects internal worker-record symlinks
+ok - session start rejects symlinked worker records
+ok - session start finishes a close an interrupted cleanup recorded but never landed
+ok - recovery backfills recorded links onto already Done items
+ok - session start preserves a pending close across a transient backlog read failure
+ok - recovery preserves incomplete-cleanup evidence across a failed replay
+ok - session start finishes a close for the matching meta incarnation
+ok - recovery preserves closes for ambiguous task incarnations
+ok - recovery preserves both records when meta removal fails
+ok - recovery preserves closes beside symlinked metadata
+ok - recovery binds close-marker identity to its locked filename
+ok - recovery rejects close markers targeting another home's data
+ok - recovery validates an unterminated final marker field
+ok - recovery rejects lexical traversal before resolving marker data
+ok - recovery rejects marker control bytes before parsing
+ok - recovery rejects malformed PR URL values
+ok - a retained pending close is never started by reconciliation
+ok - recovery rejects close-marker arguments outside its protocol
+ok - recovery reports and rejects dangling symlink close markers
+ok - session start drops a close recorded for an older meta incarnation
+ok - session start rejects an unversioned close marker
+ok - bootstrap rechecks worker-record containment after locking
+ok - lifecycle files reject ancestor symlinks outside home roots
+ok - same-home state overrides remain supported
+ok - bootstrap refuses symlinked state before reconciliation
+ok - bootstrap data-disappears fault injection is PATH-based; skipped on Darwin where stat is /usr/bin/stat
+ok - bootstrap preserves secondmate, manual, and absent-backlog exemptions
+ok - session start leaves a captain-held item where the captain put it
+ok - no-backlog teardown refuses symlinked records before resource actions
+ok - teardown rechecks record parents after locking
+ok - teardown refuses symlinked state before resource actions
+ok - a home with no backlog remains exempt from lifecycle transitions
+ok - spawn refuses a special-file tasks-axi config instead of blocking on it
+ok - spawn refuses an unsafe tasks-axi config before any exemption is derived from it
+ok - spawn refuses a data directory symlinked outside the home
+ok - a configured adapter refuses a data directory outside the home
+ok - dispatch and completion transition structurally with evidence
+ok - refused teardown leaves the backlog item in flight
+ok - environment-selected adapters bypass the legacy markdown file override
+ok - a manual-backlog home dispatches and completes without a hard failure
+ok - a secondmate home keeps its own books paired through dispatch and completion
+ok - dispatching a persistent secondmate needs no backlog item
+ok - grouped dispatch records its members and takes them out of the ready count
+ok - a first dispatch records when the task took its local copy
+ok - a planned chunk dispatches through --delivers and closes every member with the job's link
+ok - a card-named grouped dispatch warns about its name, and a group-named one does not
+ok - a dispatch beside a ready sibling is refused, and delivering it in the same job resolves that
+ok - a dispatch beside a live worker on the same group is refused, naming the worker to hand it to
+ok - a dispatch apart records its reason on the task and on the item
+ok - a dispatch below the standing merge authority records its reason on the task and on the item
+ok - a planned chunk cannot launch while leaving one of its own members behind
+ok - the warn posture reports the same findings and lets the dispatch through
+ok - a home with no grouping posture dispatches exactly as before
+ok - a malformed grouping posture refuses a dispatch instead of defaulting to off
+ok - a chunk brief must carry a filled slot per member and the membership the dispatch names
+ok - a grouped dispatch needs a filled, parseable PR plan and records the count it accepted
+ok - grouped dispatch refuses a member it cannot deliver before creating anything
+ok - a landed grouped dispatch closes every member it delivered, with its PR
+ok - a member handed back stays queued with its reason while the rest close
+ok - handback refuses an item the unit does not deliver
+ok - session start finishes an interrupted grouped close for every member
+ok - an ordinary single-item dispatch and its close are unchanged
+ok - spawn refuses a harness whose command is missing, before creating anything
+ok - cleanup of a task nothing shows was started requeues it instead of closing it
+ok - cleanup of an unstarted grouped dispatch requeues the unit and every member
+ok - cleanup's requeue reopens every requeued item's GitHub issue, and a failure never fails the cleanup
+ok - cleanup's ordinary close leaves the GitHub issue to the merge that closes it
+ok - session start finishes an interrupted requeue without closing the item
+exit 0
