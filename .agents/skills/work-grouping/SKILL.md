@@ -67,6 +67,9 @@ A blocker only resolves when the blocking work is Done, so when the earlier
 chunk has frozen the contract the later one needs, release it yourself with
 `tasks-axi unblock` rather than waiting for the merge.
 
+Name the unit after what the whole job delivers - the group or the contract - never after one of its cards.
+The unit's id is its worker's name for the worker's whole life, so a name taken from one card stops describing the job once that card ships; `bin/fm-spawn.sh --delivers` warns when it sees one.
+
 ## Before dispatching beside related work, join
 
 When a sibling becomes ready while a worker is already running that group, hand
@@ -77,6 +80,9 @@ in the brief, and tell the worker.
 A second worker on the same group in the same repository is the exact miss this
 contract exists to prevent - it duplicates context, and the two workers rebase
 over each other.
+
+`join` refuses when the unit is named after its own card and the item is a different card or none, because the worker's name would stop describing its job.
+Dispatch that item as its own worker under its own name, or re-run with `--keep-name-reason "<one line>"` when keeping the name is genuinely right; the reason is recorded on the unit's item like an apart reason.
 
 ## When the dispatch refuses
 

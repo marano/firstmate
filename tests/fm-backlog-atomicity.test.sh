@@ -3110,6 +3110,39 @@ test_grouped_dispatch_records_members_and_moves_them_in_flight() {
   pass "grouped dispatch records its members and takes them out of the ready count"
 }
 
+# A grouped dispatch's id is its worker's name for the whole job, so an id named
+# after one delivered card warns that the name will stop describing the job once
+# that card ships; a group-named id stays quiet. A warning, never a refusal.
+test_a_card_named_grouped_dispatch_warns_and_a_group_named_one_does_not() {
+  local case_dir unit out
+  unit=abc-101-team-column
+  case_dir=$(make_home naming-card "$unit")
+  add_item "$case_dir" "$unit"
+  add_item "$case_dir" naming-member-n1
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" linear "$unit" ABC-101 >/dev/null \
+    || fail "fixture: could not record the unit's card"
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers naming-member-n1) || fail "a card-named grouped dispatch was refused: $out"
+  # Mutant: never call the naming warning from the dispatch path.
+  assert_contains "$out" "naming: warning: $unit is named after card ABC-101" \
+    "a card-named grouped dispatch did not warn"
+  assert_contains "$out" "naming-member-n1" "the warning did not name the other delivered item"
+
+  unit=team-columns
+  case_dir=$(make_home naming-group "$unit")
+  add_item "$case_dir" "$unit"
+  add_item "$case_dir" naming-member-n2
+  FM_HOME="$(home_of "$case_dir")" "$ROOT/bin/fm-tasks-axi.sh" linear naming-member-n2 ABC-102 >/dev/null \
+    || fail "fixture: could not record the member's card"
+  plan_brief "$case_dir" "$unit" 'PRs: 1'
+  out=$(run_spawn "$case_dir" "$unit" "$case_dir/project" --mode no-mistakes --yolo off \
+    --delivers naming-member-n2) || fail "a group-named grouped dispatch was refused: $out"
+  # Mutant: warn on every grouped dispatch that delivers a card.
+  assert_not_contains "$out" "naming:" "a group-named grouped dispatch warned about its name"
+  pass "a card-named grouped dispatch warns about its name, and a group-named one does not"
+}
+
 # Cleanup reads the branches a task checked out in its copy from this moment on
 # (bin/fm-teardown.sh), so a first dispatch records it, taken before the copy is
 # prepared; a relaunch carries it forward (tests/fm-control-relaunch.test.sh).
@@ -3937,6 +3970,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item
 test_grouped_dispatch_records_members_and_moves_them_in_flight
 test_a_first_dispatch_records_when_it_took_its_copy
 test_a_chunk_dispatches_and_closes_through_delivers
+test_a_card_named_grouped_dispatch_warns_and_a_group_named_one_does_not
 test_enforce_refuses_a_lone_dispatch_beside_a_ready_sibling
 test_enforce_refuses_a_second_worker_beside_a_live_sibling
 test_an_apart_reason_is_recorded_in_the_record_and_the_backlog

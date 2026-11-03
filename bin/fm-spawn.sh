@@ -46,6 +46,12 @@
 #   --relaunch (which carries the record forward), batch dispatch, and a home
 #   without automatic backlog transitions. bin/fm-backlog-transition-lib.sh
 #   MEMBERSHIP owns the contract, including handing a member back.
+#   The unit's id is the worker's name for its whole life, so a grouped
+#   dispatch whose id is named after one delivered item's recorded card
+#   (bin/fm-linear-lib.sh's fm_linear_id_names_card) prints a `naming:` warning
+#   that the name will stop describing the job once that card ships, suggesting
+#   a group or contract name; it warns rather than refuses, because the name is
+#   still accurate at dispatch and only `join` changes a live job's scope.
 #   A --delivers dispatch also needs the brief's `## PR plan` subsection, the
 #   recorded decision of how many pull requests the job ships, and this header
 #   owns its grammar. Blank lines and lines opening with `>` (the scaffold's
@@ -3240,6 +3246,39 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# A grouped dispatch's id names its worker for the whole job, so an id named
+# after ONE delivered card stops describing the job once that card ships. This
+# only warns: the name is still true at dispatch, and a wrong guess about a
+# card read must never block a launch, so a read that cannot answer says so and
+# moves on.
+spawn_naming_warning() {
+  local item status
+  [ "$KIND" = ship ] || return 0
+  [ "$RELAUNCH" -eq 0 ] || return 0
+  [ "${#SPAWN_MEMBERS[@]}" -gt 0 ] || return 0
+  for item in "$ID" "${SPAWN_MEMBERS[@]}"; do
+    fm_linear_card_of_row "$DATA" "$item"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      printf 'naming: cannot tell whether %s is named after %s'"'"'s card: %s\n' "$ID" "$item" "$FM_LINEAR_ERROR" >&2
+      continue
+    fi
+    fm_linear_id_names_card "$ID" "$FM_LINEAR_CARD" || continue
+    printf 'naming: warning: %s is named after card %s, but this job also delivers %s; the worker'"'"'s name will stop describing its job once %s ships, so prefer the group'"'"'s or contract'"'"'s name\n' \
+      "$ID" "$FM_LINEAR_CARD" "$(spawn_naming_others "$item")" "$FM_LINEAR_CARD" >&2
+    return 0
+  done
+}
+
+spawn_naming_others() {  # <item named in the id>; the other delivered items, comma-separated
+  local named=$1 item out=''
+  for item in "$ID" "${SPAWN_MEMBERS[@]}"; do
+    [ "$item" != "$named" ] || continue
+    out="${out:+$out,}$item"
+  done
+  printf '%s' "$out"
+}
+
 # THE GROUPING GUARD at this entry point. Every worker starts through one of two
 # commands - this one and bin/fm-promote.sh - which is why the guard lives at
 # both and nowhere else: a rule re-made from memory at each dispatch, under a
@@ -3302,6 +3341,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       exit 1
     fi
   done
+  spawn_naming_warning
   spawn_grouping_guard || exit 1
 else
   BACKLOG_GATE_STATUS=$?
