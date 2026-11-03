@@ -789,7 +789,11 @@ join_verb() {  # <unit> <member> [<keep-name-reason>]
     || verb_fail 1 "$member is in ${member_repo:-no repository}, and $unit is in $repo, so it is not this job's sibling"
   [ "$member_key" = "$key" ] \
     || verb_fail 1 "$member carries ${member_key:-no group key}, and $unit carries $key, so it is not this job's sibling"
-  join_name_check "$unit" "$member" "$keep_name_reason"
+  fm_backlog_members_of_meta "$meta" "$unit" || verb_fail 1 "$FM_BACKLOG_TRANSITION_ERROR"
+  case ",$(IFS=,; echo "${FM_BACKLOG_TRANSITION_MEMBERS[*]+"${FM_BACKLOG_TRANSITION_MEMBERS[*]}"}")," in
+    *,"$member",*) ;;
+    *) join_name_check "$unit" "$member" "$keep_name_reason" ;;
+  esac
 
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   STATE=$GROUPING_STATE . "$SCRIPT_DIR/fm-wake-lib.sh"
