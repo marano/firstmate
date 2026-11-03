@@ -46,6 +46,7 @@
 #   fm_linear_identifier_valid <value>      - is this a Linear issue identifier
 #   fm_linear_card_of_body <body>           - the card a decoded body carries
 #   fm_linear_card_of_row <data> <id>       - the card a backlog item carries
+#   fm_linear_id_names_card <id> <card>     - is this task id named after that card
 #   fm_linear_api_key <home>                - the resolved key, in FM_LINEAR_KEY
 #   fm_linear_request <home> <query> <vars> - one bounded GraphQL call
 #   fm_linear_board_advance <home> <data> <phase> <id>... - the entry point
@@ -152,6 +153,22 @@ fm_linear_card_of_row() {  # <data-dir> <id>
     return 1
   fi
   FM_LINEAR_CARD=$card
+}
+
+# Is task <id> named after <card>? A task id is the worker's name for its whole
+# life, and an id that opens with one card's identifier (lowercased, then the
+# end of the id or a hyphen) says the worker is doing that one card. The match
+# is against a card actually recorded on an item, never a key pattern, so a
+# unit named after a group or contract never matches. bin/fm-tasks-axi.sh's
+# `join` refuses on it and bin/fm-spawn.sh warns on it.
+fm_linear_id_names_card() {  # <id> <card>
+  local id=${1-} card=${2-} lowered
+  [ -n "$id" ] && [ -n "$card" ] || return 1
+  lowered=$(printf '%s' "$card" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$id" in
+    "$lowered" | "$lowered"-*) return 0 ;;
+  esac
+  return 1
 }
 
 # The home's Linear API key, in FM_LINEAR_KEY. The environment wins over the

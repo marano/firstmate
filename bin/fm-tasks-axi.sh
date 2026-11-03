@@ -92,7 +92,7 @@
 #   chunk --dissolve <unit>
 #                 the reverse, for a unit no worker holds: release each planned
 #                 member and drop the plan line, leaving both rows in place.
-#   join <unit> <id>
+#   join <unit> <id> [--keep-name-reason "<one line>"]
 #                 the inverse of handback: hand a newly ready sibling to the
 #                 worker already running <unit>. Under <unit>'s record lock it
 #                 moves the row In flight first and then records the member, so
@@ -100,6 +100,16 @@
 #                 recorded for a close it never earned. It refuses an item that
 #                 is not this unit's sibling - a different repository or key -
 #                 and prints the two follow-ups firstmate owes afterwards.
+#                 The unit's id is its worker's name for the worker's whole
+#                 life, so it also refuses when the unit is named after its own
+#                 recorded card (the `linear` card opens its id) and <id> is a
+#                 different card or none: that name would stop describing the
+#                 job once the first card ships. The refusal names both cards
+#                 and prints the two resolutions - dispatch <id> as its own
+#                 worker, or re-run with --keep-name-reason, which is appended
+#                 to the unit's item as `Kept its name to deliver <id>: <reason>`
+#                 before anything moves. A unit named after a group or contract,
+#                 or carrying no card, is never refused on its name.
 #   plan          read-only: the ready ship items this home has not planned into
 #                 a chunk, one `<repo> <key> <id>` line each, so planning can
 #                 start from what is actually unplanned.
@@ -703,11 +713,48 @@ MEMBERS
   printf 'ok: chunk --dissolve %s released %s\n' "$unit" "$plan"
 }
 
-join_verb() {  # <unit> <member>
-  local unit=$1 member=$2 meta lock status kind repo key member_repo member_key
+# A worker's task id is its name for its whole life, so a unit named after ONE
+# tracker card stops describing its job the moment it takes a different card.
+# The unit is "named after its card" when the card recorded on its own row
+# (`linear`) opens its id (bin/fm-linear-lib.sh's fm_linear_id_names_card); a
+# unit named after a group or contract, or carrying no card, is never refused.
+# A member carrying a different card, or none, is refused unless the caller
+# recorded why the name stays, which sets JOIN_KEPT_NAME_LINE for the unit's row.
+JOIN_KEPT_NAME_LINE=
+join_name_check() {  # <unit> <member> <keep-name-reason>
+  local unit=$1 member=$2 reason=$3 status unit_card member_card
+  JOIN_KEPT_NAME_LINE=
+  fm_linear_card_of_row "$DATA" "$unit"
+  status=$?
+  [ "$status" -eq 0 ] || verb_fail "$([ "$status" -eq 3 ] && echo 3 || echo 1)" "cannot tell what card $unit is named after: $FM_LINEAR_ERROR"
+  unit_card=$FM_LINEAR_CARD
+  fm_linear_id_names_card "$unit" "$unit_card" || return 0
+  fm_linear_card_of_row "$DATA" "$member"
+  status=$?
+  [ "$status" -eq 0 ] || verb_fail "$([ "$status" -eq 3 ] && echo 3 || echo 1)" "cannot tell what card $member tracks: $FM_LINEAR_ERROR"
+  member_card=$FM_LINEAR_CARD
+  [ "$member_card" != "$unit_card" ] || return 0
+  if [ -n "$reason" ]; then
+    printf 'join: %s keeps its name on the recorded reason: %s\n' "$unit" "$reason" >&2
+    JOIN_KEPT_NAME_LINE="Kept its name to deliver $member: $reason"
+    return 0
+  fi
+  local member_says="tracked by no card"
+  [ -z "$member_card" ] || member_says="card $member_card"
+  {
+    printf 'fm-tasks-axi: %s is named after card %s, and %s is %s, so the worker'"'"'s name would stop describing its job once %s ships\n' \
+      "$unit" "$unit_card" "$member" "$member_says" "$unit_card"
+    printf 'resolve: dispatch %s as its own worker under its own name\n' "$member"
+    printf 'resolve: or keep the name on a recorded reason: fm-tasks-axi.sh join %s %s --keep-name-reason "<one line>"\n' "$unit" "$member"
+  } >&2
+  exit 1
+}
+
+join_verb() {  # <unit> <member> [<keep-name-reason>]
+  local unit=$1 member=$2 keep_name_reason=${3-} meta lock status kind repo key member_repo member_key
   local recorded=0 m tmp kept=''
   if ! grouping_id_valid "$unit" || ! grouping_id_valid "$member"; then
-    fail "usage: fm-tasks-axi.sh join <unit> <id>"
+    fail "usage: fm-tasks-axi.sh join <unit> <id> [--keep-name-reason \"<one line>\"]"
   fi
   [ "$unit" != "$member" ] || verb_fail 1 "a unit cannot join itself"
   meta="$GROUPING_STATE/$unit.meta"
@@ -742,6 +789,7 @@ join_verb() {  # <unit> <member>
     || verb_fail 1 "$member is in ${member_repo:-no repository}, and $unit is in $repo, so it is not this job's sibling"
   [ "$member_key" = "$key" ] \
     || verb_fail 1 "$member carries ${member_key:-no group key}, and $unit carries $key, so it is not this job's sibling"
+  join_name_check "$unit" "$member" "$keep_name_reason"
 
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   STATE=$GROUPING_STATE . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -763,6 +811,11 @@ join_verb() {  # <unit> <member>
     fm_lock_release "$lock"
     printf 'ok: join %s already delivers %s\n' "$unit" "$member"
     return 0
+  fi
+  if [ -n "$JOIN_KEPT_NAME_LINE" ] \
+    && ! fm_backlog_body_append_line "$DATA" "$unit" "$JOIN_KEPT_NAME_LINE"; then
+    fm_lock_release "$lock"
+    verb_fail 1 "the reason $unit keeps its name could not be recorded on its item (${FM_BACKLOG_TRANSITION_ERROR:-write failed}), so nothing was joined; re-run this join"
   fi
 
   # The row moves In flight first. An interruption then leaves a row In flight
@@ -927,8 +980,16 @@ case "${ARGS[0]:-}" in
     exit 0
     ;;
   join)
-    [ "${#ARGS[@]}" -eq 3 ] || fail "usage: fm-tasks-axi.sh join <unit> <id>"
-    join_verb "${ARGS[1]}" "${ARGS[2]}"
+    JOIN_USAGE='usage: fm-tasks-axi.sh join <unit> <id> [--keep-name-reason "<one line>"]'
+    if [ "${#ARGS[@]}" -eq 3 ]; then
+      join_verb "${ARGS[1]}" "${ARGS[2]}"
+    elif [ "${#ARGS[@]}" -eq 5 ] && [ "${ARGS[3]}" = --keep-name-reason ]; then
+      [ -n "${ARGS[4]}" ] || fail "join: --keep-name-reason requires a non-empty value"
+      case "${ARGS[4]}" in *$'\n'*|*$'\r'*) fail "join: --keep-name-reason must be one line" ;; esac
+      join_verb "${ARGS[1]}" "${ARGS[2]}" "${ARGS[4]}"
+    else
+      fail "$JOIN_USAGE"
+    fi
     exit 0
     ;;
   plan)

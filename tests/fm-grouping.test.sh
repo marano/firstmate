@@ -28,7 +28,13 @@
 #   - join records a member only after its row moved ("record first, then row"),
 #     refuses an unrelated item and a unit with a pending close, and resumes a
 #     row an interrupted join already moved ("reuse the dispatchable check
-#     alone", which refuses that retry).
+#     alone", which refuses that retry);
+#   - join refuses a unit named after its own recorded card taking a different
+#     card or none, naming both cards and both resolutions ("drop the name
+#     check", "compare the member's card to nothing"); --keep-name-reason lets
+#     it through and records the reason on the unit's item ("accept the reason
+#     without recording it"); a group-named unit and a unit with no recorded
+#     card join freely ("match a hard-coded card-key pattern in the id").
 # The single-quoted with_lib snippets are deliberate: the helper evaluates them
 # in a subshell where DATA, STATE, CONFIG and the FM_GROUPING_* globals exist.
 # shellcheck disable=SC2016
@@ -473,6 +479,80 @@ test_an_interrupted_join_leaves_a_visible_orphan_not_a_silent_member() {
   pass "an interrupted join converges on a re-run, and never records a member before its row moves"
 }
 
+# A live unit plus a keyed sibling, each optionally carrying a recorded card.
+name_fixture() {  # <home-name> <unit> <unit-card|-> <member> <member-card|->
+  local home
+  home=$(make_home "$1")
+  add_item "$home" "$2" app-web
+  add_item "$home" "$4" app-web
+  fm "$home" group "$2" team-columns >/dev/null
+  fm "$home" group "$4" team-columns >/dev/null
+  [ "$3" = - ] || fm "$home" linear "$2" "$3" >/dev/null || fail "fixture: could not record $3"
+  [ "$5" = - ] || fm "$home" linear "$4" "$5" >/dev/null || fail "fixture: could not record $5"
+  fm "$home" start "$2" >/dev/null || fail "fixture: could not move $2 In flight"
+  write_record "$home" "$2"
+  printf '%s\n' "$home"
+}
+
+test_join_refuses_a_unit_named_after_another_card() {
+  local home out rc before
+  home=$(name_fixture join-name-other-card abc-101-x ABC-101 abc-102-y ABC-102)
+  before=$(cat "$home/state/abc-101-x.meta")
+  set +e
+  out=$(fm "$home" join abc-101-x abc-102-y 2>&1); rc=$?
+  set -e
+  # Mutant: drop the name check from join_verb.
+  [ "$rc" -ne 0 ] || fail "join handed card ABC-102 to a worker named after ABC-101: $out"
+  assert_contains "$out" "ABC-101" "the refusal did not name the unit's card"
+  assert_contains "$out" "ABC-102" "the refusal did not name the member's card"
+  assert_contains "$out" "own worker" "the refusal did not offer a separate dispatch"
+  assert_contains "$out" "--keep-name-reason" "the refusal did not offer the recorded override"
+  [ "$(cat "$home/state/abc-101-x.meta")" = "$before" ] || fail "the refused join changed the record"
+  [ "$(fm "$home" show abc-102-y | sed -n 's/^  state: //p')" = queued ] \
+    || fail "the refused join moved the member's row"
+
+  # Mutant: compare the member's card only when it has one.
+  home=$(name_fixture join-name-no-card abc-101-x ABC-101 abc-103-z -)
+  set +e
+  out=$(fm "$home" join abc-101-x abc-103-z 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "join handed an untracked item to a worker named after ABC-101: $out"
+  assert_contains "$out" "tracked by no card" "the refusal did not say the member has no card"
+  pass "join refuses a unit named after its own card taking a different card or none"
+}
+
+test_join_keep_name_reason_records_and_succeeds() {
+  local home out
+  home=$(name_fixture join-name-kept abc-101-x ABC-101 abc-102-y ABC-102)
+  out=$(fm "$home" join abc-101-x abc-102-y --keep-name-reason "follow-up fix to the same column" 2>&1) \
+    || fail "the recorded override was refused: $out"
+  assert_contains "$(cat "$home/state/abc-101-x.meta")" "delivers=abc-102-y" \
+    "the override did not record the member"
+  # Mutant: accept the reason without appending it to the unit's item.
+  assert_contains "$(fm "$home" body abc-101-x)" \
+    "Kept its name to deliver abc-102-y: follow-up fix to the same column" \
+    "the override's reason was not recorded on the unit's item"
+  pass "join --keep-name-reason records its reason on the unit's item and joins"
+}
+
+test_join_ignores_names_without_a_recorded_card_prefix() {
+  local home out
+  # A unit named after its group, even though it carries a card of its own.
+  home=$(name_fixture join-name-group team-columns ABC-101 abc-102-y ABC-102)
+  out=$(fm "$home" join team-columns abc-102-y 2>&1) \
+    || fail "a group-named unit was refused: $out"
+  assert_contains "$(cat "$home/state/team-columns.meta")" "delivers=abc-102-y" \
+    "the group-named unit did not record the member"
+
+  # Mutant: match a card-key shape in the id instead of the recorded card.
+  home=$(name_fixture join-name-unlinked abc-101-x - abc-102-y ABC-102)
+  out=$(fm "$home" join abc-101-x abc-102-y 2>&1) \
+    || fail "a unit with no recorded card was refused on its name: $out"
+  assert_contains "$(cat "$home/state/abc-101-x.meta")" "delivers=abc-102-y" \
+    "the unlinked unit did not record the member"
+  pass "join leaves a group-named unit and a unit with no recorded card alone"
+}
+
 test_a_malformed_grouping_posture_is_refused_not_defaulted
 test_grouping_is_inert_when_unconfigured
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
@@ -490,6 +570,9 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_join_refuses_an_unrelated_item
   test_join_refuses_a_unit_with_a_pending_close
   test_an_interrupted_join_leaves_a_visible_orphan_not_a_silent_member
+  test_join_refuses_a_unit_named_after_another_card
+  test_join_keep_name_reason_records_and_succeeds
+  test_join_ignores_names_without_a_recorded_card_prefix
 else
   echo "skip: tasks-axi not found; the backlog grouping cases were not run"
 fi
