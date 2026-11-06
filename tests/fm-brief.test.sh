@@ -1351,6 +1351,9 @@ test_ship_and_scout_teach_the_build_mutex() {
       "$kind brief did not forbid leaving the line by running unlocked"
     assert_grep 'stands down by itself on CI' "$brief" \
       "$kind brief did not say the mutex stands down on CI without the worker reasoning about it"
+    # Mutant: drop the sizing line - a worker then reads a smaller pool as a fault to undo.
+    assert_grep "sizes a vitest run's workers to this machine's memory" "$brief" \
+      "$kind brief did not say the mutex sizes a vitest run's workers"
     assert_grep 'bin/fm-build-lock.sh' "$brief" \
       "$kind brief did not point at the contract owner for the mutex"
   done

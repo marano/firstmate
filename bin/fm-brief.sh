@@ -491,6 +491,8 @@ IFS= read -r -d '' MUTEX_RULE <<EOF || true
    and \`$FM_ROOT/bin/fm-build-lock.sh\`'s header owns which those are and why.
    A queued \`mutex\` hold is a wait like any other: declare it under rule 4 before you block on it.
    However long it lasts, never run the command without \`mutex\` to get out of the line.
+   \`mutex\` sizes a vitest run's workers to this machine's memory; pass a worker count yourself
+   only when the run itself needs a particular one.
    \`mutex\` stands down by itself on CI, so never reason about whether you are on a runner.
    If \`mutex\` is not on PATH, run \`$FM_ROOT/bin/fm-build-lock.sh\` directly; its \`--help\` owns
    the contract.
