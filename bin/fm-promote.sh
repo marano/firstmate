@@ -324,6 +324,12 @@ if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE";
   exit 1
 fi
 TMP=
+# The backlog row carries its own kind, written when the scout was filed. Left as
+# scout, the merged PR this task later delivers would be read as a scout row and
+# kept out of Recently Landed, so the row follows the task record to ship.
+if ! fm_backlog_mutate "$DATA" update "$ID" --kind ship; then
+  echo "warning: $ID was promoted, but its backlog row kind could not be set to ship (${FM_BACKLOG_TRANSITION_ERROR:-write failed}); set it with bin/fm-tasks-axi.sh update $ID --kind ship" >&2
+fi
 if [ "$APART_REASON_SET" -eq 1 ] \
   && ! fm_backlog_body_append_line "$DATA" "$ID" "Dispatched apart: $APART_REASON"; then
   echo "warning: $ID was promoted, but its apart reason could not be appended to the item (${FM_BACKLOG_TRANSITION_ERROR:-write failed}); the record still carries it" >&2

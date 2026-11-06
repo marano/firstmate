@@ -1170,6 +1170,30 @@ test_queued_item_prose_never_hides_it() {
 # due; deferral wording in the reason changes nothing, because only structured
 # fields classify; and Recently Landed applies the shared delivery selector to
 # Done rows.
+test_promoted_scout_row_with_merged_pr_is_landed() {
+  local home fakebin json
+  home=$(make_home promoted-scout)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] promoted-row - Promoted then merged https://example.com/o/r/pull/11 (repo: firstmate) (kind: scout) (merged 2026-07-10)
+- [x] reportless-scout - Scout closed without a report (repo: firstmate) (kind: scout) (done 2026-07-09)
+- [x] shipped-work - Ordinary landed work https://example.com/o/r/pull/12 (repo: firstmate) (kind: ship) (merged 2026-07-08)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json --all-landed)
+  printf '%s' "$json" | jq -e '
+    (.landed | any(.[]; .id == "promoted-row" and .artifact == "https://example.com/o/r/pull/11"))
+      and (.landed | any(.[]; .id == "shipped-work"))
+      and (.landed | any(.[]; .id == "reportless-scout") | not)
+  ' >/dev/null || fail "a scout-kind row with a merged PR must be landed with its PR: $json"
+  pass "a promoted scout row that still records kind scout lands with its merged PR"
+}
+
 test_collapsed_captain_call_deferral_and_landed() {
   local home fakebin json
   home=$(make_home collapsed-call)
@@ -1755,10 +1779,10 @@ EOF
   # row, so this exclusion assertion fails when the selector fix is absent.
   printf '%s' "$json" | jq -e '.landed | any(.id == "done-pr-nondelivery") | not' >/dev/null \
     || failures="${failures}non-merged PR row was listed; "
-  # At the base commit a scout can fall through to its pull request, so this
-  # exclusion assertion fails when report ownership is not enforced.
-  printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report") | not' >/dev/null \
-    || failures="${failures}reportless scout PR was listed; "
+  # A scout row carrying a merged PR is a promoted scout whose row kept its old
+  # kind; the merged PR is its delivery and must be listed with that PR.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report" and .artifact == "https://github.com/o/r/pull/6")' >/dev/null \
+    || failures="${failures}promoted scout merged PR was not listed; "
   # At the base commit a ship can fall through to a report path, so this
   # exclusion assertion fails when artifact-kind ownership is not enforced.
   printf '%s' "$json" | jq -e '.landed | any(.id == "ship-reported-path") | not' >/dev/null \
@@ -3461,6 +3485,7 @@ test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
+test_promoted_scout_row_with_merged_pr_is_landed
 test_collapsed_captain_call_deferral_and_landed
 test_undated_hold_phrasing_and_aging_projection
 test_blocked_deferred_hold_has_concrete_disclosure

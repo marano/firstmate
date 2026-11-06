@@ -27,6 +27,9 @@
 # A local-only completion is a delivery whether or not its row carries a kind.
 # The retained hold-kind alone keeps answered calls out of the section.
 # Merged PRs and reported scouts remain distinct.
+# A scout row that carries a merged PR is a promoted scout whose row predates
+# promotion updating the backlog kind: the PR is its delivery, so the merged
+# branch does not exclude kind scout (a scout with no PR still needs its report).
 #
 # The backlog-selection compatibility fallback keeps a structured Done row
 # whose three parsed artifact fields are absent when it does not retain
@@ -57,8 +60,7 @@ FM_LANDED_JQ_DEFS='
   # rejected deliveries were misclassified".
   def landed_delivery:
     scout_report
-    or (.kind != "scout"
-      and .kind != "captain"
+    or (.kind != "captain"
       and .hold_kind != "captain"
       and .completion.verb == "merged"
       and (.pr_url // null) != null)
