@@ -67,9 +67,10 @@
 # many live holders as the new count allows remain on ANY slot on disk.
 #
 # A RUN THAT NEEDS THE WHOLE MACHINE TAKES EVERY SLOT. A slot is not a share of
-# the machine - build tools size their worker pools from the whole machine, and
-# memory is not divisible by a lock at all - so N caps how many heavy commands
-# run and never how much they use. A run named as needing the whole machine
+# the machine by itself - build tools size their worker pools from the whole
+# machine, and memory is not divisible by a lock at all - so N caps how many
+# heavy commands run, and only the one pool sized below is bounded in how much
+# it uses. A run named as needing the whole machine
 # therefore holds all N slots and starts only once nothing else is live, so it
 # never runs beside anything. Name one with --exclusive, or, so that no caller
 # has to know, with one shell glob per line in the pattern file beside the
@@ -78,6 +79,26 @@
 # opened. A pattern file that exists but cannot be read makes EVERY run
 # whole-machine and warns once: that is N=1 behaviour, and the opposite choice
 # would silently drop the protection the file exists to give.
+#
+# A HOLD SIZES ITS TEST RUNNER'S WORKERS TO ITS SHARE OF THE MACHINE'S MEMORY.
+# Holding every slot did not give a whole-machine run what it needed, because
+# memory, not cores, is what it ran out of: on a 16 GiB, 10-core machine the
+# full suite of a browser-heavy web app at its own 5 vitest workers swapped about
+# a gigabyte each way every 8 seconds and timed out, while the same held run at
+# 3 workers used about the same CPU, swapped a tenth as much and timed out
+# nothing (docs/verification/build-lock-contention.md). So a hold exports
+# VITEST_MAX_WORKERS to the command it runs: one worker per 5 GiB of physical
+# memory, at most one fewer than the online cores, of which a whole-machine run
+# gets all and a run on one of N slots an Nth, never less than one. Vitest is
+# the one runner sized, because it is the pool those runs exhausted and its
+# override was verified to win over a suite's own setting; the variable means
+# nothing to any other command. Because it wins over everything, including a
+# suite's own serial setting and a worker flag on its command line, a caller's
+# own choice is left alone: nothing is exported when VITEST_MAX_WORKERS is
+# already set or any argument names a vitest worker or file-parallelism flag.
+# Nothing is exported on CI, for a command that takes the lock itself, inside
+# another hold (which exported its own), or when this machine's memory cannot be
+# read. FM_BUILD_LOCK_MEMORY_GIB stands in for the physical memory, for tests.
 #
 # LOCK PATH. `FM_BUILD_LOCK_DIR` overrides it. Otherwise this resolves the
 # stable per-user temporary directory (`getconf DARWIN_USER_TEMP_DIR` on macOS)
@@ -227,6 +248,11 @@
 #                                  survives, 0 off (default 30)
 #   FM_TASK_STATUS                 absolute status file for ceiling lines (see
 #                                  A CEILING ALSO REACHES THE SUPERVISOR)
+#   FM_BUILD_LOCK_MEMORY_GIB       physical memory the worker sizing assumes, in
+#                                  whole GiB, for tests; 0 sizes nothing (see
+#                                  A HOLD SIZES ITS TEST RUNNER'S WORKERS)
+#   VITEST_MAX_WORKERS             exported to the wrapped command; one already
+#                                  set is the caller's choice and is kept
 #   FM_BUILD_LOCK_HELD_BY          set by a holder for its wrapped command;
 #   FM_BUILD_LOCK_HELD_LOCK        see A NESTED INVOCATION above
 #
@@ -1451,6 +1477,9 @@ fm_build_lock_nonneg_int FM_BUILD_LOCK_TICKET_STALE "$TICKET_STALE"
 case "$POLL" in
   ''|*[!0-9.]*|.|*.*.*) die "FM_BUILD_LOCK_POLL must be a number of seconds, got '$POLL'" ;;
 esac
+case "${FM_BUILD_LOCK_MEMORY_GIB:-}" in
+  *[!0-9]*) die "FM_BUILD_LOCK_MEMORY_GIB must be a whole number of GiB, got '$FM_BUILD_LOCK_MEMORY_GIB'" ;;
+esac
 
 # --- CI stand-down, before the lock root is even resolved -------------------
 
@@ -1799,6 +1828,73 @@ if fm_build_lock_nested_passthrough || fm_build_lock_owner_is_ancestor; then
   exec "$@"
 fi
 
+# --- the run's test workers -------------------------------------------------
+#
+# See A HOLD SIZES ITS TEST RUNNER'S WORKERS in the header for why memory sets
+# the count, and why a caller's own choice is never overridden.
+
+FM_BUILD_LOCK_GIB_PER_WORKER=5
+FM_BUILD_LOCK_RUN_WORKERS=
+
+# Physical memory in whole GiB, or 0 when it cannot be told.
+fm_build_lock_memory_gib() {
+  local bytes='' kb=''
+  if [ -n "${FM_BUILD_LOCK_MEMORY_GIB:-}" ]; then
+    printf '%s\n' "$FM_BUILD_LOCK_MEMORY_GIB"
+    return 0
+  fi
+  bytes=$(sysctl -n hw.memsize 2>/dev/null) || bytes=
+  case "$bytes" in
+    ''|*[!0-9]*) bytes= ;;
+  esac
+  if [ -z "$bytes" ] && [ -r /proc/meminfo ]; then
+    kb=$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo 2>/dev/null) || kb=
+    case "$kb" in
+      ''|*[!0-9]*) kb= ;;
+    esac
+    [ -z "$kb" ] || bytes=$((kb * 1024))
+  fi
+  printf '%s\n' "$(( ${bytes:-0} / 1073741824 ))"
+}
+
+# A caller that names its own worker count anywhere on its command line has
+# chosen, and the exported variable would silently override that choice. A
+# substring match, so `sh -c '... --maxWorkers=1'` counts too: a false match
+# only leaves a run unsized, which is what every run was before.
+fm_build_lock_caller_sized() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      *--maxWorkers*|*--max-workers*|*--fileParallelism*|*--file-parallelism*|*--no-file-parallelism*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Sets FM_BUILD_LOCK_RUN_WORKERS to the count this hold's test runner is given,
+# or leaves it empty when there is nothing this hold should decide.
+fm_build_lock_size_workers() {  # <command...>
+  local gib machine held w
+  FM_BUILD_LOCK_RUN_WORKERS=
+  [ -z "${VITEST_MAX_WORKERS:-}" ] || return 0
+  fm_build_lock_caller_sized "$@" && return 0
+  gib=$(fm_build_lock_memory_gib)
+  [ "$gib" -gt 0 ] 2>/dev/null || return 0
+  machine=$((gib / FM_BUILD_LOCK_GIB_PER_WORKER))
+  fm_build_lock_resolve_cores
+  if [ "$FM_BUILD_LOCK_CORES" -gt 1 ] && [ "$machine" -gt $((FM_BUILD_LOCK_CORES - 1)) ]; then
+    machine=$((FM_BUILD_LOCK_CORES - 1))
+  fi
+  [ "$machine" -ge 1 ] || machine=1
+  held=$(fm_build_lock_held_slot_count)
+  w=$((machine * held / FM_BUILD_LOCK_N))
+  # A count lowered while this run drained can leave it holding more slots than
+  # the count, which is still at most the whole machine.
+  [ "$w" -le "$machine" ] || w=$machine
+  [ "$w" -ge 1 ] || w=1
+  FM_BUILD_LOCK_RUN_WORKERS=$w
+}
+
 # --- acquire, run, release --------------------------------------------------
 
 trap fm_build_lock_on_exit EXIT
@@ -1822,6 +1918,8 @@ HELD_SINCE=$SECONDS
 
 fm_build_lock_publish_holder "$STARTED"
 fm_build_lock_slot_paths "$(fm_build_lock_lowest_held_slot)"
+fm_build_lock_size_workers "$@"
+[ -z "$FM_BUILD_LOCK_RUN_WORKERS" ] || export VITEST_MAX_WORKERS="$FM_BUILD_LOCK_RUN_WORKERS"
 
 # An explicit stdin redirection is required: bash sends an asynchronous
 # command's stdin to /dev/null when job control is off, which would silently

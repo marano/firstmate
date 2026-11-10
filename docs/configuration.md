@@ -316,15 +316,18 @@ There is deliberately no environment variable for the count, because an environm
 A raised count reaches a waiting build within one poll; a lowered one never touches a running holder and admits nothing new until the holders above it have finished.
 
 `build-lock-exclusive` names the runs that need the whole machine, one shell glob per line, with `#` comments and blank lines ignored.
-A slot is not a share of the machine - build tools size their worker pools from the whole machine and memory is not divisible by a lock at all - so a count bounds how many heavy commands run and never how much they use.
+A slot is not a share of the machine by itself - build tools size their worker pools from the whole machine and memory is not divisible by a lock at all - so a count bounds how many heavy commands run, and only the test runner's pool sized below is bounded in how much it uses.
 A run this file names, or one invoked as `mutex --exclusive <command>`, therefore holds every slot and never runs beside anything.
 Each glob is matched against exactly the text `mutex --status` prints after `running:`, which carries the working directory, so a pattern can name a repository's worktrees as easily as a command.
+A no-mistakes run worktree is `<no-mistakes home>/worktrees/<repository id>/<run id>` by default, a path that names no repository, so a pattern meant to cover a repository's validation runs names that repository id's directory as well.
 At one slot neither the flag nor the file has any effect and the file is never opened.
 A file that exists but cannot be read makes every run whole-machine and warns once, which is one-slot behaviour; treating it as empty would silently drop the protection it exists to give.
 
 Raising the count above 1 has one hard precondition, because several copies of the script share these slots - `mutex` on PATH is the primary checkout's, and every firstmate worktree's test runner calls its own.
 A copy that predates slots knows only slot 1, which is safe for exclusion at any count, but nested inside a newer copy's second-slot hold it does not recognise the hold and queues, and with a whole-machine run ahead of it in line that is a deadlock.
 So do not raise the count above 1 while any live worktree predates the change.
+
+Every hold also sizes its test runner's worker pool to its share of this machine's memory through `VITEST_MAX_WORKERS`, which a whole-machine run gets all of and a run on one of N slots an Nth of; it needs no setting, never overrides a caller's own worker choice, and the script's header owns the rule and the measurement behind it.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
@@ -1173,6 +1176,7 @@ FM_BUILD_LOCK_POLL=0.5             # build-slot acquire poll interval in seconds
 FM_BUILD_LOCK_TICKET_STALE=30      # seconds an unrenewed waiting-line ticket survives, 0 off
 FM_BUILD_LOCK_HELD_BY=  # internal: a build-slot holder's pid, exported to its wrapped command so a nested invocation runs through
 FM_BUILD_LOCK_HELD_LOCK= # internal: the path of the slot that holder owns, exported beside FM_BUILD_LOCK_HELD_BY
+FM_BUILD_LOCK_MEMORY_GIB=  # test override: physical memory in whole GiB the build lock sizes test workers from, 0 sizes nothing; never set by hand
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline

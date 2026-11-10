@@ -2327,5 +2327,74 @@ assert_equals '' "$(FM_BUILD_LOCK_DIR="$LOCK_ROOT" "$SCRIPT" --holders)" \
 settle_root "$LOCK_ROOT"
 pass "--holders reports live holders as parseable pid/elapsed/cwd/command lines and never a dead one"
 
+# --- a hold sizes its test runner's workers to the machine's memory ----------
+# What the wrapped command sees is the whole observable: it prints the variable
+# it inherited, or `unset`. The machine's physical memory is stood in by
+# FM_BUILD_LOCK_MEMORY_GIB, and the expected counts are worked out from this
+# runner's own online cores, because a count is never more than one fewer.
+#
+# Mutants that must turn this red, each applied and confirmed:
+#   - drop the export: every sized case reads `unset`.
+#   - drop the cores cap: the 1000 GiB case reads 200.
+#   - drop the floor at one: the 4 GiB case reads `unset` or 0.
+#   - export even when VITEST_MAX_WORKERS is already set, or ignore a worker
+#     flag: the caller's 7, or its --maxWorkers run, is overridden.
+#   - size every hold as the whole machine: the run on one of three slots gets
+#     the whole-machine count.
+#   - size inside the CI stand-down: the CI run reads a count.
+seen_workers() {  # <root> [args-and-command-prefix...]
+  local lockroot=$1
+  shift
+  # shellcheck disable=SC2016  # the wrapped sh expands its own variable
+  FM_BUILD_LOCK_DIR="$lockroot" "$SCRIPT" "$@" sh -c 'printf "%s\n" "${VITEST_MAX_WORKERS-unset}"' _ 2>/dev/null
+}
+size_cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)
+case "$size_cores" in ''|*[!0-9]*) size_cores=0 ;; esac
+size_cap() {  # <count> - the count, at most one fewer than the online cores, at least one
+  local n=$1
+  if [ "$size_cores" -gt 1 ] && [ "$n" -gt $((size_cores - 1)) ]; then
+    n=$((size_cores - 1))
+  fi
+  [ "$n" -ge 1 ] || n=1
+  printf '%s\n' "$n"
+}
+unset VITEST_MAX_WORKERS
+SIZE_ONE=$(slot_root size-one)
+assert_equals "$(size_cap 2)" "$(FM_BUILD_LOCK_MEMORY_GIB=10 seen_workers "$SIZE_ONE")" \
+  "a hold did not give its test runner one worker per 5 GiB"
+assert_equals "$(size_cap 200)" "$(FM_BUILD_LOCK_MEMORY_GIB=1000 seen_workers "$SIZE_ONE")" \
+  "a hold gave its test runner more workers than one fewer than the online cores"
+assert_equals 1 "$(FM_BUILD_LOCK_MEMORY_GIB=4 seen_workers "$SIZE_ONE")" \
+  "a machine with under 5 GiB did not still get one worker"
+assert_equals unset "$(FM_BUILD_LOCK_MEMORY_GIB=0 seen_workers "$SIZE_ONE")" \
+  "a machine whose memory cannot be told was sized anyway"
+assert_equals 7 "$(VITEST_MAX_WORKERS=7 FM_BUILD_LOCK_MEMORY_GIB=10 seen_workers "$SIZE_ONE")" \
+  "a caller's own VITEST_MAX_WORKERS was overridden"
+# shellcheck disable=SC2016  # the wrapped sh expands its own variable
+assert_equals unset "$(FM_BUILD_LOCK_DIR="$SIZE_ONE" FM_BUILD_LOCK_MEMORY_GIB=10 "$SCRIPT" \
+  sh -c 'printf "%s\n" "${VITEST_MAX_WORKERS-unset}" # vitest run --maxWorkers=1' 2>/dev/null)" \
+  "a run that names its own worker count on its command line was sized over it"
+assert_equals unset "$(unset FM_BUILD_LOCK_CI; CI=true FM_BUILD_LOCK_MEMORY_GIB=10 seen_workers "$SIZE_ONE")" \
+  "a CI run, which stands down, was sized"
+FM_BUILD_LOCK_DIR="$SIZE_ONE" FM_BUILD_LOCK_MEMORY_GIB=nine "$SCRIPT" true >/dev/null 2>&1
+expect_code 2 $? "a FM_BUILD_LOCK_MEMORY_GIB that is not a whole number must be refused"
+settle_root "$SIZE_ONE"
+
+# At three slots a run on one slot gets a third, never under one, and a
+# whole-machine run all of it. 30 GiB is 6 workers before the cores cap; the
+# case needs the two counts apart to mean anything, so it says when they are not.
+SIZE_THREE=$(slot_root size-three 3)
+size_whole=$(size_cap 6)
+size_slot=$((size_whole / 3))
+[ "$size_slot" -ge 1 ] || size_slot=1
+[ "$size_whole" -gt "$size_slot" ] \
+  || fail "this runner's $size_cores online cores leave a slot's share equal to the whole machine's, so the share case cannot tell them apart"
+assert_equals "$size_slot" "$(FM_BUILD_LOCK_MEMORY_GIB=30 seen_workers "$SIZE_THREE")" \
+  "a run on one of three slots was not given a third of the machine's workers"
+assert_equals "$size_whole" "$(FM_BUILD_LOCK_MEMORY_GIB=30 seen_workers "$SIZE_THREE" --exclusive)" \
+  "a whole-machine run was not given all of the machine's workers"
+settle_root "$SIZE_THREE"
+pass "a hold sizes its test runner's workers to its share of memory, and never over a caller's own choice"
+
 assert_no_lock_residue "$LOCK_ROOT" "the suite must leave no lock behind"
 pass "fm-build-lock behaves"
