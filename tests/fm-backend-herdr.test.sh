@@ -580,7 +580,7 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   fm_fake_agent_link "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
-  sh -c "'$lab/pi' -c 'sleep 300; :'; :" &
+  sh -c "'$lab/pi' -c '$FM_FAKE_AGENT_HOLD'; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
@@ -608,7 +608,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
   fm_fake_agent_link "$lab/pi"
-  sh -c "'$lab/pi' -c 'sleep 300; :'; :" &
+  sh -c "'$lab/pi' -c '$FM_FAKE_AGENT_HOLD'; :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")

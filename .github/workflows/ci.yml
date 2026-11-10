@@ -132,8 +132,9 @@ jobs:
     # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
     # Changes to this cap or the lane count require a separate scope decision.
     # Raised from 10 to 15 on the ubuntu-26.04 image (Rust coreutils multicall
-    # makes process-spawn-bound scripts about 3x slower): the lane was cancelled
-    # at the old cap, which left the timing aggregate with nothing to judge.
+    # makes process-spawn-bound scripts about 3x slower). Before the fake-agent
+    # fix this lane finished in about 8 minutes on 26.04 with no stall, too close
+    # to 10 to keep that cap, for the same reason as portable parallel 2.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6

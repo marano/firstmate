@@ -115,7 +115,7 @@ SH
 cat > "$LAB/bin/claude" <<SH
 #!/bin/sh
 printf 'task=%s\n' "\${FM_TASK_ID:-}" >> "$LAB/agent-starts"
-exec "$LAB/agent/claude" -c 'sleep 600; :'
+exec "$LAB/agent/claude" -c '$FM_FAKE_AGENT_HOLD'
 SH
 chmod +x "$LAB/bin/tmux" "$LAB/bin/labshell" "$LAB/bin/slowshell" "$LAB/bin/treehouse" "$LAB/bin/claude"
 

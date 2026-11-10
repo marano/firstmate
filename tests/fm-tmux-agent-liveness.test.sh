@@ -80,7 +80,7 @@ fm_fake_agent_link "$LAB/bin/muse-bind"
 # false `dead`.
 cat > "$LAB/bin/agent-launcher" <<SH
 #!/bin/sh
-"$LAB/bin/pi" -c 'sleep 900; :' &
+"$LAB/bin/pi" -c '$FM_FAKE_AGENT_HOLD' &
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"

@@ -9,7 +9,12 @@
 # multicall binary refuse to run under a name that is not one of their utilities.
 # bash runs under any name, so the kernel's recorded executable identity is the
 # agent name. Run it with `<path> -c "$FM_FAKE_AGENT_HOLD"` so it stays alive.
-export FM_FAKE_AGENT_HOLD='sleep 900; :'
+# The hold blocks in bash's own `read` on a private FIFO opened read-write, so
+# the fake never has a child process: killing it ends its whole process tree.
+# A `sleep` child would survive its parent and keep the test's output pipe open
+# until it expired, so a runner waiting for end-of-output would stall.
+# shellcheck disable=SC2016 # the hold is a script for the fake's own bash, expanded there
+export FM_FAKE_AGENT_HOLD='f=$(mktemp -u); mkfifo "$f"; exec 9<>"$f"; rm -f "$f"; read -r -t 900 -u 9 _; :'
 fm_fake_agent_link() {
   local bash_bin
   bash_bin=$(command -v bash) || return 1
