@@ -9,7 +9,7 @@
 # multicall binary refuse to run under a name that is not one of their utilities.
 # bash runs under any name, so the kernel's recorded executable identity is the
 # agent name. Run it with `<path> -c "$FM_FAKE_AGENT_HOLD"` so it stays alive.
-FM_FAKE_AGENT_HOLD='sleep 900; :'
+export FM_FAKE_AGENT_HOLD='sleep 900; :'
 fm_fake_agent_link() {
   local bash_bin
   bash_bin=$(command -v bash) || return 1
