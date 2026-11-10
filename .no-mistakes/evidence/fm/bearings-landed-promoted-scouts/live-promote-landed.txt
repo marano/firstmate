@@ -1,0 +1,35 @@
+== before
+## In flight
+- [ ] live1 - Synthetic scout (repo: firstmate) (kind: scout) (since 2026-07-11)
+
+## Queued
+
+## Done
+== promote
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+promoted live1 to ship mode=direct-PR yolo=on (teardown protection restored)
+wrote ship instructions for mode=direct-PR: /var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.b0EkrRVuDD/data/live1/ship-instructions.md
+next: FM_HOME=/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.b0EkrRVuDD bin/fm-send.sh fm-live1 "$(cat /var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/tmp.b0EkrRVuDD/data/live1/ship-instructions.md)"
+exit=0
+== after promote
+## In flight
+- [ ] live1 - Synthetic scout (repo: firstmate) (kind: ship) (since 2026-07-11)
+## Queued
+
+## Done
+== done row (kind from promote)
+## In flight
+
+## Queued
+
+## Done
+- [x] live1 - Synthetic scout https://github.com/o/r/pull/6 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+== bearings json landed
+[{"id":"live1","what":"Synthetic scout","artifact":"https://github.com/o/r/pull/6","owner":"(main)"}]
+[{"id":"live1","what":"Synthetic scout","artifact":"https://github.com/o/r/pull/6","owner":"(main)"}]
