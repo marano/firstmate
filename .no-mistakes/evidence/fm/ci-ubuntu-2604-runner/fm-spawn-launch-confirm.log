@@ -1,0 +1,8 @@
+ok - a spawn whose launch never started fails and closes its pane
+ok - a spawn stages its launch command 0600 in a 0700 task temp root
+ok - a spawn refuses a temp root others can write and tightens one it owns
+ok - a relaunch stages a new launch file and leaves the earlier one untouched
+ok - a spawn clears a cut launch's continuation prompt and starts the agent
+ok - a relaunch clears a continuation prompt before typing its launch
+ok - a launch typed while the pane shell runs a slow prompt hook starts the agent
+ok - the longest launch types no line over 85 bytes while the command itself is 4772
