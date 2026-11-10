@@ -55,7 +55,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-aggregate` artifacts of several green `main` runs, refreshed on 2026-09-24 with `--refresh-serial-hints`; the refresh refuses unless the inputs cover every hinted script, so no serial member is left unmeasured.
+The embedded hints are the slowest completed `duration_ms` each script reached across the `fm-test-timing-aggregate` artifacts of several green `main` runs, last refreshed with `--refresh-serial-hints` from a single ubuntu-26.04 run (the slower image under-predicted the earlier table, which also moved the lane from five to six shards; re-measure from several green runs when available); the refresh refuses unless the inputs cover every hinted script, so no serial member is left unmeasured.
 Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
