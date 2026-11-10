@@ -335,6 +335,9 @@ esac
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
+# Raised from 5 on ubuntu-26.04: the portable-serial lane measured 6,169,915 ms
+# against a packed hint weight of 5,377,001 ms, and the refresh over five shards
+# put shard 4 at 1,582,464 ms, past the 1,440,000 ms per-shard budget.
 PORTABLE_SERIAL_SHARDS=6
 
 # Balance hint for a portable-serial script with no measured duration, close to

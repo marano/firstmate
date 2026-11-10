@@ -131,11 +131,12 @@ jobs:
     # A packed hint sum is not a measured job wall time or proof of headroom.
     # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
     # Changes to this cap or the lane count require a separate scope decision.
-    # Raised from 10 to 15 on the ubuntu-26.04 image (Rust coreutils multicall
-    # makes process-spawn-bound scripts about 3x slower). Before the fake-agent
-    # fix this lane finished in about 8 minutes on 26.04 with no stall, too close
-    # to 10 to keep that cap, for the same reason as portable parallel 2.
-    timeout-minutes: 15
+    # The serial lanes went from 5 to 6 shards on ubuntu-26.04: the Behavior
+    # timing aggregate failed there with the portable-serial lane measured at
+    # 6,169,915 ms against a packed hint weight of 5,377,001 ms, and refreshing
+    # the hints over five shards put shard 4 at 1,582,464 ms, past the
+    # 1,440,000 ms per-shard budget.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
