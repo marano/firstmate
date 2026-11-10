@@ -131,7 +131,10 @@ jobs:
     # A packed hint sum is not a measured job wall time or proof of headroom.
     # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
     # Changes to this cap or the lane count require a separate scope decision.
-    timeout-minutes: 10
+    # Raised from 10 to 15 on the ubuntu-26.04 image (Rust coreutils multicall
+    # makes process-spawn-bound scripts about 3x slower): the lane was cancelled
+    # at the old cap, which left the timing aggregate with nothing to judge.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
