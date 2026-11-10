@@ -23,9 +23,11 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fake-agent-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fake-agent-helpers.sh"
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+command -v sleep >/dev/null || { echo "skip: sleep not found"; exit 0; }
 if PANE_SHELL=$(command -v zsh); then
   PANE_SHELL_ARGS='-f'
 elif PANE_SHELL=$(command -v bash); then
@@ -52,7 +54,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$LAB/bin" "$LAB/agent" "$LAB/home"
-ln -s "$SLEEP_BIN" "$LAB/agent/claude"
+fm_fake_agent_link "$LAB/agent/claude"
 
 # Every bare `tmux` call reaches the private server. While the garble counter
 # file holds a positive count, the typed launch line loses its tail from inside
@@ -113,7 +115,7 @@ SH
 cat > "$LAB/bin/claude" <<SH
 #!/bin/sh
 printf 'task=%s\n' "\${FM_TASK_ID:-}" >> "$LAB/agent-starts"
-exec "$LAB/agent/claude" 600
+exec "$LAB/agent/claude" -c 'sleep 600; :'
 SH
 chmod +x "$LAB/bin/tmux" "$LAB/bin/labshell" "$LAB/bin/slowshell" "$LAB/bin/treehouse" "$LAB/bin/claude"
 

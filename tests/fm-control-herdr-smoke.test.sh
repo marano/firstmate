@@ -32,6 +32,8 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
+# shellcheck source=tests/fake-agent-helpers.sh
+. "$ROOT/tests/fake-agent-helpers.sh"
 
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
@@ -209,13 +211,12 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # A registration alone no longer proves an agent (issue #4115): the adapter
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
-# symlink to a long-running system binary named `claude`, the same construction
+# symlink named `claude` (see fm_fake_agent_link), the same construction
 # tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+fm_fake_agent_link "$AGENT_BIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
 
 wait_process_state() {  # <expected> <tries>
@@ -229,7 +230,7 @@ wait_process_state() {  # <expected> <tries>
 }
 
 start_agent_process() {
-  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q 900" \
+  fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$AGENT_Q -c '$FM_FAKE_AGENT_HOLD'" \
     || fail "could not start the agent-named foreground process in the task pane"
   wait_process_state agent 50 \
     || version_fail "a real agent-named foreground process reads '$(fm_backend_herdr_pane_process_state "$SESSION" "$PANE_ID")' rather than 'agent' through pane process-info"

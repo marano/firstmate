@@ -168,8 +168,15 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    # Same timeout rationale as portable parallel shard 1 above.
-    timeout-minutes: 10
+    # Same hang-tripwire rationale as portable parallel shard 1 above, with a
+    # 15-minute cap. tests/fm-pr-merge.test.sh alone is this lane's floor, and it
+    # is a process-spawn-bound script: on the ubuntu-26.04 image, whose coreutils
+    # is the Rust multicall build, every coreutils invocation measured about
+    # 3x slower (roughly 1.0-1.7 ms against 0.3-0.4 ms for date, cat, mktemp,
+    # sort, head, chmod, ln and stat), so the script took 598 s there against
+    # 442 s on ubuntu-24.04 and the job hit the old 10-minute cap. Repacking
+    # cannot recover that: the script cannot be split across lanes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
