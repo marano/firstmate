@@ -131,6 +131,11 @@ jobs:
     # A packed hint sum is not a measured job wall time or proof of headroom.
     # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
     # Changes to this cap or the lane count require a separate scope decision.
+    # The serial lanes went from 5 to 6 shards on ubuntu-26.04: the Behavior
+    # timing aggregate failed there with the portable-serial lane measured at
+    # 6,169,915 ms against a packed hint weight of 5,377,001 ms, and refreshing
+    # the hints over five shards put shard 4 at 1,582,464 ms, past the
+    # 1,440,000 ms per-shard budget.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -168,8 +173,15 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    # Same timeout rationale as portable parallel shard 1 above.
-    timeout-minutes: 10
+    # Same hang-tripwire rationale as portable parallel shard 1 above, with a
+    # 15-minute cap. tests/fm-pr-merge.test.sh alone is this lane's floor, and it
+    # is a process-spawn-bound script: on the ubuntu-26.04 image, whose coreutils
+    # is the Rust multicall build, every coreutils invocation measured about
+    # 3x slower (roughly 1.0-1.7 ms against 0.3-0.4 ms for date, cat, mktemp,
+    # sort, head, chmod, ln and stat), so the script took 598 s there against
+    # 442 s on ubuntu-24.04 and the job hit the old 10-minute cap. Repacking
+    # cannot recover that: the script cannot be split across lanes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -261,7 +273,7 @@ jobs:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v6
         with:
