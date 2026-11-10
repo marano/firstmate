@@ -1283,8 +1283,8 @@ json.dump({"selection": "lane=portable-serial-1of5", "scripts": rows}, open(out,
   "$RUNNER" --derive-serial-hints "$tmp/t.json" >"$tmp/hints"
   assert_contains "$(cat "$tmp/hints")" "$big 900000" "derived hints must carry the measured duration"
   k=1
-  while [ "$k" -le 5 ]; do
-    out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --lane "portable-serial-${k}of5" --list)
+  while [ "$k" -le 6 ]; do
+    out=$(FM_PORTABLE_SERIAL_HINTS_FILE="$tmp/hints" "$RUNNER" --lane "portable-serial-${k}of6" --list)
     if printf '%s\n' "$out" | grep -qxF "$big"; then
       [ "$(printf '%s\n' "$out" | grep -c .)" -eq 1 ] \
         || fail "measured packing must seat the dominant script alone; shard $k holds $(printf '%s\n' "$out" | grep -c .)"
