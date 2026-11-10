@@ -1165,11 +1165,6 @@ test_queued_item_prose_never_hides_it() {
   pass "queued body prose never hides an item from the board"
 }
 
-# The collapsed captain-call contract: any due, unblocked captain-held task is
-# Captain's Call whatever its kind; a date-deferred hold is a dated gate until
-# due; deferral wording in the reason changes nothing, because only structured
-# fields classify; and Recently Landed applies the shared delivery selector to
-# Done rows.
 test_promoted_scout_row_with_merged_pr_is_landed() {
   local home fakebin json
   home=$(make_home promoted-scout)
@@ -1194,6 +1189,11 @@ EOF
   pass "a promoted scout row that still records kind scout lands with its merged PR"
 }
 
+# The collapsed captain-call contract: any due, unblocked captain-held task is
+# Captain's Call whatever its kind; a date-deferred hold is a dated gate until
+# due; deferral wording in the reason changes nothing, because only structured
+# fields classify; and Recently Landed applies the shared delivery selector to
+# Done rows.
 test_collapsed_captain_call_deferral_and_landed() {
   local home fakebin json
   home=$(make_home collapsed-call)

@@ -361,8 +361,6 @@ EOF
   pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
 }
 
-# Promotion is where a scout's ship contract is finally decided, so it requires the
-# same explicit values and writes them into the task's durable record.
 test_promote_updates_the_backlog_row_kind() {
   local home out status
   home="$TMP_ROOT/promote-kind/home"
@@ -384,6 +382,8 @@ EOF
   pass "fm-promote: promotion moves the backlog row kind to ship"
 }
 
+# Promotion is where a scout's ship contract is finally decided, so it requires the
+# same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
   local home meta out status blocked_data instructions_path
   home="$TMP_ROOT/promote/home"
