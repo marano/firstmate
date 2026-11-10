@@ -86,7 +86,7 @@ EXTRAS_SHARD=1
 ok_count_pins() {
   printf '%s\n' \
     tests/fm-fleet-snapshot-view.test.sh=22 \
-    tests/fm-bearings-snapshot.test.sh=60
+    tests/fm-bearings-snapshot.test.sh=61
 }
 
 usage() {

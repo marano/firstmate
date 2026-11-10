@@ -361,6 +361,27 @@ EOF
   pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
 }
 
+test_promote_updates_the_backlog_row_kind() {
+  local home out status
+  home="$TMP_ROOT/promote-kind/home"
+  mkdir -p "$home/state" "$home/data"
+  write_brief "$home" promote-k1
+  printf 'window=fm-promote-k1\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/promote-k1.meta"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] promote-k1 - Scout that gets promoted (repo: firstmate) (kind: scout) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-k1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion should succeed: $out"
+  assert_grep '(kind: ship)' "$home/data/backlog.md" "promotion left the backlog row kind as scout"
+  pass "fm-promote: promotion moves the backlog row kind to ship"
+}
+
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
@@ -1147,6 +1168,7 @@ test_spawn_refuses_a_silent_merge_authority_downgrade
 test_a_recorded_reason_allows_a_merge_authority_downgrade
 test_the_downgrade_reason_flag_refuses_every_other_shape
 test_scout_records_no_delivery_posture
+test_promote_updates_the_backlog_row_kind
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_faces_the_grouping_guard
 test_promote_refuses_a_symlinked_task_record
