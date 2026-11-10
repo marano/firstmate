@@ -1,0 +1,13 @@
+ok - a newer push to one PR supersedes that PR's in-flight CI
+ok - distinct PRs get distinct concurrency groups
+ok - every main push keeps its own group and is never cancelled
+ok - every ci.yml job carries a finite timeout
+ok - the incident's unbounded jobs keep their recommended caps
+ok - the already-measured lane bounds are unchanged
+ok - the stock-bash CI job runs the shared lane owner and nothing else of the lane
+ok - the stock-bash job runs every one of the runner's 2 shards, each naming its own
+ok - a failed Lint job ends its log with the repair note, and only when the lint failed
+ok - no lane job names a pinned linter installer, so no per-job tool matrix can rot here
+ok - every lane job derives its pinned tools from the lane it runs, in one step
+ok - every pinned tool a test needs is installed by the lane that runs it
+ok - lane tool installs are 3 of a possible 18, so a download outage no longer reds lanes that never use the tool

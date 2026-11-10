@@ -1,0 +1,2 @@
+fm-build-lock: fm-test-run.sh takes a build hold per unit itself, so this invocation takes none and runs it straight through; wrapping it would hold one slot for its whole run
+FM_TEST_COVERAGE ok total=231 parallel=24 parallel_max_ms=405469 parallel_imbalance_ms=921 parallel_unhinted=0 serial=191 serial_shards=6 serial_max_ms=1318716 serial_shard_budget_ms=1440000 serial_unhinted=0 herdr=16 stock_bash=156 stock_bash_excluded=75 stock_bash_shards=2 stock_bash_max_ms=872484 stock_bash_unhinted=5 required_tools=5

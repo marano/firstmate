@@ -15,9 +15,9 @@ ok - herdr stale registration: a registered agent with a live Pi foreground proc
 ok - herdr stale registration: only a shell-only pane demotes a registration
 ok - herdr stale registration: a transient prompt helper settles into stale-agent instead of reading live
 ok - herdr stale registration: an exhausted settle window still reads a non-shell foreground as live
-sh: line 1:  7589 Terminated: 15          '/private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-backend-herdr-tests.Bm1VNw/stale-reg-descendant-bin/pi' -c 'sleep 300; :'
+sh: line 1: 35967 Terminated: 15          '/private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-backend-herdr-tests.T2PAEk/stale-reg-descendant-bin/pi' -c 'f=$(mktemp -u); mkfifo "$f"; exec 9<>"$f"; rm -f "$f"; read -r -t 900 -u 9 _; :'
 ok - herdr stale registration: an agent process outside the foreground group still counts as alive
-sh: line 1:  8038 Terminated: 15          '/private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-backend-herdr-tests.Bm1VNw/stale-reg-spaced-bin/Application Support/Some Dir/pi' -c 'sleep 300; :'
+sh: line 1: 37406 Terminated: 15          '/private/var/folders/2w/nqnvq2996wj9df32v4ldywtw0000gn/T/fm-backend-herdr-tests.T2PAEk/stale-reg-spaced-bin/Application Support/Some Dir/pi' -c 'f=$(mktemp -u); mkfifo "$f"; exec 9<>"$f"; rm -f "$f"; read -r -t 900 -u 9 _; :'
 ok - herdr stale registration: the descendant walk reads a spaced executable path whole
 ok - herdr stale registration: an unreadable process view refuses instead of guessing either way
 ok - herdr stale registration: an empty foreground list over a real shell is not unreadable, it settles via the descendant walk

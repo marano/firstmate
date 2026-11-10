@@ -1,0 +1,5 @@
+fm-backend-herdr exit 0
+fm-tmux-agent-liveness exit 0
+fm-spawn-launch-confirm exit 0
+fm-ci-workflow exit 0
+coverage exit 0
