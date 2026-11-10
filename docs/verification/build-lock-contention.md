@@ -184,7 +184,7 @@ The lock now bounds one pool, the test runner's, and nothing else.
 It does not reach the agents, the language servers they start, the desktop, the memory of `tsc` and `eslint` on a shared slot (3.4 and 3.8 GB above), or the length of a whole-machine run, which every other worker waits out.
 So for a repository whose validation runs its full suite, the number of concurrent workers is the remaining control, and these measurements bound it on this machine.
 
-- Memory: C1 ran clean beside two workers in the web app's repository, each with its 1.5 to 1.65 GB language server, a marketing-site worker and a firstmate worker, and P2 and P3 beside one web-app worker and two firstmate workers.
+- Memory: C1 ran clean beside two workers in the web app's repository, each with its 1.5 to 1.65 GB language server, a worker in a second web repository and a firstmate worker, and P2 and P3 beside one web-app worker and two firstmate workers.
   At 5 workers even that lighter fleet thrashed (P1), and the morning's five web-app workers saw every full run fail.
   Each further web-app worker adds about 2 GB the lock cannot reclaim.
 - Queue: a whole-machine full run holds the machine for 786 to 830 s, and a no-mistakes agent step has 30 minutes.
