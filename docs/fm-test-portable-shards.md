@@ -168,7 +168,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2/3 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
-| portable serial 1-5 | job `timeout-minutes: 30` | Balanced shards pack about 23 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. `PORTABLE_SERIAL_MAX_SHARD_MS` keeps the packed weight inside that margin, so growth is answered by re-sharding rather than by raising this cap. |
+| portable serial 1-6 | job `timeout-minutes: 30` | Balanced shards pack about 23 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. `PORTABLE_SERIAL_MAX_SHARD_MS` keeps the packed weight inside that margin, so growth is answered by re-sharding rather than by raising this cap. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 Timeouts are intended as hang tripwires; a passing coverage guard does not establish a healthy job duration.
