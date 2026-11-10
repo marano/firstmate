@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Shared stand-in agent process for tests that need a live process whose
-# executable name is an agent name. Sourced by tests/lib.sh, and directly by
-# tests that do not load it.
+# executable name is an agent name. Sourced by the tests that need it.
 
 # fm_fake_agent_link <path>
 # Make <path> a stand-in agent binary whose executable name is its own basename.
