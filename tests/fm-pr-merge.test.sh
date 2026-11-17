@@ -726,6 +726,7 @@ add_linear_mocks() {
     || fail "fixture: could not record the Linear card"
   printf '%s\n' "$current" > "$case_dir/linear-state"
   : > "$case_dir/linear-mutations"
+  : > "$case_dir/linear-moved"
   cat > "$case_dir/fakebin/fm-fake-linear" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -735,6 +736,7 @@ body=$1
 case "$(cat "$body")" in
   *FmMove*)
     jq -r '.variables.state' < "$body" >> "$dir/linear-mutations"
+    jq -r '.variables.id | ltrimstr("issue-")' < "$body" >> "$dir/linear-moved"
     printf '{"data":{"issueUpdate":{"success":true}}}\n'
     exit 0
     ;;
@@ -768,6 +770,34 @@ fm_tasks_axi_in_case() {  # <case_dir> <args...>
 # The state ids the board was asked to move to in this case, space separated.
 linear_mutations() {  # <case_dir>
   tr '\n' ' ' < "$1/linear-mutations"
+}
+
+# The cards the board was asked to move in this case, sorted and space separated.
+linear_moved_cards() {  # <case_dir>
+  LC_ALL=C sort < "$1/linear-moved" | tr '\n' ' '
+}
+
+# add_linear_group <case_dir> <pr-plan|-> <pr-title> <member:card>...
+# Makes task-x1 (already carrying its card from add_linear_mocks) a grouped job
+# that delivers each member, recording each member's card, the job's pr_plan=
+# unless it is "-", and the live pull request's title.
+add_linear_group() {
+  local case_dir=$1 plan=$2 title=$3 pair member card delivers=''
+  shift 3
+  for pair in "$@"; do
+    member=${pair%%:*}
+    card=${pair#*:}
+    fm_tasks_axi_in_case "$case_dir" add "$member" "Item $member" --kind ship --repo app-web \
+      || fail "fixture: could not add member $member"
+    fm_tasks_axi_in_case "$case_dir" linear "$member" "$card" \
+      || fail "fixture: could not record the card of $member"
+    delivers="${delivers:+$delivers,}$member"
+  done
+  printf 'delivers=%s\n' "$delivers" >> "$case_dir/state/task-x1.meta"
+  [ "$plan" = - ] || printf 'pr_plan=%s\n' "$plan" >> "$case_dir/state/task-x1.meta"
+  jq -c --arg t "$title" '.title = $t' "$case_dir/github-view.json" > "$case_dir/github-view.tmp" \
+    || fail "fixture: could not set the pull request title"
+  mv "$case_dir/github-view.tmp" "$case_dir/github-view.json"
 }
 
 write_github_outcome() {
@@ -3308,6 +3338,89 @@ test_a_refused_merge_leaves_the_card_alone() {
   pass "a refused merge leaves its card exactly where the dispatch put it"
 }
 
+# Red on: bin/fm-pr-merge.sh moves every card a grouped job delivers at each of
+# its merges (today's behaviour, and the mutant that drops the title scoping in
+# bin/fm-linear-lib.sh). A job planned as three pull requests ships only what
+# this one's title names, so the unit's card and three members stay put.
+test_one_of_several_pull_requests_moves_only_the_cards_its_title_names() {
+  local case_dir rc out
+  case_dir=$(make_case linear-merge-scoped)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_linear_mocks "$case_dir" BLU-4330
+  add_linear_group "$case_dir" 3 "feat(app): first slice (BLU-4332, BLU-4334)" \
+    m-one:BLU-4331 m-two:BLU-4332 m-three:BLU-4333 m-four:BLU-4334 m-five:BLU-4335
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "linear-merge-scoped: the merge should succeed"
+  out=$(cat "$case_dir/stdout" "$case_dir/stderr")
+  assert_equals "BLU-4332 BLU-4334 " "$(linear_moved_cards "$case_dir")" \
+    "the merge did not move exactly the two cards its title names: $out"
+  assert_contains "$out" "BLU-4330, BLU-4331, BLU-4333, BLU-4335 left unmoved" \
+    "the merge did not name the cards it left unmoved: $out"
+  pass "one of several planned pull requests moves only the cards its title names"
+}
+
+# Red on: a scoping that applies at any plan (for example a `-ge 1` test in
+# bin/fm-linear-lib.sh), or that runs when no plan is recorded. A job planned as
+# one pull request - or with no plan at all - ships everything at its merge, so
+# every delivered card moves whatever the title says.
+test_a_single_pull_request_job_moves_every_card_it_delivers() {
+  local case_dir rc out plan
+  for plan in 1 -; do
+    case_dir=$(make_case "linear-merge-plan-${plan/-/none}")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+    add_linear_mocks "$case_dir" BLU-4330
+    add_linear_group "$case_dir" "$plan" "feat(app): the whole job (BLU-4331)" \
+      m-one:BLU-4331 m-two:BLU-4332
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "the merge should succeed with pr_plan $plan"
+    out=$(cat "$case_dir/stdout" "$case_dir/stderr")
+    assert_equals "BLU-4330 BLU-4331 BLU-4332 " "$(linear_moved_cards "$case_dir")" \
+      "a job with pr_plan $plan did not move every card it delivers: $out"
+    assert_not_contains "$out" "left unmoved" "a job with pr_plan $plan left a card unmoved"
+  done
+  pass "a job planned as one pull request, or with no plan, moves every card it delivers"
+}
+
+# Red on: today's code (which moves BLU-4336 at this merge) and on a substring
+# match of the card in the title. A title naming BLU-43361 does not name
+# BLU-4336, so that card stays put while BLU-43361 moves.
+test_a_longer_identifier_in_the_title_does_not_name_a_shorter_card() {
+  local case_dir rc out
+  case_dir=$(make_case linear-merge-whole-identifier)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_linear_mocks "$case_dir" BLU-4336
+  add_linear_group "$case_dir" 2 "fix(app): second slice [BLU-43361]" m-one:BLU-43361
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "linear-merge-whole-identifier: the merge should succeed"
+  out=$(cat "$case_dir/stdout" "$case_dir/stderr")
+  assert_equals "BLU-43361 " "$(linear_moved_cards "$case_dir")" \
+    "a title naming BLU-43361 moved BLU-4336 too, or missed BLU-43361: $out"
+  assert_contains "$out" "BLU-4336 left unmoved" \
+    "the merge did not name BLU-4336 as left unmoved: $out"
+  pass "a longer identifier in the title never names a shorter card"
+}
+
 # --- GitHub issue mirror, merge half ---------------------------------------
 #
 # A published item's issue is closed by firstmate at a PROVEN merge, since the
@@ -4816,6 +4929,9 @@ test_a_proven_merge_moves_its_card_to_the_teams_completed_status
 test_a_merge_leaves_an_already_completed_card_alone
 test_a_linear_failure_never_fails_a_landed_merge
 test_a_refused_merge_leaves_the_card_alone
+test_one_of_several_pull_requests_moves_only_the_cards_its_title_names
+test_a_single_pull_request_job_moves_every_card_it_delivers
+test_a_longer_identifier_in_the_title_does_not_name_a_shorter_card
 test_a_proven_merge_closes_the_items_github_issue
 test_a_github_issue_failure_never_fails_a_landed_merge
 

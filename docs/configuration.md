@@ -871,6 +871,7 @@ Which card an item tracks is one `Linear card: BLU-3268` line in that backlog it
 Most items have no card and never will: that is reported once per dispatch or merge and changes nothing else.
 The dispatch move applies to ship work only.
 A scout has no pull request and so no completed transition to pair with a started one, and moving its card at dispatch alone would leave it In Progress after the scout finished; a scout promoted to a ship therefore has its card move straight to the completed status when its pull request merges.
+A grouped job whose recorded PR plan is more than one pull request moves, at each merge, only the cards whose identifiers that pull request's title names, and lists the rest as left unmoved; a plan of one, or none, moves every card the job delivers.
 A card already at or past the phase being applied is left exactly where it is, so a status the captain set by hand survives.
 The completed target is the team's first completed status in its own workflow order, and the chosen status is always named in the output, so a team ordered unusually is visible on its first move.
 A network, API, or configuration failure is reported as an `actionable:` line and never changes whether the worker started or the pull request landed.
