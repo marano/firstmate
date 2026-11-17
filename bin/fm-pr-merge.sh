@@ -487,6 +487,10 @@ FM_PR_GITHUB_HEAD_REF=
 FM_PR_GITHUB_CROSS_REPO=
 FM_PR_GITLAB_SOURCE_BRANCH=
 FM_PR_GITLAB_FORK=
+# The PR/MR title from that same live view, empty when it could not be read. It
+# scopes the post-merge Linear board move for a job that ships several pull
+# requests (bin/fm-linear-lib.sh), so it never gates the merge itself.
+FM_PR_MERGE_TITLE=
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
@@ -591,6 +595,7 @@ FIELDS
   printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
+  FM_PR_MERGE_TITLE=$(printf '%s' "$json" | jq -r '.title // "" | tostring' 2>/dev/null) || FM_PR_MERGE_TITLE=
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
   FM_PR_GITLAB_SOURCE_BRANCH=$source_branch
   if [ -n "$source_project" ] && [ -n "$target_project" ] && [ "$source_project" = "$target_project" ]; then
@@ -686,7 +691,7 @@ github_verify_mergeable() {
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
   local head_ref='' cross_repo=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,isCrossRepository,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,isCrossRepository,statusCheckRollup,title 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -781,6 +786,7 @@ EOF
   printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
+  FM_PR_MERGE_TITLE=$(printf '%s' "$json" | jq -r '.title // "" | tostring' 2>/dev/null) || FM_PR_MERGE_TITLE=
   FM_PR_GITHUB_BASE=$base
   FM_PR_GITHUB_HEAD_REF=$head_ref
   FM_PR_GITHUB_CROSS_REPO=$cross_repo
@@ -1694,7 +1700,10 @@ esac
 
 # Same reached-only-after-proof point again: this work has landed, so its Linear
 # card belongs at the team's completed status. A grouped job's members land with
-# their unit's pull request, so their cards move with it. Like the branch
+# their unit's pull request, so their cards move with it - all of them when the
+# job ships one pull request, and only those this pull request's title names
+# when its pr_plan= commits it to several (bin/fm-linear-lib.sh owns that
+# scoping; the GitHub issue mirror below is not scoped). Like the branch
 # deletion above, nothing here changes this script's exit status - the merge is
 # durable whether or not the board could be updated - and a home with no Linear
 # key is silent (bin/fm-linear-lib.sh).
@@ -1702,7 +1711,8 @@ esac
 # An unreadable membership leaves the array empty, so the unit's own card still
 # moves rather than the whole board move being skipped.
 fm_backlog_members_of_meta "$STATE/$ID.meta" "$ID" || FM_BACKLOG_TRANSITION_MEMBERS=()
-fm_linear_board_advance "$FM_HOME" "$DATA" merge "$ID" \
+MERGE_PR_PLAN=$(grep '^pr_plan=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+fm_linear_board_advance_merge "$FM_HOME" "$DATA" "$MERGE_PR_PLAN" "$FM_PR_MERGE_TITLE" "$ID" \
   ${FM_BACKLOG_TRANSITION_MEMBERS[@]+"${FM_BACKLOG_TRANSITION_MEMBERS[@]}"}
 # A published item's GitHub issue is closed here, by firstmate, under the same
 # rule: the pull request only refers to it, so this is its one closer

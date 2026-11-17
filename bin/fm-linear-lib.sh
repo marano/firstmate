@@ -50,6 +50,17 @@
 #   fm_linear_api_key <home>                - the resolved key, in FM_LINEAR_KEY
 #   fm_linear_request <home> <query> <vars> - one bounded GraphQL call
 #   fm_linear_board_advance <home> <data> <phase> <id>... - the entry point
+#   fm_linear_board_advance_merge <home> <data> <pr-plan> <pr-title> <id>...
+#                                           - the merge entry point, scoped to
+#                                             the cards one pull request ships
+#   fm_linear_title_names_card <title> <card> - does a title name that card
+#
+# ONE PULL REQUEST OF SEVERAL. A grouped job whose task record carries
+# pr_plan=<n> greater than 1 ships its cards across n pull requests, each titled
+# with the card identifiers it delivers. At each merge only the items whose card
+# that pull request's title names are moved; every other card stays where it is
+# and one `linear:` line names them, because the rest of the job has not landed.
+# A plan of 1, or none, moves every named item as before.
 #
 # THE INJECTABLE SEAM. fm_linear_request posts to FM_LINEAR_API_URL with curl,
 # unless FM_LINEAR_CMD names a command; that command is then run with the
@@ -408,6 +419,35 @@ _fm_linear_move_card() {  # <home> <phase> <task-id> <card>
   printf 'linear: %s moved to %s\n' "$card" "$target_name"
 }
 
+# Does <title> name <card> as a whole identifier? Matching is case-sensitive,
+# in the identifier's own form, and an occurrence counts only when no letter or
+# digit touches it on either side, so BLU-4336 is not named by BLU-43361 nor by
+# XBLU-4336.
+fm_linear_title_names_card() {  # <title> <card>
+  local rest=${1-} card=${2-} before prev=''
+  local LC_ALL=C
+  fm_linear_identifier_valid "$card" || return 1
+  while :; do
+    case "$rest" in
+      *"$card"*) ;;
+      *) return 1 ;;
+    esac
+    before=${rest%%"$card"*}
+    [ -z "$before" ] || prev=${before: -1}
+    rest=${rest#*"$card"}
+    case "$prev" in
+      [A-Za-z0-9]) ;;
+      *)
+        case "${rest:0:1}" in
+          [A-Za-z0-9]) ;;
+          *) return 0 ;;
+        esac
+        ;;
+    esac
+    prev=${card: -1}
+  done
+}
+
 # THE ENTRY POINT. Advance every named item's card for <phase> (`start` at
 # dispatch, `merge` after a merge is proven). ALWAYS returns 0: a caller adds
 # this line without guarding it, because the board is never worth failing a
@@ -422,17 +462,35 @@ _fm_linear_move_card() {  # <home> <phase> <task-id> <card>
 fm_linear_board_advance() {  # <home> <data-dir> <phase> <task-id>...
   local errexit=0
   case $- in *e*) errexit=1; set +e ;; esac
-  _fm_linear_advance_each "$@"
+  _fm_linear_advance_each "${1-}" "${2-}" "${3-}" 0 '' "${@:4}"
   [ "$errexit" -eq 0 ] || set -e
   return 0
 }
 
-# The body of the entry point above, kept separate so it can return early
-# wherever it needs to while the errexit restore stays on one path.
-_fm_linear_advance_each() {  # <home> <data-dir> <phase> <task-id>...
-  local home=$1 data=$2 phase=$3
-  local task status
-  shift 3
+# The merge entry point, under the same always-0 and errexit contract as the
+# one above. <pr-plan> is the task record's pr_plan= value, empty when it has
+# none; <pr-title> is the merged pull request's title. A plan greater than 1
+# scopes the move to the items whose card that title names (ONE PULL REQUEST OF
+# SEVERAL above); any other plan value moves every named item.
+fm_linear_board_advance_merge() {  # <home> <data-dir> <pr-plan> <pr-title> <task-id>...
+  local errexit=0 scoped=0
+  case $- in *e*) errexit=1; set +e ;; esac
+  case "${3-}" in
+    '' | *[!0-9]* | 0*) ;;
+    *) [ "${#3}" -gt 6 ] || [ "$3" -le 1 ] || scoped=$3 ;;
+  esac
+  _fm_linear_advance_each "${1-}" "${2-}" merge "$scoped" "${4-}" "${@:5}"
+  [ "$errexit" -eq 0 ] || set -e
+  return 0
+}
+
+# The body of both entry points, kept separate so it can return early wherever
+# it needs to while the errexit restore stays on one path. <scoped> is 0, or the
+# pull-request count that limits this move to the cards <title> names.
+_fm_linear_advance_each() {  # <home> <data-dir> <phase> <scoped> <title> <task-id>...
+  local home=$1 data=$2 phase=$3 scoped=$4 title=$5
+  local task status unmoved=''
+  shift 5
   [ "$#" -gt 0 ] || return 0
   _fm_linear_phase_target_type "$phase" >/dev/null || return 0
   fm_linear_api_key "$home" || return 0
@@ -448,6 +506,18 @@ _fm_linear_advance_each() {  # <home> <data-dir> <phase> <task-id>...
       printf 'linear: %s has no Linear card, so the board was left alone\n' "$task"
       continue
     fi
+    if [ "$scoped" -ne 0 ] && ! fm_linear_title_names_card "$title" "$FM_LINEAR_CARD"; then
+      unmoved="${unmoved:+$unmoved, }$FM_LINEAR_CARD"
+      continue
+    fi
     _fm_linear_move_card "$home" "$phase" "$task" "$FM_LINEAR_CARD"
   done
+  [ -n "$unmoved" ] || return 0
+  if [ -n "$title" ]; then
+    printf "linear: %s left unmoved: this job ships %s pull requests and this one's title does not name them\n" \
+      "$unmoved" "$scoped"
+  else
+    printf "linear: %s left unmoved: this job ships %s pull requests and this one's title could not be read\n" \
+      "$unmoved" "$scoped"
+  fi
 }
