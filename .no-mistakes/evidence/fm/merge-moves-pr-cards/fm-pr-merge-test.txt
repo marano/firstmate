@@ -1,0 +1,42 @@
+ok - fm-pr-merge reports a branch the forge deleted first as gone, not as a failure
+ok - fm-pr-merge does not read a transient gone-check failure as the branch being gone
+ok - fm-pr-merge sweeps a recorded branch on the next merge for that repository
+ok - the branch sweep never deletes a recorded branch whose pull request is not merged
+ok - fm-pr-merge never deletes a protected branch
+ok - fm-pr-merge never deletes a branch that is the base of another open pull request
+ok - fm-pr-merge never deletes a pull request's fork branch
+ok - fm-pr-merge deletes the source branch after a confirmed GitLab merge
+ok - fm-pr-merge does not read a transient gone-check failure as the GitLab branch being gone
+ok - fm-pr-merge never deletes a GitLab branch behind an unconfirmed merge
+ok - fm-pr-merge merges a no-mistakes PR whose exact head a passing run validated
+ok - fm-pr-merge refuses a green PR when no validation run exists for its head
+ok - fm-pr-merge refuses a PR whose passing run validated an older head
+ok - fm-pr-merge accepts a run whose lint and document steps were skipped
+ok - fm-pr-merge refuses a run that skipped a validation step or belongs to another PR
+ok - fm-pr-merge finds the validating run from the task's local copy when none is recorded
+ok - fm-pr-merge reads a run=<id> token beside the PR regardless of trailing text
+ok - fm-pr-merge reads a run=<id> token in the unbound tier regardless of trailing text
+ok - fm-pr-merge reads the local copy's other-branch status listing correctly, proving nothing from it
+ok - fm-pr-check refreshes the validation receipt when a same-URL re-registration reports a newer run
+ok - fm-pr-merge merges an earlier PR from a receipt once the pipeline stops answering for its run
+ok - fm-pr-merge reaches a PR's own run past a stale pointer and a wandering local copy
+ok - fm-pr-merge never lets a durable receipt outrank or outlive the record
+ok - fm-pr-merge treats anything but an exact validation receipt as no evidence
+ok - fm-pr-merge waives validation only on an explicit attended --unvalidated
+ok - fm-pr-merge merges a direct-PR PR only on an explicit captain instruction
+ok - fm-pr-merge holds a task with no recorded or an unknown mode to the validation proof
+ok - fm-pr-merge holds GitLab merge requests to the same validation proof
+ok - a stuck mock turns a merge case red instead of hanging the suite
+ok - a proven merge moves its card to the team's completed status, never to Verified
+ok - a merge leaves a card the captain already completed or verified exactly where it is
+ok - a Linear failure never fails a landed merge and is reported, not swallowed
+ok - a refused merge leaves its card exactly where the dispatch put it
+ok - one of several planned pull requests moves only the cards its title names
+ok - a job planned as one pull request, or with no plan, moves every card it delivers
+ok - a longer identifier in the title never names a shorter card
+ok - a proven merge closes its item's GitHub issue
+ok - a GitHub issue failure never fails a landed merge and is reported, not swallowed
+ok - fm-pr-merge refuses a leaking PR and merges past it only on a recorded attended --allow-leak
+ok - fm-pr-merge refuses a leaking GitLab merge request
+
+[exited with code 0]
