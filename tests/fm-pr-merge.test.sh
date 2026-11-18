@@ -2827,6 +2827,37 @@ test_run_id_with_trailing_text_in_the_unbound_tier_still_proves_the_head() {
   pass "fm-pr-merge reads a run=<id> token in the unbound tier regardless of trailing text"
 }
 
+# REGRESSION (sixth pull request of a lane): the ready line carried a CI
+# provider's run id instead of the pipeline's own, and six other pull requests'
+# run ids sat in the log, so the candidate cap was spent before the local copy's
+# current run - the one that validated this head - was ever read.
+# Red by name on this mutant: bin/fm-validation-receipt-lib.sh lists the
+# unbound status-log ids before the local copy's run in
+# fm_validation_run_candidates.
+test_local_copy_run_is_read_before_other_pull_requests_run_ids() {
+  local case_dir head=6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c i
+  local url=https://github.com/example/repo/pull/160
+  case_dir=$(make_case local-copy-before-unbound)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/state/task-x1.status"
+  for i in 1 2 3 4 5 6 7; do
+    printf 'done: PR https://github.com/example/repo/pull/16%s checks green run=01TESTEARLIER%s\n' \
+      "$i" "$i" >> "$case_dir/state/task-x1.status"
+  done
+  printf 'done: PR %s checks green run=25813440912\n' "$url" >> "$case_dir/state/task-x1.status"
+  printf '01TESTCURRENTRUN\n' > "$case_dir/nm-local-run"
+  write_nm_run "$case_dir" 01TESTCURRENTRUN fm/example-branch "$head" "$url"
+  : > "$case_dir/nm-default-absent"
+  run_validation_case "$case_dir" 160
+  expect_code 0 "$(cat "$case_dir/rc")" \
+    "local-copy-before-unbound: the local copy's run must be read within the candidate cap"
+  assert_grep "verified: no-mistakes run 01TESTCURRENTRUN validated head $head of $url" \
+    "$case_dir/stderr" "local-copy-before-unbound: the local copy's run was not named as proof"
+  assert_logged_gh_merge "$case_dir" 160 example/repo --squash
+  pass "fm-pr-merge reads the local copy's run before other pull requests' run ids"
+}
+
 # REGRESSION check: a lane parked on a different branch has its own current
 # run listed under the real CLI's "no run on this branch" shape (a
 # current_branch/runs_on_current_branch/count/runs[]/help[] table, no
@@ -4914,6 +4945,7 @@ test_run_that_skipped_a_step_or_names_another_pr_is_refused
 test_local_copy_run_proves_the_head_without_a_recorded_id
 test_run_id_with_trailing_text_on_the_ready_line_still_proves_the_head
 test_run_id_with_trailing_text_in_the_unbound_tier_still_proves_the_head
+test_local_copy_run_is_read_before_other_pull_requests_run_ids
 test_local_copy_other_branch_status_is_not_misattributed
 test_same_url_reregistration_refreshes_the_receipt_to_a_newer_run
 test_earlier_pr_still_merges_after_later_runs_evict_its_record

@@ -23,11 +23,15 @@
 # `done: PR <url> checks green run=<id>` already carries the pull request and
 # its run id on ONE line, and fm_validation_run_candidates below keeps that
 # binding instead of discarding it. Its order is the durable receipt's own id
-# first, then the ids reported beside THIS pull request, then every other id in
-# the log, then the local copy. The receipt leads because it is firstmate's own
-# binding for exactly this pull request AND because the merge gate's fallback
-# to it is conditional on having read its record, so that read must never be
-# the one the cap discards. The number of candidates read is capped
+# first, then the ids reported beside THIS pull request, then the local copy,
+# then every other id in the log. The unbound ids belong to other pull requests
+# of the same lane and are the least likely to prove this head, so they must
+# never crowd the local copy's current run out of the cap: on a lane that has
+# shipped several pull requests they would fill it, and the run that validated
+# the pull request being merged would never be read. The receipt leads because
+# it is firstmate's own binding for exactly this pull request AND because the
+# merge gate's fallback to it is conditional on having read its record, so that
+# read must never be the one the cap discards. The number of candidates read is capped
 # (_FM_VALIDATION_CANDIDATE_CAP) so a long log cannot turn one merge into an
 # unbounded number of bounded pipeline reads.
 # A status line is prose, so the ready line's `run=<id>` token routinely sits
@@ -259,8 +263,9 @@ _fm_validation_field_url() {  # <field> <canonical-url>
 # every other id. The header above owns why that tiering is the fix. Optional
 # $3 "bound-only" prints only the first tier, so a same-URL re-registration
 # can ask what the log reports beside THIS pull request without paying for a
-# scan of every other id in the log.
-_fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only]
+# scan of every other id in the log; "unbound-only" prints only the second
+# tier, which the candidate list reads after the local copy's run.
+_fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only|unbound-only]
   local log=$1 url=$2 bound_only=${3:-} line field id names_pr ids i
   local bound='' other=''
   local -a lines=() fields=()
@@ -294,9 +299,10 @@ _fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only]
     fi
   done
   for id in $bound; do
+    [ "$bound_only" != unbound-only ] || break
     printf '%s\n' "$id"
   done
-  [ -z "$bound_only" ] || return 0
+  [ "$bound_only" != bound-only ] || return 0
   for id in $other; do
     printf '%s\n' "$id"
   done
@@ -311,9 +317,9 @@ fm_validation_status_freshest_bound_run() {  # <status-log> <canonical-url>
 }
 
 # The run no-mistakes reports for the task's recorded local copy, or nothing.
-# Last of the candidate tiers: it answers for whichever branch that copy
-# currently sits on, which is the lane's present rather than this pull
-# request's past.
+# Read after the ids bound to this pull request and before the unbound ones: it
+# answers for whichever branch that copy currently sits on, which is the lane's
+# present rather than this pull request's past.
 _fm_validation_local_copy_run_id() {  # <meta> <timeout>
   local meta=$1 timeout=$2 wt out id
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -336,8 +342,9 @@ fm_validation_run_candidates() {  # <state> <task-id> <meta> <canonical-url> <pr
     if fm_validation_receipt_read "$state" "$id" "$provider" "$host" "$path" "$number"; then
       printf '%s\n' "$FM_VALIDATION_RECEIPT_RUN"
     fi
-    _fm_validation_status_run_ids "$state/$id.status" "$url"
+    _fm_validation_status_run_ids "$state/$id.status" "$url" bound-only
     _fm_validation_local_copy_run_id "$meta" "$timeout"
+    _fm_validation_status_run_ids "$state/$id.status" "$url" unbound-only
   } | while IFS= read -r run || [ -n "$run" ]; do
     fm_validation_run_id_valid "$run" || continue
     case " $seen " in *" $run "*) continue ;; esac
