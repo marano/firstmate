@@ -565,7 +565,8 @@ After /no-mistakes reports CI green (the CI-ready return point - do not wait for
 A draft cannot be merged, so a done report on one leaves the merge unasked and merge monitoring refuses to arm.
 Then append \`done: PR {url} checks green run={run-id}\` and stop. You are finished.
 If you deliberately keep the PR a draft, append \`paused: {why the draft is held}\` instead of done.
-\`{run-id}\` is the concrete no-mistakes run you drove to that green result, exactly as \`axi run\`/\`axi respond\` printed it - paste that id, never a description of the command you ran. "Applied via axi respond" is a report about a command, not evidence about the commit: a \`done:\` line with no run id is not a complete report, so do not send one.
+\`{run-id}\` is the concrete no-mistakes run you drove to that green result, exactly as \`axi run\`/\`axi respond\` printed it - paste that id, never a description of the command you ran.
+It is the no-mistakes run id, the \`id\` that \`no-mistakes axi status\` prints, never a CI provider's run id. "Applied via axi respond" is a report about a command, not evidence about the commit: a \`done:\` line with no run id is not a complete report, so do not send one.
 EOF
       ;;
     *)

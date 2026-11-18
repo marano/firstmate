@@ -23,8 +23,12 @@
 # `done: PR <url> checks green run=<id>` already carries the pull request and
 # its run id on ONE line, and fm_validation_run_candidates below keeps that
 # binding instead of discarding it. Its order is the durable receipt's own id
-# first, then the ids reported beside THIS pull request, then every other id in
-# the log, then the local copy. The receipt leads because it is firstmate's own
+# first, then the ids reported beside THIS pull request, then the local copy,
+# then every other id in the log. The unbound ids belong to other pull requests
+# of the same lane and are the least likely to prove this head, so they must
+# never crowd the local copy's current run out of the cap: on a lane that has
+# shipped several pull requests they would fill it, and the run that validated
+# the pull request being merged would never be read. The receipt leads because it is firstmate's own
 # binding for exactly this pull request AND because the merge gate's fallback
 # to it is conditional on having read its record, so that read must never be
 # the one the cap discards. The number of candidates read is capped
@@ -257,7 +261,7 @@ _fm_validation_field_url() {  # <field> <canonical-url>
 # Run ids the task's status log names, newest first, in two tiers printed one
 # per line: ids reported on a line that also names this pull request, then
 # every other id. The header above owns why that tiering is the fix. Optional
-# $3 "bound-only" prints only the first tier, so a same-URL re-registration
+# $3 "unbound-only" prints only the second tier. Optional $3 "bound-only" prints only the first tier, so a same-URL re-registration
 # can ask what the log reports beside THIS pull request without paying for a
 # scan of every other id in the log.
 _fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only]
@@ -294,9 +298,10 @@ _fm_validation_status_run_ids() {  # <status-log> <canonical-url> [bound-only]
     fi
   done
   for id in $bound; do
+    [ "$bound_only" != unbound-only ] || break
     printf '%s\n' "$id"
   done
-  [ -z "$bound_only" ] || return 0
+  [ "$bound_only" != bound-only ] || return 0
   for id in $other; do
     printf '%s\n' "$id"
   done
@@ -311,7 +316,7 @@ fm_validation_status_freshest_bound_run() {  # <status-log> <canonical-url>
 }
 
 # The run no-mistakes reports for the task's recorded local copy, or nothing.
-# Last of the candidate tiers: it answers for whichever branch that copy
+# Read after the ids bound to this pull request and before the unbound ones: it answers for whichever branch that copy
 # currently sits on, which is the lane's present rather than this pull
 # request's past.
 _fm_validation_local_copy_run_id() {  # <meta> <timeout>
@@ -336,8 +341,9 @@ fm_validation_run_candidates() {  # <state> <task-id> <meta> <canonical-url> <pr
     if fm_validation_receipt_read "$state" "$id" "$provider" "$host" "$path" "$number"; then
       printf '%s\n' "$FM_VALIDATION_RECEIPT_RUN"
     fi
-    _fm_validation_status_run_ids "$state/$id.status" "$url"
+    _fm_validation_status_run_ids "$state/$id.status" "$url" bound-only
     _fm_validation_local_copy_run_id "$meta" "$timeout"
+    _fm_validation_status_run_ids "$state/$id.status" "$url" unbound-only
   } | while IFS= read -r run || [ -n "$run" ]; do
     fm_validation_run_id_valid "$run" || continue
     case " $seen " in *" $run "*) continue ;; esac
