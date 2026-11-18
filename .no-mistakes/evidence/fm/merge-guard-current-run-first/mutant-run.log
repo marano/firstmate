@@ -1,0 +1,3 @@
+ok - fm-pr-merge finds the validating run from the task's local copy when none is recorded
+ok - fm-pr-merge reads a run=<id> token in the unbound tier regardless of trailing text
+not ok - local-copy-before-unbound: the local copy's run must be read within the candidate cap: expected exit 0, got 1

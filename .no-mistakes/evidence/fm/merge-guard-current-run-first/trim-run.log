@@ -1,0 +1,4 @@
+ok - fm-pr-merge finds the validating run from the task's local copy when none is recorded
+ok - fm-pr-merge reads a run=<id> token in the unbound tier regardless of trailing text
+ok - fm-pr-merge reads the local copy's run before other pull requests' run ids
+rc=0
